@@ -1,0 +1,20 @@
+# Python artifacts
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual environments
+.venv/
+
+# Build outputs
+build/
+dist/
+*.spec.cache/
+
+# PyInstaller
+*.manifest
+*.log
+
+# Tooling
+.pytest_cache/
+.ruff_cache/

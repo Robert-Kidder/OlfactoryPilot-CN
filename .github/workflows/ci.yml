@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    env:
+      QT_QPA_PLATFORM: offscreen
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+        shell: pwsh
+
+      - name: Lint, test, and build
+        run: pwsh -File scripts/run-ci.ps1 ci
+
+      - name: Artifact summary
+        if: success()
+        run: |
+          Get-ChildItem -Path dist -Recurse -File |
+            Select-Object FullName, Length |
+            Sort-Object Length -Descending |
+            Select-Object -First 10
+          $exe = Get-ChildItem -Path dist -Recurse -Filter *.exe | Select-Object -First 1
+          if ($exe) { Get-FileHash $exe.FullName -Algorithm SHA256 }
+        shell: pwsh
+
+      - name: Upload dist
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: olfactorypilot-dist
+          path: dist/**/*

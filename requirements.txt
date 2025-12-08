@@ -1,0 +1,4 @@
+PySide6==6.7.2
+pyqtgraph==0.13.7
+nidaqmx==0.9.0
+pyserial==3.5

@@ -1,0 +1,72 @@
+# generated: 2025-12-08
+# project: OlfactoryPilot
+# project_key: OPLT
+# tracking_system: file-system
+# story_location: {project-root}/docs/sprint-artifacts
+
+# STATUS DEFINITIONS:
+# ==================
+# Epic Status:
+#   - backlog: Epic not yet started
+#   - in-progress: Epic actively being worked on
+#   - done: All stories in epic completed
+#
+# Epic Status Transitions:
+#   - backlog -> in-progress: Automatically when first story is created (via create-story)
+#   - in-progress -> done: Manually when all stories reach 'done' status
+#
+# Story Status:
+#   - backlog: Story only exists in epic file
+#   - drafted: Story file created in stories folder
+#   - ready-for-dev: Draft approved and story context created
+#   - in-progress: Developer actively working on implementation
+#   - review: Ready for code review (via Dev's code-review workflow)
+#   - done: Story completed
+#
+# Retrospective Status:
+#   - optional: Can be completed but not required
+#   - completed: Retrospective has been done
+#
+# WORKFLOW NOTES:
+# ===============
+# - Epic transitions to 'in-progress' automatically when first story is created
+# - Stories can be worked in parallel if team capacity allows
+# - SM typically drafts next story after previous one is 'done' to incorporate learnings
+# - Dev moves story to 'review', then runs code-review (fresh context, ideally different LLM)
+
+generated: 2025-12-08
+project: OlfactoryPilot
+project_key: OPLT
+tracking_system: file-system
+story_location: {project-root}/docs/sprint-artifacts
+
+development_status:
+  epic-1: in-progress
+  1-0-project-scaffold-and-ci-baseline: review
+  1-1-device-self-check-and-status-report: review
+  1-2-safe-start-airflow-interlock: backlog
+  1-3-global-safety-toolbar: backlog
+  1-4-safe-shutdown-and-valve-reset: backlog
+  epic-1-retrospective: optional
+
+  epic-2: backlog
+  2-1-real-time-breath-visualization: backlog
+  2-2-threshold-tuning-and-feedback: backlog
+  2-3-valve-matrix-manual-control: backlog
+  2-4-flow-rate-controls: backlog
+  2-5-variant-aware-pre-test-ui: backlog
+  epic-2-retrospective: optional
+
+  epic-3: backlog
+  3-1-protocol-file-parsing-txt-csv: backlog
+  3-2-breath-gated-stimulation: backlog
+  3-3-manual-vs-ttl-trigger-modes: backlog
+  3-4-low-jitter-actuation-20ms: backlog
+  3-5-session-file-naming-and-logging: backlog
+  epic-3-retrospective: optional
+
+  epic-4: backlog
+  4-1-cleaning-automation: backlog
+  4-2-configurable-com-and-ni-ids: backlog
+  4-3-chinese-ui-localization: backlog
+  epic-4-retrospective: optional

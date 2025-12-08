@@ -1,0 +1,11 @@
+{
+  "language": "zh-CN",
+  "window_title": "OlfactoryPilot 控制台",
+  "log_level": "INFO",
+  "telemetry_hz": 5,
+  "low_flow_threshold": 0.2,
+  "safety_state": "SAFE",
+  "serial_port": "COM3",
+  "baud_rate": 115200,
+  "ni_devices": ["USB-6001", "USB-6501"]
+}
