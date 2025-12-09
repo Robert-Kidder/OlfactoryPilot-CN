@@ -1,0 +1,16 @@
+{
+  "ts": 1765248879.3549836,
+  "timestamp": 1765248879.3549836,
+  "source": "stop",
+  "reason": "user_stop",
+  "state": "SAFE",
+  "airflow": 1.0,
+  "threshold": 0.2,
+  "valves_closed": true,
+  "heaters_off": true,
+  "retries": 0,
+  "result": "success",
+  "error": "",
+  "guard_allowed": true,
+  "guard_reason": "允许执行"
+}

@@ -11,7 +11,7 @@ from PySide6.QtWidgets import QApplication
 
 from app.controllers import MainController
 from app.models import AppState
-from app.services import HardwareCheckService, SafetyManager
+from app.services import HardwareCheckService, SafetyManager, ShutdownService
 from app.views import MainWindow
 from app.workers import HardwareWorker
 
@@ -26,6 +26,12 @@ def load_config(config_path: Path) -> dict:
         return json.load(handle)
 
 
+def save_config(config_path: Path, data: dict) -> None:
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    with config_path.open("w", encoding="utf-8") as handle:
+        json.dump(data, handle, ensure_ascii=False, indent=2)
+
+
 def configure_logging(log_level: str) -> None:
     level = getattr(logging, log_level.upper(), logging.INFO)
     logging.basicConfig(
@@ -37,19 +43,57 @@ def configure_logging(log_level: str) -> None:
 def build_application(
     config_path: Path, start_worker: bool = True
 ) -> tuple[QApplication, MainWindow]:
+    config_path = Path(config_path)
     config = load_config(config_path)
+
+    # When running from a PyInstaller bundle, keep a user-writable copy of the config
+    # to persist threshold updates instead of touching the read-only bundled file.
+    user_config_path: Path | None = None
+    if getattr(sys, "_MEIPASS", None) and config_path == DEFAULT_CONFIG:
+        user_config_path = Path.home() / ".olfactorypilot" / config_path.name
+        user_config_path.parent.mkdir(parents=True, exist_ok=True)
+        if not user_config_path.exists():
+            save_config(user_config_path, config)
+        else:
+            try:
+                config = load_config(user_config_path)
+            except Exception:
+                config = load_config(config_path)
+
     configure_logging(config.get("log_level", "INFO"))
+    config["_config_path"] = config_path
+    if user_config_path:
+        config["_user_config_path"] = user_config_path
     state = AppState.from_config(config)
+    if "shutdown_record_path" not in config:
+        config["shutdown_record_path"] = str(Path.cwd() / "logs" / "last_shutdown_event.json")
+    record_path = config.get("shutdown_record_path")
+    shutdown_record_path = None
+    if record_path:
+        shutdown_record_path = Path(record_path)
+        if not shutdown_record_path.is_absolute():
+            anchor = user_config_path or config_path
+            base = Path(anchor).parent
+            if base.name == "config":
+                base = base.parent
+            shutdown_record_path = base / shutdown_record_path
+    last_shutdown = ShutdownService.load_last_event(shutdown_record_path)
+    if last_shutdown:
+        state.last_shutdown_event = last_shutdown
+        state.hardware_ready = False
+        state.telemetry.connected = False
+
     safety = SafetyManager(config.get("low_flow_threshold", 0.2))
     check_service = HardwareCheckService.from_config(config)
 
-    os.environ.setdefault("QT_QPA_PLATFORM", "windows")
+    if os.name == "nt" and not os.environ.get("QT_QPA_PLATFORM"):
+        os.environ.setdefault("QT_QPA_PLATFORM", "windows")
     qt_app = QApplication.instance() or QApplication(sys.argv)
     worker = HardwareWorker(
         telemetry_hz=int(config.get("telemetry_hz", 5)),
         check_service=check_service,
     )
-    controller = MainController(state, worker, safety_manager=safety)
+    controller = MainController(state, worker, safety_manager=safety, config=config)
     window = MainWindow(controller, state)
     controller.bind_view(window)
 

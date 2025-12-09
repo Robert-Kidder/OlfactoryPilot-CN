@@ -1,4 +1,5 @@
 PySide6==6.7.2
 pyqtgraph==0.13.7
+numpy>=2.0,<3
 nidaqmx==0.9.0
 pyserial==3.5

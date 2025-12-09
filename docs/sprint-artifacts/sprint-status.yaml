@@ -44,14 +44,14 @@ development_status:
   epic-1: in-progress
   1-0-project-scaffold-and-ci-baseline: review
   1-1-device-self-check-and-status-report: review
-  1-2-safe-start-airflow-interlock: backlog
-  1-3-global-safety-toolbar: backlog
-  1-4-safe-shutdown-and-valve-reset: backlog
-  epic-1-retrospective: optional
+  1-2-safe-start-airflow-interlock: review
+  1-3-global-safety-toolbar: review
+  1-4-safe-shutdown-and-valve-reset: review
+  epic-1-retrospective: completed
 
-  epic-2: backlog
-  2-1-real-time-breath-visualization: backlog
-  2-2-threshold-tuning-and-feedback: backlog
+  epic-2: in-progress
+  2-1-real-time-breath-visualization: done
+  2-2-threshold-tuning-and-feedback: review
   2-3-valve-matrix-manual-control: backlog
   2-4-flow-rate-controls: backlog
   2-5-variant-aware-pre-test-ui: backlog

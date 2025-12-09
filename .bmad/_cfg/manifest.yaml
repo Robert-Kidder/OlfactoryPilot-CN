@@ -1,9 +1,11 @@
 installation:
-  version: 6.0.0-alpha.14
-  installDate: '2025-12-07T13:52:00.238Z'
-  lastUpdated: '2025-12-07T13:52:00.238Z'
+  version: 6.0.0-alpha.15
+  installDate: '2025-12-09T06:40:45.643Z'
+  lastUpdated: '2025-12-09T06:40:45.643Z'
 modules:
   - core
   - bmm
+customModules: []
 ides:
   - codex
+  - gemini

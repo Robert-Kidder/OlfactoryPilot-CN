@@ -2,16 +2,34 @@
 
 from pathlib import Path
 
+from PyInstaller.utils.hooks import collect_submodules
+
 spec_path = Path(globals().get("__file__", "pyinstaller.spec")).resolve()
 project_root = spec_path.parent
 config_file = project_root / "config" / "default_config.json"
+docs_dir = project_root / "docs"
 
 # Limit PySide6 surface to shrink bundle and avoid unnecessary WinRT modules.
 hidden_imports = [
     "PySide6.QtCore",
     "PySide6.QtGui",
     "PySide6.QtWidgets",
+    # Hardware dependencies loaded dynamically; keep them bundled.
+    "serial",
+    "serial.tools.list_ports",
+    "nidaqmx",
+    "nidaqmx.system",
+    # pkg_resources runtime hook pulls in setuptools deps under the jaraco namespace.
+    "jaraco",
+    "jaraco.text",
+    "jaraco.functools",
+    "jaraco.context",
+    "jaraco.collections",
 ]
+
+# Collect the full jaraco and pkg_resources trees for compatibility with recent setuptools.
+hidden_imports.extend(collect_submodules("jaraco"))
+hidden_imports.extend(collect_submodules("pkg_resources"))
 excluded_modules = [
     "PySide6.Qt3DAnimation",
     "PySide6.Qt3DCore",
@@ -50,7 +68,7 @@ a = Analysis(
     ["app/main.py"],
     pathex=[str(project_root)],
     binaries=[],
-    datas=[(str(config_file), "config")],
+    datas=[(str(config_file), "config"), (str(docs_dir), "docs")],
     hiddenimports=hidden_imports,
     hookspath=[],
     hooksconfig={},
