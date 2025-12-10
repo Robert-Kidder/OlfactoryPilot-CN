@@ -51,7 +51,9 @@ development_status:
 
   epic-2: in-progress
   2-1-real-time-breath-visualization: done
-  2-2-threshold-tuning-and-feedback: review
+  2-2-threshold-tuning-and-feedback: done
+  2-6-automatic-breath-calibration-session: review
+  2-7-calibration-ui-optimization: done
   2-3-valve-matrix-manual-control: backlog
   2-4-flow-rate-controls: backlog
   2-5-variant-aware-pre-test-ui: backlog

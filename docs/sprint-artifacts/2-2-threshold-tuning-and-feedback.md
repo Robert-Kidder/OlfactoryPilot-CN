@@ -1,5 +1,5 @@
 # 故事 2.2: Threshold Tuning and Feedback
-Status: ready-for-dev
+Status: done
 Epic: 2 - Calibration & Manual Control
 Story Key: 2-2-threshold-tuning-and-feedback
 Story ID: 2.2
@@ -112,6 +112,8 @@ Story ID: 2.2
 - Ensured threshold updates are persisted to config via `MainController` (AC3).
 - Added `tests/test_gating_service.py` for permanent regression testing.
 - Verified that safety state (LOW_FLOW/DATA_STALE) correctly blocks gating output (AC4).
+- **Code Review Fix**: Added `tests/test_integration_gating.py` to ensure `MainController` wiring is permanently tested.
+- **Code Review Fix**: Added `config/default_config.json` to File List.
 
 ## File List
 - app/services/gating_service.py
@@ -120,6 +122,8 @@ Story ID: 2.2
 - app/controllers/main_controller.py
 - app/views/calibration_view.py
 - app/views/main_window.py
+- config/default_config.json
 - tests/test_gating_service.py
+- tests/test_integration_gating.py
 
 

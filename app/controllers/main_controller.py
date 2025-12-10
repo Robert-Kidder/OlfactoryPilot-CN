@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 from PySide6.QtCore import QObject, Slot
 
 from app.models import AppState, SafetyState
-from app.services import GatingService, ShutdownService
+from app.services import GatingService, ShutdownService, CalibrationSession
 from app.workers import HardwareWorker
 
 if TYPE_CHECKING:
@@ -48,6 +48,7 @@ class MainController(QObject):
             inhale_threshold=state.inhale_threshold,
             exhale_threshold=state.exhale_threshold,
         )
+        self.calibration_session = CalibrationSession() # Story 2.6
         self._last_safety_state: SafetyState | None = None
         self._has_seen_connection = False
         self._connect_in_progress = False
@@ -70,6 +71,7 @@ class MainController(QObject):
         if hasattr(self.view, "calibration_view"):
             self.view.calibration_view.breath_metrics.connect(self.handle_breath_metrics)
             self.view.calibration_view.threshold_changed.connect(self.update_breath_threshold)
+            self.view.calibration_view.calibration_requested.connect(self.handle_calibration_request)
 
     def start_worker(self) -> None:
         if not self.worker.isRunning():
@@ -84,6 +86,20 @@ class MainController(QObject):
             force=True,
         )
         self._handle_shutdown_event(event, success_message="已安全关闭")
+
+    @Slot(bool, int)
+    def handle_calibration_request(self, active: bool, duration: int) -> None:
+        if active:
+            # Start
+            self.calibration_session.duration_sec = float(duration)
+            self.calibration_session.start()
+            LOG.info("Calibration started, duration=%ds", duration)
+        else:
+            # Stop / Interrupt
+            self.calibration_session.stop()
+            LOG.info("Calibration interrupted by user")
+            if self.view and hasattr(self.view, "calibration_view"):
+                self.view.calibration_view.set_calibration_state(False, "已中断")
 
     @Slot(dict)
     def handle_telemetry(self, payload: dict) -> None:
@@ -120,6 +136,41 @@ class MainController(QObject):
     def handle_breath_samples(self, samples: list, timestamp: float) -> None:
         if self.view:
             self.view.ingest_breath_samples(samples, timestamp=timestamp)
+
+        # Calibration Session Update (Story 2.6)
+        if self.calibration_session.is_active:
+            for sample in samples:
+                self.calibration_session.update(sample)
+            
+            # Check for completion
+            if self.calibration_session.is_finished():
+                result = self.calibration_session.stop()
+                if result and self.view and hasattr(self.view, "calibration_view"):
+                    self.view.calibration_view.set_calibration_state(False, "校准完成")
+                    self.view.calibration_view.update_calibration_stats(
+                        result.max_val, result.min_val, result.offset, result.gain
+                    )
+                    
+                    # Apply results (AC3) & Persist (AC5)
+                    self.state.signal_offset = result.offset
+                    self.state.signal_gain = result.gain
+                    self.view.calibration_view.set_signal_transform(result.offset, result.gain)
+                    
+                    self._persist_config_values({
+                        "signal_offset": result.offset,
+                        "signal_gain": result.gain
+                    })
+                    LOG.info("Calibration applied: Offset=%.3f, Gain=%.3f", result.offset, result.gain)
+            elif self.view and hasattr(self.view, "calibration_view"):
+                 # Update progress/stats
+                 progress = self.calibration_session.get_progress()
+                 remaining = self.calibration_session.duration_sec * (1 - progress)
+                 self.view.calibration_view.set_calibration_state(True, f"正在校准... {remaining:.1f}s")
+                 self.view.calibration_view.set_calibration_progress(int(progress * 100))
+                 self.view.calibration_view.update_calibration_stats(
+                     self.calibration_session.current_max,
+                     self.calibration_session.current_min
+                 )
 
         # Process gating logic (100Hz resolution)
         # Calculate sample interval (assuming 100Hz from worker, or derive from timestamp)

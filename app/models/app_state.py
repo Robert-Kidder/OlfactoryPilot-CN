@@ -31,6 +31,8 @@ class AppState:
     low_flow_threshold: float = 0.2
     inhale_threshold: float = 0.2
     exhale_threshold: float = -0.2
+    signal_offset: float = 0.0
+    signal_gain: float = 1.0
     telemetry: Telemetry = field(default_factory=Telemetry)
     hardware_ready: bool = False
     self_check_results: list[SelfCheckResult] = field(default_factory=list)
@@ -55,6 +57,8 @@ class AppState:
             low_flow_threshold=float(config.get("low_flow_threshold", 0.2)),
             inhale_threshold=float(config.get("inhale_threshold", 0.2)),
             exhale_threshold=float(config.get("exhale_threshold", -0.2)),
+            signal_offset=float(config.get("signal_offset", 0.0)),
+            signal_gain=float(config.get("signal_gain", 1.0)),
             telemetry=Telemetry(safety_state=config.get("safety_state", "SAFE")),
             config_path=config.get("_user_config_path") or config.get("_config_path"),
             manual_path=manual_path,
