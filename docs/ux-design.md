@@ -21,6 +21,7 @@
 ### 2.2 Global Elements (Persistent Footer/Header)
 * **Hardware Status:** Connection Icon (Green/Red), Air Flow Value (ml/min).
 * **Safety Status:** "SAFE" (Green) vs "LOW FLOW" (Red - Flashing).
+* **Simulation Indicator:** If in Simulation Mode, display "[SIMULATION]" (Yellow/Orange) prominently in the title bar or status area.
 * **Status Refresh:** Hardware worker pushes connection/airflow/safety telemetry to UI via signals/slots at ~5-10 Hz; footer shows last-updated timestamp and flashes LOW FLOW within <500ms of unsafe state.
 * **Controls:**
     * `[ Connect ]` (Main initialization).
