@@ -356,14 +356,33 @@ So that the system matches our hardware wiring.
   **Then** validation errors show and connections are blocked until fixed.
 
 #### Story 4.3: Chinese UI Localization
-As a researcher,  
-I want the interface fully in Simplified Chinese,  
+As a researcher,
+I want the interface fully in Simplified Chinese,
 So that local users can operate without language friction.
 
 **Acceptance Criteria:**
-- **Given** UI renders  
-  **When** I navigate tabs  
+- **Given** UI renders
+  **When** I navigate tabs
   **Then** labels, buttons, statuses, and help content are in Chinese (微软雅黑 12px).
-- **Given** errors/warnings occur  
-  **When** displayed  
+- **Given** errors/warnings occur
+  **When** displayed
   **Then** messages are Chinese-localized, concise, and use consistent phrasing (e.g., “协议文件无效，第 {line} 行格式错误”; “气流不足，请检查管路后重试”; “写入失败，请释放磁盘空间或检查权限”).
+
+#### Story 4.4 (Refined): Compensation Logic & Automation
+As a researcher,
+I want the system to automatically handle flow compensation and Master Valve logic between Rest and Stimulation phases,
+So that pressure balance is maintained.
+
+**Acceptance Criteria:**
+- **Given** Resting Phase (No Stim)
+  **Then** Master Valve = Bypass (P1.0 OFF), Odor Valves = Closed.
+  **And** MFC A (Odor/Comp) set to `A_target + C_target` (Default: 500+500=1000 ml/min).
+  **And** MFC C (Exhaust) set to 500 ml/min.
+  **And** MFC B (Carrier) remains constant (Default: 1000 ml/min).
+- **Given** Stimulation Phase
+  **Then** Master Valve = Main (P1.0 ON), Specific Odor Valve = Open.
+  **And** MFC A set to `A_target` (Default: 500 ml/min).
+  **And** MFC C set to 0 ml/min.
+- **Given** transition between phases
+  **When** executing
+  **Then** commands are sent in correct order to minimize pressure spikes (e.g., adjust MFCs before switching Master Valve).

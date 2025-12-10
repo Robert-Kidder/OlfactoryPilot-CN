@@ -13,7 +13,11 @@ This document outlines the architecture for the **Olfactory Stimulation Control 
 * **Hardware Worker:** Dedicated `QThread` for real-time control (Jitter Mitigation).
 
 ### 2.2 System Diagram
-[UI Thread] <-> [Signals/Slots] <-> [Hardware Worker Thread] <-> [HAL] <-> [Hardware]
+[UI Thread] <-> [Signals/Slots] <-> [Hardware Worker Thread] <-> [HAL (Hardware Abstraction Layer)] <-> [Hardware]
+                                                                        ^
+                                                                        | (Switchable via Config)
+                                                                        v
+                                                                  [Mock/Simulation Layer]
                                       ^
                                       | (Queue)
                                       v
@@ -23,6 +27,7 @@ This document outlines the architecture for the **Olfactory Stimulation Control 
 - Hardware Worker emits telemetry (connection status, airflow value, safety state) via signals/slots at ~5-10 Hz; UI footer updates within <500ms for LOW FLOW alerts.
 - Breath waveform stream runs at 100Hz to the Calibration view; UI targets >=30 FPS rendering.
 - Safety gating lives in worker/HAL; UI commands are no-ops if safety state != SAFE.
+- **Simulation Mode:** If active, HAL redirects to Mock layer. Mock layer generates synthetic breath signals (sine/noise) and simulates airflow responses to valve commands (e.g., flow slight dip/spike on valve open).
 
 ## 3. Technology Stack
 * **Language:** Python 3.10+
@@ -35,18 +40,18 @@ This document outlines the architecture for the **Olfactory Stimulation Control 
 ```text
 olfactory-control/
 ├── app/
-�?  ├── __init__.py
-�?  ├── main.py
-�?  ├── controllers/            # MainController, ProtocolEngine
-�?  ├── models/                 # AppState, ProtocolModel
-�?  ├── views/                  # MainWindow, Tabs (File, Calib, Pretest...)
-�?  ├── workers/                # HardwareWorker, DataLogger
-�?  └── services/               # NiDaqService, SerialService, SafetyManager
+�?  ├── __init__.py
+�?  ├── main.py
+�?  ├── controllers/            # MainController, ProtocolEngine
+�?  ├── models/                 # AppState, ProtocolModel
+�?  ├── views/                  # MainWindow, Tabs (File, Calib, Pretest...)
+�?  ├── workers/                # HardwareWorker, DataLogger
+�?  └── services/               # NiDaqService, SerialService, SafetyManager
 ├── config/
-�?  └── default_config.json
+�?  └── default_config.json
 ├── docs/
-�?  ├── prd.md
-�?  └── ux-design.md
+�?  ├── prd.md
+�?  └── ux-design.md
 └── tests/
 ## 5. Observability & Logging
 - **Jitter metrics:** Each actuation log entry captures `timestamp`, `expected_ms`, `actual_ms`, `jitter_ms`; rolling 30s p95 evaluated for warnings.

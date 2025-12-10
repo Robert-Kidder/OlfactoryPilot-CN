@@ -19,7 +19,7 @@ The current workflow relies on a legacy LabView system ("ProgOlfacto") with Fren
 ### 2.1 Functional Requirements (FR)
 **FR1: Hardware Safety & Initialization**
 * **FR1.1:** System performs startup self-check of NI-USB-6001, NI-USB-6501, and RS232 ports.
-* [cite_start]**FR1.2 (CRITICAL):** "Safe Start" Interlock: The system must verify Air Flow > Threshold before allowing any Odor Valve activation or heating[cite: 1489].
+* [cite_start]**FR1.2 (CRITICAL):** "Safe Start" Interlock: The system must verify Air Flow > Threshold (physical or simulated) before allowing any Odor Valve activation or heating[cite: 1489].
 * **FR1.3:** Auto-Reset: On exit or emergency stop, all valves must reset to "Closed".
 * **FR1.4:** Global Toolbar: A persistent toolbar must provide Connect, Reset (Hardware Recovery), Stop (Soft Disconnect), and Help (Manual) buttons.
 
@@ -49,6 +49,12 @@ The current workflow relies on a legacy LabView system ("ProgOlfacto") with Fren
 * **FR7.1:** Configurable COM ports and NI Device IDs via UI.
 * **FR7.2:** Interface language: Simplified Chinese.
 * **FR7.3:** Dynamic UI: Options to select hardware variant (10 vs 20 channels) to adapt the Pre-test UI.
+
+**FR8: Hardware Simulation Mode**
+* **FR8.1:** System can start in a "Simulation Mode" where no physical hardware is required.
+* **FR8.2:** Simulation provides synthetic breath signals (e.g., sine wave or configurable pattern) for calibration and protocol testing.
+* **FR8.3:** Simulation mimics hardware responses (connection success, valve state changes, airflow reading updates) to validate software logic.
+* **FR8.4:** UI clearly indicates when system is running in Simulation Mode (e.g., "[SIMULATION]" in title/status).
 
 ### 2.2 Non-Functional Requirements (NFR)
 * **NFR1 (Safety):** Hardware safety logic runs in a high-priority thread, independent of UI responsiveness.
