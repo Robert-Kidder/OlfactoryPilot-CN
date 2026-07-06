@@ -20,22 +20,30 @@ class HardwareCheckService:
         serial_port: str | None = None,
         baud_rate: int | None = None,
         time_func: Callable[[], float] = time.time,
+        sleep_func: Callable[[float], None] = time.sleep,
         nidaqmx_loader: Callable[[], object] | None = None,
         serial_provider: Callable[[], tuple[object, object]] | None = None,
+        serial_open_retries: int = 1,
+        serial_retry_interval_s: float = 0.25,
     ) -> None:
         self.expected_ni_devices = [d for d in (expected_ni_devices or [])]
         self.serial_port = serial_port
         self.baud_rate = baud_rate
         self._now = time_func
+        self._sleep = sleep_func
         self._nidaqmx_loader = nidaqmx_loader
         self._serial_provider = serial_provider
+        self.serial_open_retries = max(1, int(serial_open_retries))
+        self.serial_retry_interval_s = max(0.0, float(serial_retry_interval_s))
 
     @classmethod
-    def from_config(cls, config: dict) -> HardwareCheckService:
+    def from_config(cls, config: dict) -> "HardwareCheckService":
         return cls(
             expected_ni_devices=config.get("ni_devices", []),
             serial_port=config.get("serial_port"),
             baud_rate=config.get("baud_rate"),
+            serial_open_retries=int(config.get("serial_open_retries", 2)),
+            serial_retry_interval_s=float(config.get("serial_retry_interval_s", 0.25)),
         )
 
     def run_checks(self) -> tuple[list[SelfCheckResult], bool]:
@@ -55,7 +63,6 @@ class HardwareCheckService:
             )
         return results, hardware_ready
 
-    # Internal helpers
     def _load_nidaqmx_system(self):
         if self._nidaqmx_loader:
             return self._nidaqmx_loader()
@@ -76,20 +83,19 @@ class HardwareCheckService:
             system = self._load_nidaqmx_system()
             devices = list(getattr(system.System.local(), "devices", []))
         except ModuleNotFoundError:
-            for name in expected:
-                results.append(
-                    SelfCheckResult(
-                        name=name,
-                        type="ni",
-                        status="FAIL",
-                        reason="NI-DAQmx 未安装或模块不可用",
-                        suggestion="安装 NI-DAQmx 驱动后重新运行自检",
-                        checked_at=timestamp,
-                    )
+            return [
+                SelfCheckResult(
+                    name=name,
+                    type="ni",
+                    status="FAIL",
+                    reason="未安装 NI-DAQmx 或模块不可用",
+                    suggestion="安装 NI-DAQmx 驱动后重新运行自检",
+                    checked_at=timestamp,
                 )
-            return results
+                for name in expected
+            ]
         except Exception as exc:  # pragma: no cover - defensive
-            results.append(
+            return [
                 SelfCheckResult(
                     name="NI-DAQmx",
                     type="ni",
@@ -98,22 +104,20 @@ class HardwareCheckService:
                     suggestion="检查 NI 驱动/权限后重试",
                     checked_at=timestamp,
                 )
-            )
-            return results
+            ]
 
         if not devices:
-            for name in expected:
-                results.append(
-                    SelfCheckResult(
-                        name=name,
-                        type="ni",
-                        status="FAIL",
-                        reason=f"未检测到 {name}",
-                        suggestion="检查 USB 连接并确认设备通电",
-                        checked_at=timestamp,
-                    )
+            return [
+                SelfCheckResult(
+                    name=name,
+                    type="ni",
+                    status="FAIL",
+                    reason=f"未检测到 {name}",
+                    suggestion="检查 USB 连接并确认设备通电",
+                    checked_at=timestamp,
                 )
-            return results
+                for name in expected
+            ]
 
         def _matches(device, target: str) -> bool:
             target_lower = target.lower()
@@ -192,40 +196,50 @@ class HardwareCheckService:
                 checked_at=timestamp,
             )
 
-        try:
-            connection = serial_module.Serial(self.serial_port, self.baud_rate, timeout=1)
-            if hasattr(connection, "close"):
-                connection.close()
-            return SelfCheckResult(
-                name=self.serial_port,
-                type="serial",
-                status="PASS",
-                reason="串口连接正常",
-                suggestion="无需操作",
-                checked_at=timestamp,
-            )
-        except serial_module.SerialException as exc:  # type: ignore[attr-defined]
-            message = str(exc).lower()
-            if "denied" in message or "permission" in message or "access" in message:
-                hint = "关闭可能占用串口的程序后重试"
-            elif "baud" in message:
-                hint = "检查波特率配置是否正确"
-            else:
-                hint = "检查串口连线与配置"
-            return SelfCheckResult(
-                name=self.serial_port,
-                type="serial",
-                status="FAIL",
-                reason=f"串口打开失败: {exc}",
-                suggestion=hint,
-                checked_at=timestamp,
-            )
-        except Exception as exc:  # pragma: no cover - defensive
-            return SelfCheckResult(
-                name=self.serial_port,
-                type="serial",
-                status="FAIL",
-                reason=f"串口自检异常: {exc}",
-                suggestion="检查串口连接与权限",
-                checked_at=timestamp,
-            )
+        last_error: Exception | None = None
+        for attempt in range(1, self.serial_open_retries + 1):
+            try:
+                connection = serial_module.Serial(self.serial_port, self.baud_rate, timeout=1)
+                if hasattr(connection, "close"):
+                    connection.close()
+                reason = "串口连接正常"
+                if attempt > 1:
+                    reason = f"{reason}（第 {attempt} 次重试成功）"
+                return SelfCheckResult(
+                    name=self.serial_port,
+                    type="serial",
+                    status="PASS",
+                    reason=reason,
+                    suggestion="无需操作",
+                    checked_at=timestamp,
+                )
+            except serial_module.SerialException as exc:  # type: ignore[attr-defined]
+                last_error = exc
+                if attempt < self.serial_open_retries:
+                    self._sleep(self.serial_retry_interval_s)
+                    continue
+            except Exception as exc:  # pragma: no cover - defensive
+                last_error = exc
+                break
+
+        exc = last_error or RuntimeError("unknown serial error")
+        message = str(exc).lower()
+        if (
+            "denied" in message
+            or "permission" in message
+            or "access" in message
+            or "拒绝访问" in message
+        ):
+            hint = "关闭可能占用 COM6/ATEN 串口的程序，或拔插 ATEN 后点击重新自检"
+        elif "baud" in message:
+            hint = "检查波特率配置是否正确"
+        else:
+            hint = "检查串口连线与配置"
+        return SelfCheckResult(
+            name=self.serial_port,
+            type="serial",
+            status="FAIL",
+            reason=f"串口打开失败: {exc}",
+            suggestion=hint,
+            checked_at=timestamp,
+        )

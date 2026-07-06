@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import logging
-import math
 import time
 
 from PySide6.QtCore import QThread, Signal
 
 from app.models import SelfCheckResult
+from app.services.hal import HalInterface
 from app.services.hardware_check_service import HardwareCheckService
+from app.services.mock_hal import MockHAL
 
 LOG = logging.getLogger(__name__)
 
@@ -23,20 +24,28 @@ class HardwareWorker(QThread):
         telemetry_hz: int = 5,
         check_service: HardwareCheckService | None = None,
         breath_hz: int = 100,
+        hal: HalInterface | None = None,
+        simulation: bool = False,
     ) -> None:
         super().__init__()
         self._running = False
         self.telemetry_interval_ms = self._compute_interval_ms(telemetry_hz)
         self.breath_interval_ms = self._compute_interval_ms(breath_hz)
         self.check_service = check_service
+        self.hal: HalInterface = hal or MockHAL()
+        self.simulation_mode = simulation
         self._self_check_requested = False
         self._connected = False
-        self._breath_phase = 0.0
+
+    @property
+    def is_connected(self) -> bool:
+        return self._connected
 
     def run(self) -> None:  # noqa: D401
         """Worker loop emits telemetry placeholders over signals."""
         self._running = True
-        self.status_message.emit("硬件线程已启动（占位）")
+        mode_label = "（模拟模式）" if self.simulation_mode else "（占位）"
+        self.status_message.emit(f"硬件线程已启动{mode_label}")
         self._run_self_check()
         next_telemetry = time.time()
         next_breath = time.time()
@@ -53,7 +62,7 @@ class HardwareWorker(QThread):
             if now >= next_telemetry:
                 payload: dict[str, object] = {
                     "connected": self._connected,
-                    "airflow": 0.0,
+                    "airflow": self._read_flow(),
                     "safety_state": "SAFE",
                     "timestamp": now,
                 }
@@ -65,6 +74,7 @@ class HardwareWorker(QThread):
         self.status_message.emit("硬件线程已停止")
 
     def stop(self) -> None:
+        self._self_check_requested = False
         if not self.isRunning():
             self._connected = False
             return
@@ -76,33 +86,86 @@ class HardwareWorker(QThread):
         """Allow controller/UI to trigger another self-check without blocking UI."""
         self._self_check_requested = True
 
+    def write_digital(self, *, device: str | None, line: str, state: bool) -> bool:
+        """数字输出由 HAL 处理；记录日志并更新连接状态。"""
+        LOG.info(
+            "digital_write | device=%s | line=%s | state=%s",
+            device or "N/A",
+            line,
+            state,
+        )
+        if not self.hal:
+            self._connected = True
+            return True
+        try:
+            result = bool(self.hal.write_digital(device=device, line=line, state=state))
+            self._connected = self._connected or result
+            return result
+        except Exception:  # pragma: no cover - defensive
+            LOG.exception("HAL digital write failed")
+            return False
+
     def mark_disconnected(self) -> None:
         """Explicitly mark hardware as disconnected for telemetry loop."""
+        self._self_check_requested = False
         self._connected = False
 
     # Shutdown helpers for safe-stop scenarios.
     def close_all_channels(self) -> bool:
         """Close valves/actuators; placeholder returns success for mock worker."""
         self._connected = False
-        return True
+        if not self.hal:
+            return True
+        try:
+            return bool(self.hal.close_all())
+        except Exception:  # pragma: no cover - defensive
+            LOG.exception("HAL close_all failed")
+            return False
 
     def stop_heaters(self) -> bool:
         """Stop heaters/pumps; placeholder returns success for mock worker."""
-        return True
+        if not self.hal:
+            return True
+        try:
+            return bool(self.hal.stop_heaters())
+        except Exception:  # pragma: no cover - defensive
+            LOG.exception("HAL stop_heaters failed")
+            return False
 
     def flush_logs(self) -> None:
         """Flush data logger/session file handles if any."""
-        return None
+        if not self.hal:
+            return None
+        try:
+            self.hal.flush_logs()
+        except Exception:  # pragma: no cover - defensive
+            LOG.exception("HAL flush_logs failed")
+            return None
 
     def release_resources(self) -> None:
         """Release NI/RS232 handles and stop worker loop."""
+        try:
+            if self.hal:
+                self.hal.close_all()
+        except Exception:  # pragma: no cover - defensive
+            LOG.exception("HAL release resources failed")
         self.stop()
 
     def _run_self_check(self) -> None:
-        if not self.check_service:
-            return
+        results: list[SelfCheckResult] = []
+        ready = False
         try:
-            results, ready = self.check_service.run_checks()
+            if self.simulation_mode and hasattr(self.hal, "self_check"):
+                results, ready = self.hal.self_check()
+            elif self.check_service:
+                self._release_hal_handles_for_self_check()
+                results, ready = self.check_service.run_checks()
+            elif hasattr(self.hal, "self_check"):
+                results, ready = self.hal.self_check()
+            elif self.simulation_mode:
+                ready = True
+            else:
+                ready = False
         except Exception as exc:  # pragma: no cover - defensive
             LOG.exception("Hardware self-check raised an exception")
             results = [
@@ -118,15 +181,39 @@ class HardwareWorker(QThread):
             ready = False
         self._connected = ready
         self.self_check_completed.emit(results, ready)
-        status = "硬件自检通过" if ready else "硬件自检失败，请检查连接"
+        if self.simulation_mode and ready:
+            status = "模拟模式：自检通过"
+        else:
+            status = "硬件自检通过" if ready else "硬件自检失败，请检查连接"
         self.status_message.emit(status)
         LOG.info("硬件自检完成 | ready=%s | 项目数=%s", ready, len(results))
 
+    def _release_hal_handles_for_self_check(self) -> None:
+        """Release HAL-held serial handles before HardwareCheckService opens COM ports."""
+        if not self.hal:
+            return
+        try:
+            self.hal.flush_logs()
+        except Exception:  # pragma: no cover - defensive
+            LOG.exception("HAL handle release before self-check failed")
+
     def _emit_breath_sample(self, timestamp: float) -> None:
-        """Generate a placeholder breath sample (sine wave) for the calibration view."""
-        value = 0.5 * math.sin(2 * math.pi * 0.2 * timestamp + self._breath_phase)
-        self._breath_phase += 0.05
+        """Generate breath sample via HAL (mock or real)."""
+        try:
+            value = float(self.hal.read_ai0(timestamp)) if self.hal else 0.0
+        except Exception:  # pragma: no cover - defensive
+            LOG.exception("HAL read_ai0 failed")
+            value = 0.0
         self.breath_samples.emit([value], timestamp)
+
+    def _read_flow(self) -> float:
+        if not self.hal:
+            return 0.0
+        try:
+            return float(self.hal.read_flow())
+        except Exception:  # pragma: no cover - defensive
+            LOG.exception("HAL read_flow failed")
+            return 0.0
 
     @staticmethod
     def _compute_interval_ms(telemetry_hz: int) -> int:

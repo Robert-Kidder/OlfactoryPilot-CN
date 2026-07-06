@@ -43,7 +43,7 @@ Story ID: 1.3
 - **Reset 流程**：关闭阀门/停止加热（复用安全关闭接口或 SafetyManager 事件），重新初始化 NI/RS232，强制刷新自检结果与 `hardware_ready`; 记录恢复事件到日志（含 ts、原因、结果）。
 - **Stop 流程**：触发协议/预检/流量发送等入口的软断开（后续故事可调用同一接口），关闭阀门，调用 worker.stop() 释放资源；更新 `last_shutdown_event` 与 UI 提示。
 - **Help 打开**：读取可配置的手册路径（默认指向本地 PDF）；使用系统默认应用打开；异常（缺失/权限）要捕获并弹窗提示。
-- **UI 反馈**：按钮文案/tooltip 中英文一致性（中文为主），禁用状态反映当前安全/连接；状态栏/页脚显示最近操作结果与时间戳。
+- **UI 反馈**：按钮文案中文清晰；正常运行时 Connect/Reset/Stop/Help/预检启动/阀门按钮不使用 tooltip 或弹窗提示，禁用/失败原因通过状态栏、页脚或页面标签呈现；状态栏/页脚显示最近操作结果与时间戳。
 - **日志**：统一使用现有 logging/Data Logger；记录按钮事件（动作、source、airflow/safety_state、结果、耗时/错误）。
 
 ## Architecture Compliance（architecture_compliance）
@@ -107,6 +107,12 @@ Story ID: 1.3
 
 ### Debug Log References
 - 2025-12-09：python -m pytest（offscreen），覆盖 toolbar 状态护栏与自检失败反馈。
+- 2026-06-30：现场反馈 Stop 后再 Connect 时 UI 被长自检文本撑开且 Connect 清零阶段界面冻结；修复自检摘要换行/分行显示、Connect 去重自检，并将自检后 A/B/C 清零移到后台线程。`.venv-win\python.exe -m pytest -q` 通过，118 passed。
+- 2026-06-30：现场反馈 Reset 后再 Connect 时持续弹无响应/弹窗无法关闭；修复 Reset 后仍向已停止 worker 遗留 pending self-check 的状态机问题。Reset 语义恢复为“一键硬件恢复”：先安全关阀/释放资源，再自动重新初始化硬件并自检；worker stop/mark_disconnected 会清除 pending self-check，避免重复自检/清零。`.venv-win\python.exe -m pytest -q` 通过，119 passed。
+- 2026-06-30：复核底部“重新检查”按钮，确认其功能已被全局工具栏 Connect（自检/重检）与 Reset（一键恢复）覆盖；移除该重复入口，降低现场误操作与 UI 噪声。`.venv-win\python.exe -m pytest -q` 通过，119 passed。
+- 2026-06-30：现场要求取消正常运行按钮弹窗/悬浮提示；移除全局工具栏 Connect/Reset/Stop/Help 与预检启动/阀门按钮 tooltip，保留启动失败致命错误弹窗作为异常兜底；按钮状态与失败原因改由现有状态栏/页面文本承载。`.venv-win\python.exe -m pytest -q` 通过，119 passed。
+- 2026-06-30：现场反馈成功连接后点击 Stop 仍出现安全状态提示；修复 Stop/Reset/app_exit 成功关闭后的迟到 disconnected telemetry 被误判为异常断连的问题，保留真正意外断连的 DATA_STALE 安全提示。`.venv-win\python.exe -m pytest -q` 通过，120 passed。
+- 2026-06-30：现场反馈 Stop 后再 Connect 仍显示“安全状态：SAFE”类提示；调整预检安全状态提示规则，SAFE 状态无论是否带有关闭/恢复原因都不显示提示框，仅保留非 SAFE/禁用状态提示。同时修复 Reset 后气道按钮未复位的问题，Reset 会清空预选、打开状态、绿色勾选和主阀指示。`.venv-win\python.exe -m pytest -q` 通过，122 passed。
 
 ### Completion Notes List
 - 选择 FR1.4 全局工具栏故事并整合自检/安全守卫上下文，定义 AC1-AC4。
@@ -114,6 +120,12 @@ Story ID: 1.3
 - 明确 UI 常驻、异步执行与测试覆盖要求，提供文件/配置/打包参考。
 - 完成全局工具栏 UI：新增禁用原因提示与连接/自检状态文案，并为按钮状态护栏补充单元测试。
 - Connect 失败时提示首个自检失败原因与建议，重试按钮保持非阻塞；补充自检失败用例测试。
+- Stop 后状态会显式回到 disconnected/not-ready；重新 Connect 时不再重复触发两次自检，长错误文本不会撑宽主窗口，自检后清零不会阻塞 UI 或导致弹窗/窗口假死。
+- Reset 后会显式进入重新初始化流程，不遗留后台自检请求；自动重启 worker 并执行唯一一次自检/清零。
+- 移除底部“重新检查”按钮；重新自检由 Connect 覆盖，硬件恢复由 Reset 覆盖。
+- 移除正常运行按钮 tooltip/弹窗式提示；连接、停止、重置、帮助、预检启动和阀门按钮点击时只更新按钮状态、状态栏或页面文本。
+- Stop 成功后如 worker 后续补发 disconnected telemetry，不再生成安全状态提示；只有非预期断连才进入 DATA_STALE/紧急关闭路径。
+- 预检区不再显示“安全状态：SAFE”提示框；Reset 会把气道按钮恢复到初始未选/未亮状态，持续时间结束仍保持预选状态不变。
 
 ### File List
 - docs/sprint-artifacts/1-3-global-safety-toolbar.md

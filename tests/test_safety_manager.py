@@ -4,25 +4,25 @@ from app.models.safety_state import SafetyState
 from app.services import SafetyManager
 
 
-def test_low_flow_sets_state_and_reason():
+def test_idle_zero_flow_is_safe_for_alicat_model():
     manager = SafetyManager(low_flow_threshold=0.5, recovery_margin=0.1)
 
-    state = manager.evaluate_state(airflow=0.2, timestamp=1.0)
+    state = manager.evaluate_state(airflow=0.0, timestamp=1.0)
 
-    assert state.state == "LOW_FLOW"
-    assert "阈值" in state.reason
+    assert state.state == "SAFE"
+    assert "Alicat" in state.reason
 
 
-def test_hysteresis_requires_margin_for_recovery():
+def test_valid_flow_does_not_need_threshold_margin():
     manager = SafetyManager(low_flow_threshold=0.5, recovery_margin=0.1)
 
-    low = manager.evaluate_state(airflow=0.2, timestamp=1.0)
-    mid = manager.evaluate_state(airflow=0.54, timestamp=1.1, previous=low)
-    recovered = manager.evaluate_state(airflow=0.65, timestamp=1.2, previous=mid)
+    idle = manager.evaluate_state(airflow=0.0, timestamp=1.0)
+    mid = manager.evaluate_state(airflow=0.2, timestamp=1.1, previous=idle)
+    target = manager.evaluate_state(airflow=0.65, timestamp=1.2, previous=mid)
 
-    assert low.state == "LOW_FLOW"
-    assert mid.state == "LOW_FLOW"  # still sticky
-    assert recovered.state == "SAFE"
+    assert idle.state == "SAFE"
+    assert mid.state == "SAFE"
+    assert target.state == "SAFE"
 
 
 def test_stale_data_detected_when_gap_exceeds_threshold():
@@ -83,7 +83,7 @@ def test_evaluate_retains_string_api():
 
     result = manager.evaluate(airflow=0.2, timestamp=1.0, previous_state="SAFE")
 
-    assert result == "LOW_FLOW"
+    assert result == "SAFE"
 
 
 def test_validate_threshold_rules():

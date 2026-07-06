@@ -5,13 +5,19 @@ import json
 import logging
 import os
 import sys
+import traceback
 from pathlib import Path
 
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QMessageBox
+
+# Ensure package imports work when running as a script (python app/main.py).
+REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 from app.controllers import MainController
 from app.models import AppState
-from app.services import HardwareCheckService, SafetyManager, ShutdownService
+from app.services import HalInterface, HardwareCheckService, MockHAL, RealHAL, SafetyManager, ShutdownService
 from app.views import MainWindow
 from app.workers import HardwareWorker
 
@@ -32,6 +38,18 @@ def save_config(config_path: Path, data: dict) -> None:
         json.dump(data, handle, ensure_ascii=False, indent=2)
 
 
+def migrate_bundled_user_config(user_config: dict, bundled_config: dict) -> bool:
+    if (
+        str(user_config.get("serial_port", "")).upper() == "COM3"
+        and str(bundled_config.get("serial_port", "")).upper() == "COM6"
+    ):
+        user_config["serial_port"] = bundled_config["serial_port"]
+        if "baud_rate" in bundled_config:
+            user_config["baud_rate"] = bundled_config["baud_rate"]
+        return True
+    return False
+
+
 def configure_logging(log_level: str) -> None:
     level = getattr(logging, log_level.upper(), logging.INFO)
     logging.basicConfig(
@@ -41,7 +59,10 @@ def configure_logging(log_level: str) -> None:
 
 
 def build_application(
-    config_path: Path, start_worker: bool = True
+    config_path: Path,
+    start_worker: bool = True,
+    simulation: bool = False,
+    hal: HalInterface | None = None,
 ) -> tuple[QApplication, MainWindow]:
     config_path = Path(config_path)
     config = load_config(config_path)
@@ -56,7 +77,10 @@ def build_application(
             save_config(user_config_path, config)
         else:
             try:
+                bundled_config = config
                 config = load_config(user_config_path)
+                if migrate_bundled_user_config(config, bundled_config):
+                    save_config(user_config_path, config)
             except Exception:
                 config = load_config(config_path)
 
@@ -65,6 +89,13 @@ def build_application(
     if user_config_path:
         config["_user_config_path"] = user_config_path
     state = AppState.from_config(config)
+    hal_mode = str(config.get("hal_mode", "auto")).strip().lower()
+    if hal_mode in {"mock", "simulation"}:
+        state.simulation_mode = True
+    state.simulation_mode = bool(simulation or state.simulation_mode)
+    if state.simulation_mode and "[模拟模式]" not in state.window_title:
+        state.window_title = f"{state.window_title} [模拟模式]"
+    config["simulation_mode"] = state.simulation_mode
     if "shutdown_record_path" not in config:
         config["shutdown_record_path"] = str(Path.cwd() / "logs" / "last_shutdown_event.json")
     record_path = config.get("shutdown_record_path")
@@ -84,7 +115,17 @@ def build_application(
         state.telemetry.connected = False
 
     safety = SafetyManager(config.get("low_flow_threshold", 0.2))
-    check_service = HardwareCheckService.from_config(config)
+    check_service = None if state.simulation_mode else HardwareCheckService.from_config(config)
+
+    hal_instance = hal
+    if hal_instance is None:
+        if state.simulation_mode:
+            hal_instance = MockHAL()
+        else:
+            try:
+                hal_instance = RealHAL.from_config(config)
+            except Exception as exc:
+                raise RuntimeError(f"RealHAL 初始化失败：{exc}") from exc
 
     if os.name == "nt" and not os.environ.get("QT_QPA_PLATFORM"):
         os.environ.setdefault("QT_QPA_PLATFORM", "windows")
@@ -92,6 +133,8 @@ def build_application(
     worker = HardwareWorker(
         telemetry_hz=int(config.get("telemetry_hz", 5)),
         check_service=check_service,
+        hal=hal_instance,
+        simulation=state.simulation_mode,
     )
     controller = MainController(state, worker, safety_manager=safety, config=config)
     window = MainWindow(controller, state)
@@ -117,12 +160,51 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         action="store_true",
         help="跳过占位硬件线程（用于CI/测试）",
     )
+    parser.add_argument(
+        "--simulation",
+        action="store_true",
+        help="启用模拟模式：跳过物理硬件检查并使用 Mock HAL",
+    )
     return parser.parse_args(argv)
 
 
+def report_startup_error(exc: Exception) -> None:
+    message = f"启动失败：{exc}"
+    details = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+    log_path = Path.home() / ".olfactorypilot" / "startup_error.log"
+    try:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with log_path.open("w", encoding="utf-8") as handle:
+            handle.write(details)
+    except Exception:
+        pass
+    try:
+        sys.stderr.write(details)
+    except Exception:
+        pass
+    try:
+        app = QApplication.instance() or QApplication(sys.argv)
+        QMessageBox.critical(
+            None,
+            "OlfactoryPilot 启动失败",
+            f"{message}\n\n日志：{log_path}",
+        )
+        app.processEvents()
+    except Exception:
+        pass
+
+
 def main(argv: list[str] | None = None) -> int:
-    args = parse_args(argv or sys.argv[1:])
-    qt_app, window = build_application(args.config, start_worker=not args.no_worker)
+    try:
+        args = parse_args(argv or sys.argv[1:])
+        qt_app, window = build_application(
+            args.config,
+            start_worker=not args.no_worker,
+            simulation=args.simulation,
+        )
+    except Exception as exc:
+        report_startup_error(exc)
+        return 1
     window.show()
     return qt_app.exec()
 

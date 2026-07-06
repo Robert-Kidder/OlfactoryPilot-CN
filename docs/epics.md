@@ -172,6 +172,23 @@ So that hardware always returns to a safe state.
   **When** I relaunch  
   **Then** the system starts from a clean/safe state with prior issues reported.
 
+#### Story 1.5: Hardware Simulation Layer (Mock HAL)
+As a developer,
+I want a software-only simulation mode that mimics hardware behavior,
+So that I can verify UI, safety logic, and protocols without physical devices.
+
+**Acceptance Criteria:**
+- **Given** I launch the app with `--simulation` flag
+  **When** the app starts
+  **Then** it bypasses physical hardware checks and loads the Mock HAL.
+  **And** the UI Title Bar displays "[SIMULATION MODE]".
+- **Given** Simulation Mode is active
+  **When** I navigate to Calibration
+  **Then** a synthetic breath waveform (e.g., sine wave) is visible and reacts to thresholds.
+- **Given** Simulation Mode is active
+  **When** I toggle valves or change flow rates
+  **Then** the system logs the "virtual" state changes and simulates appropriate feedback (e.g., flow values update).
+
 ### Epic 2: Calibration & Manual Control
 让用户安全地查看呼吸信号、设定阈值、手动切换阀门与流量，支持不同硬件规格的预检操作。
 **FRs covered:** FR3.1, FR3.2, FR4.1, FR4.2, FR4.3, FR7.3

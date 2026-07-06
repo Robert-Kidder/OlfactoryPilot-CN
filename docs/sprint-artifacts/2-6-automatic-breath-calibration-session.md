@@ -1,5 +1,5 @@
 # Story 2.6: Automatic Breath Calibration Session
-Status: ready-for-review
+Status: done
 Epic: 2 - Calibration & Manual Control
 Story Key: 2-6-automatic-breath-calibration-session
 Story ID: 2.6
@@ -78,6 +78,11 @@ Story ID: 2.6
 - **Persistence**: Added `signal_offset` and `signal_gain` to `AppState` and config persistence.
 - **Signal Processing**: Applied linear transform `(Raw + Offset) * Gain` in `CalibrationView._render_frame`.
 - **Testing**: Added 3 test suites (`test_calibration_ui`, `test_calibration_logic`, `test_calibration_integration`) covering AC1-AC5.
+
+### Code Review Fixes (2025-12-10)
+- **CRITICAL Fix**: Updated `MainController` to apply calibration transform (Offset/Gain) to breath samples *before* passing them to `GatingService`. This ensures gating thresholds match the visual waveform.
+- **Test Enhancement**: Added `test_calibration_affects_gating` to `tests/test_calibration_integration.py` to verify gating triggers on calibrated data.
+- **Refactor**: Added `AppState.apply_calibration` helper to centralize signal math.
 
 ## File List
 - app/views/calibration_view.py

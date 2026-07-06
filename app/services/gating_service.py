@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import NamedTuple
 
 
 class GatingState(str, Enum):
@@ -61,9 +60,9 @@ class GatingService:
             # Calculate timestamp for this sample
             # dt is 1/sampling_rate (e.g. 0.01s for 100Hz)
             ts = timestamp_start + i * dt
-            
+
             new_state = self._determine_state(value, safety_state)
-            
+
             if new_state != self.current_state:
                 self.current_state = new_state
                 transitions.append(
@@ -77,7 +76,7 @@ class GatingService:
         return transitions
 
     def _determine_state(self, value: float, safety_state: str) -> GatingState:
-        if safety_state not in ("SAFE", "WARNING"): # Assuming SAFE is the only truly safe state, but maybe allow WARNING? 
+        if safety_state not in ("SAFE", "WARNING"): # Assuming SAFE is the only truly safe state, but maybe allow WARNING?
             # AC4: "Given SafetyState=LOW_FLOW or DATA_STALE ... gating state is 'BLOCKED'"
             # Checking main_controller, valid states are SAFE, LOW_FLOW, DATA_STALE, or hardware strings.
             # Usually only SAFE allows operation.

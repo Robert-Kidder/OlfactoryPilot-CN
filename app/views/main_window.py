@@ -8,6 +8,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QMainWindow,
     QPushButton,
+    QSizePolicy,
     QStatusBar,
     QTabWidget,
     QVBoxLayout,
@@ -16,6 +17,7 @@ from PySide6.QtWidgets import (
 
 from app.models import AppState, Telemetry
 from app.views.calibration_view import CalibrationView
+from app.views.pretest_view import PreTestView
 
 if TYPE_CHECKING:
     from app.controllers import MainController
@@ -32,21 +34,22 @@ class MainWindow(QMainWindow):
         self._telemetry_label = QLabel(self._format_telemetry(state.telemetry))
         self._shutdown_label = QLabel(self._format_shutdown(state.last_shutdown_event))
         self._self_check_label = QLabel("尚未进行硬件自检")
+        for label in (
+            self._status_label,
+            self._telemetry_label,
+            self._shutdown_label,
+            self._self_check_label,
+        ):
+            label.setWordWrap(True)
+            label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self._connect_button = QPushButton("连接")
         self._reset_button = QPushButton("重置")
         self._stop_button = QPushButton("停止")
         self._help_button = QPushButton("帮助")
-        self._connect_button.setToolTip("运行自检并初始化硬件")
-        self._reset_button.setToolTip("需要：已连接、已通过自检且 SAFE")
-        self._stop_button.setToolTip("需要：已连接硬件")
-        self._help_button.setToolTip("打开本地中文手册")
         self._connect_button.clicked.connect(self.controller.connect_hardware)
         self._reset_button.clicked.connect(self.controller.reset_hardware)
         self._stop_button.clicked.connect(self.controller.stop_hardware)
         self._help_button.clicked.connect(self.controller.open_help_manual)
-        self._recheck_button = QPushButton("重新检查")
-        self._recheck_button.setToolTip("重新触发自检，刷新安全状态")
-        self._recheck_button.clicked.connect(self._trigger_recheck)
         self._build_layout()
 
     def _build_layout(self) -> None:
@@ -54,8 +57,22 @@ class MainWindow(QMainWindow):
             inhale_threshold=self.state.inhale_threshold,
             exhale_threshold=self.state.exhale_threshold,
         )
+        self.pretest_view = PreTestView(
+            valve_map=self.state.get_active_valve_map(),
+            variant=self.state.hardware_variant,
+            master_valve=self.state.master_valve_line,
+            inhale_threshold=self.state.inhale_threshold,
+            exhale_threshold=self.state.exhale_threshold,
+            signal_offset=self.state.signal_offset,
+            signal_gain=self.state.signal_gain,
+        )
+        self.pretest_view.toggle_requested.connect(self.controller.handle_valve_toggle_request)
+        self.pretest_view.apply_requested.connect(self.controller.handle_apply_request)
+        self.pretest_view.valve_sequence_requested.connect(self.controller.handle_valve_sequence_request)
+        self.pretest_view.sequence_requested.connect(self.controller.handle_pretest_sequence_request)
         self.tabs.addTab(self._build_tab("概览", "硬件连接、安全状态概览"), "概览")
         self.tabs.addTab(self.calibration_view, "校准")
+        self.tabs.addTab(self.pretest_view, "预检")
         self.tabs.addTab(self._build_tab("协议", "协议执行占位"), "协议")
 
         container = QWidget()
@@ -74,7 +91,6 @@ class MainWindow(QMainWindow):
         layout.addWidget(toolbar)
         layout.addWidget(self.tabs)
         layout.addWidget(self._self_check_label)
-        layout.addWidget(self._recheck_button)
         container.setLayout(layout)
         self.setCentralWidget(container)
 
@@ -128,10 +144,14 @@ class MainWindow(QMainWindow):
     def ingest_breath_samples(self, samples, *, timestamp: float | None = None) -> None:
         if hasattr(self, "calibration_view"):
             self.calibration_view.ingest_samples(samples, timestamp=timestamp)
+        if hasattr(self, "pretest_view"):
+            self.pretest_view.ingest_breath_samples(samples, timestamp=timestamp)
 
     def update_gating_state(self, state: str) -> None:
         if hasattr(self, "calibration_view"):
             self.calibration_view.update_gating_state(state)
+        if hasattr(self, "pretest_view"):
+            self.pretest_view.update_gating_state(state)
 
     def update_toolbar(
         self,
@@ -145,15 +165,6 @@ class MainWindow(QMainWindow):
         self._reset_button.setEnabled(reset_enabled)
         self._stop_button.setEnabled(stop_enabled)
         self._help_button.setEnabled(True)
-        tips = tooltips or {}
-        self._connect_button.setToolTip(
-            tips.get("connect", "运行自检并初始化硬件")
-        )
-        self._reset_button.setToolTip(
-            tips.get("reset", "需要：已连接、已通过自检且 SAFE")
-        )
-        self._stop_button.setToolTip(tips.get("stop", "需要：已连接硬件"))
-        self._help_button.setToolTip(tips.get("help", "打开本地中文手册"))
 
     def render_self_check(self, results, ready: bool) -> None:
         status_word = "通过" if ready else "失败"
@@ -162,7 +173,5 @@ class MainWindow(QMainWindow):
             for item in results
         ]
         prefix = f"最近自检：{status_word}"
-        self._self_check_label.setText(prefix + " | " + " | ".join(summary))
-
-    def _trigger_recheck(self) -> None:
-        self.controller.request_self_check()
+        text = prefix + ("\n" + "\n".join(summary) if summary else "")
+        self._self_check_label.setText(text)

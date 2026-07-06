@@ -32,9 +32,11 @@
         - AI0: 呼吸传感器模拟输入。
         - AI6: 外部 TTL 触发信号。
         - P0.0-P0.7, P1.0-P1.3: 驱动气味通道 1-12。
-        - P1.0 (Special): 总阀驱动 (Master Valve) - 上电开启，有刺激=气味路，无刺激=补偿路。
-    - **NI USB-6501 (Dev2):**
-        - P0.0-P0.7: 驱动气味通道 13-20。
+    - **NI USB-6001 (Dev2):**
+        - P1.0 (Special): 总阀驱动 (Master Valve)。当前真实硬件与运行配置均为 `Dev2/P1.0`；RealHAL 写入时会转换为 NI-DAQmx 线路 `Dev2/port1/line0`。
+        - P0.0-P0.7: 驱动气味通道 13-20（以 `config/default_config.json` 的 `valve_mapping` 为准）。
+    - **NI USB-6501 (Dev3):**
+        - 当前纳入启动自检；阀门输出映射以 `config/default_config.json` 为唯一运行来源。
     - **RS232 (Alicat MFCs):** 共用一个串口，ID 分别为 A, B, C。
         - MFC A: 气味/补偿气道 (刺激时=气味流速, 无刺激=气味+排空流速)。
         - MFC B: 载气气道 (恒定流速)。

@@ -5,14 +5,24 @@ import logging
 import os
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from PySide6.QtCore import QObject, Slot
+from PySide6.QtCore import QObject, Signal, Slot
 
 from app.models import AppState, SafetyState
-from app.services import GatingService, ShutdownService, CalibrationSession
+from app.services import (
+    CalibrationSession,
+    FlowApplyResult,
+    FlowService,
+    GatingService,
+    MockHAL,
+    SafetyManager,
+    ShutdownService,
+    ValveService,
+)
 from app.workers import HardwareWorker
 
 if TYPE_CHECKING:
@@ -22,6 +32,9 @@ LOG = logging.getLogger(__name__)
 
 
 class MainController(QObject):
+    _pretest_sequence_completed = Signal(str, list, object, bool, str)
+    _startup_zero_completed = Signal(object)
+
     def __init__(
         self,
         state: AppState,
@@ -31,15 +44,18 @@ class MainController(QObject):
     ) -> None:
         super().__init__()
         self.state = state
+        self.simulation_mode = state.simulation_mode
         self.worker = worker
-        self.safety_manager = safety_manager
+        self.safety_manager = safety_manager or SafetyManager()
         shutdown_cfg = config or {}
         if "shutdown_record_path" not in shutdown_cfg:
-            shutdown_cfg["shutdown_record_path"] = str(Path.cwd() / "logs" / "last_shutdown_event.json")
+            shutdown_cfg["shutdown_record_path"] = str(
+                Path.cwd() / "logs" / "last_shutdown_event.json"
+            )
         self.shutdown_service = ShutdownService(
             state=state,
             worker=worker,
-            safety_manager=safety_manager,
+            safety_manager=self.safety_manager,
             retry_limit=int(shutdown_cfg.get("shutdown_retry_limit", 2)),
             retry_interval=float(shutdown_cfg.get("shutdown_retry_interval_s", 0.2)),
             record_path=self._resolve_record_path(shutdown_cfg),
@@ -48,16 +64,33 @@ class MainController(QObject):
             inhale_threshold=state.inhale_threshold,
             exhale_threshold=state.exhale_threshold,
         )
+        self.valve_service = ValveService(
+            state=state,
+            safety_manager=self.safety_manager,
+            worker=worker,
+            valve_variants=state.valve_variants,
+            hardware_variant=state.hardware_variant,
+            master_valve_line=state.master_valve_line,
+        )
+        hal_instance = getattr(worker, "hal", None) or MockHAL()
+        self.flow_service = FlowService(
+            hal_instance,
+            master_target=state.master_valve_line or None,
+            master_writer=getattr(worker, "write_digital", None),
+        )
         self.calibration_session = CalibrationSession() # Story 2.6
         self._last_safety_state: SafetyState | None = None
         self._has_seen_connection = False
         self._connect_in_progress = False
+        self._pretest_sequence_in_progress = False
         self.view: MainWindow | None = None
         self.worker.telemetry_ready.connect(self.handle_telemetry)
         self.worker.status_message.connect(self.handle_status)
         self.worker.self_check_completed.connect(self.handle_self_check)
         if hasattr(self.worker, "breath_samples"):
             self.worker.breath_samples.connect(self.handle_breath_samples)
+        self._pretest_sequence_completed.connect(self._handle_pretest_sequence_completed)
+        self._startup_zero_completed.connect(self._handle_startup_zero_completed)
         self._breath_logger = logging.getLogger("breath_viz")
 
     def bind_view(self, view: MainWindow) -> None:
@@ -67,11 +100,27 @@ class MainController(QObject):
         self.view.update_status(self.state.status_message)
         self.view.render_telemetry(self.state.telemetry)
         self.view.render_last_shutdown(self.state.last_shutdown_event)
+        self._update_pretest_view_safety(
+            SafetyState(
+                state=self.state.telemetry.safety_state,
+                airflow=self.state.telemetry.airflow,
+                threshold=self.state.low_flow_threshold,
+                updated_at=self.state.telemetry.timestamp,
+                reason=self.state.telemetry.safety_reason,
+            )
+        )
         self._refresh_toolbar_state()
+        if hasattr(self.view, "pretest_view"):
+            self.view.pretest_view.flow_sequence_requested.connect(self.handle_flow_sequence_request)
         if hasattr(self.view, "calibration_view"):
             self.view.calibration_view.breath_metrics.connect(self.handle_breath_metrics)
             self.view.calibration_view.threshold_changed.connect(self.update_breath_threshold)
             self.view.calibration_view.calibration_requested.connect(self.handle_calibration_request)
+        if not self.state.has_active_valve_map():
+            LOG.warning(
+                "No valve mapping found for variant %s; PreTestView will be disabled",
+                self.state.hardware_variant,
+            )
 
     def start_worker(self) -> None:
         if not self.worker.isRunning():
@@ -124,6 +173,8 @@ class MainController(QObject):
         if self.view:
             self.view.render_telemetry(self.state.telemetry)
             self.view.update_status(self.state.status_message)
+            if hasattr(self.view, "pretest_view"):
+                self.view.pretest_view.update_airflow(self.state.telemetry.airflow)
         self._refresh_toolbar_state()
 
     @Slot(str)
@@ -131,6 +182,316 @@ class MainController(QObject):
         self.state.update_status(message)
         if self.view:
             self.view.update_status(message)
+
+    @Slot(int, bool)
+    def handle_valve_toggle_request(self, channel_id: int, desired_state: bool) -> None:
+        if not self.state.has_active_valve_map():
+            message = "未找到 20 通道映射，已阻断写入"
+            self.state.update_status(message)
+            if self.view:
+                self.view.update_status(message)
+                if hasattr(self.view, "pretest_view"):
+                    self.view.pretest_view.apply_safety_state(
+                        self.state.telemetry.safety_state,
+                        message,
+                        disabled=True,
+                    )
+                    self.view.pretest_view.show_warning(message)
+            LOG.warning("Valve toggle blocked | channel=%s | reason=%s", channel_id, message)
+            return
+
+        safety_state = self._last_safety_state or SafetyState(
+            state=self.state.telemetry.safety_state,
+            airflow=self.state.telemetry.airflow,
+            threshold=self.state.low_flow_threshold,
+            updated_at=self.state.telemetry.timestamp,
+            reason=self.state.telemetry.safety_reason,
+        )
+        success, message = self.valve_service.set_valve(
+            channel_id,
+            desired_state,
+            safety_state=safety_state,
+        )
+        self.state.update_status(message)
+        if self.view:
+            self.view.update_status(self.state.status_message)
+            if hasattr(self.view, "pretest_view"):
+                self.view.pretest_view.set_valve_state(
+                    channel_id, self.valve_service.is_open(channel_id)
+                )
+                disabled = safety_state.state != "SAFE" or not self.state.has_active_valve_map()
+                self.view.pretest_view.apply_safety_state(
+                    safety_state.state,
+                    safety_state.reason,
+                    disabled=disabled,
+                )
+                self.view.pretest_view.set_master_state(self.valve_service.master_is_open())
+                if not success:
+                    self.view.pretest_view.show_warning(message)
+                else:
+                    self.view.pretest_view.show_warning("")
+        if not success:
+            LOG.warning("Valve toggle blocked | channel=%s | reason=%s", channel_id, message)
+
+    @Slot(str, list)
+    def handle_valve_sequence_request(self, mode: str, channels: list) -> None:
+        """Open/close staged odor valves as part of the Start/Rest sequence."""
+        if not channels:
+            return
+        if not self.state.has_active_valve_map():
+            message = "未找到 20 通道映射，已阻断写入"
+            self.state.update_status(message)
+            if self.view:
+                self.view.update_status(message)
+            LOG.warning("Valve sequence blocked | mode=%s | reason=%s", mode, message)
+            return
+
+        desired_state = mode == "stim_start"
+        safety_state = self._last_safety_state or SafetyState(
+            state=self.state.telemetry.safety_state,
+            airflow=self.state.telemetry.airflow,
+            threshold=self.state.low_flow_threshold,
+            updated_at=self.state.telemetry.timestamp,
+            reason=self.state.telemetry.safety_reason,
+        )
+
+        opened_channels: list[int] = []
+        messages: list[str] = []
+        success = True
+        for channel in channels:
+            channel_id = int(channel)
+            ok, message = self.valve_service.set_valve(
+                channel_id,
+                desired_state,
+                safety_state=safety_state,
+            )
+            messages.append(message)
+            if ok and desired_state:
+                opened_channels.append(channel_id)
+            if not ok:
+                success = False
+                break
+
+        if desired_state and not success:
+            for channel_id in opened_channels:
+                self.valve_service.set_valve(
+                    channel_id,
+                    False,
+                    safety_state=safety_state,
+                )
+
+        status = (
+            f"启动阀门序列完成：{', '.join(str(int(ch)) for ch in channels)}"
+            if success and desired_state
+            else f"关闭阀门序列完成：{', '.join(str(int(ch)) for ch in channels)}"
+            if success
+            else messages[-1]
+        )
+        self.state.update_status(status)
+        if self.view:
+            self.view.update_status(self.state.status_message)
+            if hasattr(self.view, "pretest_view"):
+                for channel in channels:
+                    channel_id = int(channel)
+                    self.view.pretest_view.set_valve_state(
+                        channel_id,
+                        self.valve_service.is_open(channel_id),
+                    )
+                self.view.pretest_view.set_master_state(self.valve_service.master_is_open())
+                if not success:
+                    self.view.pretest_view.show_warning(status)
+                    if desired_state:
+                        self.view.pretest_view.abort_flow_sequence(status)
+                else:
+                    self.view.pretest_view.show_warning("")
+
+        if not success:
+            LOG.warning(
+                "Valve sequence failed | mode=%s | channels=%s | reason=%s",
+                mode,
+                channels,
+                status,
+            )
+
+    @Slot(str, list, float, float, float)
+    def handle_pretest_sequence_request(
+        self,
+        mode: str,
+        channels: list,
+        a: float,
+        b: float,
+        c: float,
+    ) -> None:
+        """Run flow + valve sequence off the UI thread to avoid hardware I/O stalls."""
+        if self._pretest_sequence_in_progress:
+            message = "上一条启动/停止序列仍在执行，请稍候"
+            self.state.update_status(message)
+            if self.view:
+                self.view.update_status(message)
+            return
+
+        self._pretest_sequence_in_progress = True
+        pretest = self.view.pretest_view if self.view and hasattr(self.view, "pretest_view") else None
+        if pretest:
+            pretest.set_applying(True)
+            pretest.set_flow_message("正在执行硬件序列...")
+
+        thread = threading.Thread(
+            target=self._run_pretest_sequence,
+            args=(mode, [int(ch) for ch in channels], float(a), float(b), float(c)),
+            daemon=True,
+        )
+        thread.start()
+
+    def _run_pretest_sequence(
+        self,
+        mode: str,
+        channels: list[int],
+        a: float,
+        b: float,
+        c: float,
+    ) -> None:
+        telemetry = self.state.telemetry
+        hardware_ready = self.state.hardware_ready or telemetry.connected or self.state.simulation_mode
+        if not hardware_ready:
+            result = FlowApplyResult(
+                success=False,
+                message=f"硬件未就绪，阻断 UI·pretest-seq-{mode}",
+                a=a,
+                b=b,
+                c=c,
+                a_comp=a + c,
+                error="hardware_not_ready",
+            )
+            self._pretest_sequence_completed.emit(mode, channels, result, False, result.message)
+            return
+
+        desired_open = mode == "stim_start"
+        if desired_open:
+            result = self.flow_service.apply_stim_start(a_target=a, b_target=b)
+        else:
+            result = self.flow_service.apply_stim_end(a_target=a, b_target=b, c_target=c)
+
+        self.state.flow_setpoints_ready = bool(result.success)
+        if not result.success:
+            self._pretest_sequence_completed.emit(mode, channels, result, False, result.message)
+            return
+
+        safety_state = self._last_safety_state or SafetyState(
+            state=self.state.telemetry.safety_state,
+            airflow=self.state.telemetry.airflow,
+            threshold=self.state.low_flow_threshold,
+            updated_at=self.state.telemetry.timestamp,
+            reason=self.state.telemetry.safety_reason,
+        )
+        opened_channels: list[int] = []
+        for channel_id in channels:
+            ok, message = self.valve_service.set_valve(
+                channel_id,
+                desired_open,
+                safety_state=safety_state,
+            )
+            if ok and desired_open:
+                opened_channels.append(channel_id)
+            if not ok:
+                if desired_open:
+                    for opened in opened_channels:
+                        self.valve_service.set_valve(
+                            opened,
+                            False,
+                            safety_state=safety_state,
+                        )
+                self._pretest_sequence_completed.emit(mode, channels, result, False, message)
+                return
+
+        if desired_open:
+            status = f"启动阀门序列完成：{', '.join(str(ch) for ch in channels)}"
+        elif channels:
+            status = f"关闭阀门序列完成：{', '.join(str(ch) for ch in channels)}"
+        else:
+            status = result.message
+        self._pretest_sequence_completed.emit(mode, channels, result, True, status)
+
+    @Slot(str, list, object, bool, str)
+    def _handle_pretest_sequence_completed(
+        self,
+        mode: str,
+        channels: list,
+        result_obj: object,
+        success: bool,
+        status: str,
+    ) -> None:
+        result = result_obj if isinstance(result_obj, FlowApplyResult) else None
+        self._pretest_sequence_in_progress = False
+        pretest = self.view.pretest_view if self.view and hasattr(self.view, "pretest_view") else None
+
+        if result and result.success:
+            self.state.applied_a = result.a
+            self.state.applied_b = result.b
+            self.state.applied_c = result.c
+            self.state.applied_a_comp = result.a_comp
+            self.state.flow_setpoints_ready = True
+            if pretest:
+                pretest.set_applied_values(
+                    a=result.a,
+                    b=result.b,
+                    c=result.c,
+                    a_comp=result.a_comp,
+                )
+        elif result:
+            self.state.flow_setpoints_ready = False
+
+        for channel in channels:
+            channel_id = int(channel)
+            if pretest:
+                pretest.set_valve_state(channel_id, self.valve_service.is_open(channel_id))
+        if pretest:
+            pretest.set_master_state(self.valve_service.master_is_open())
+            pretest.set_applying(False)
+            pretest.set_flow_message(status)
+            if success:
+                pretest.show_warning("")
+            else:
+                pretest.show_warning(status)
+                if mode == "stim_start":
+                    pretest.abort_flow_sequence(status)
+
+        self.state.update_status(status)
+        if self.view:
+            self.view.update_status(self.state.status_message)
+
+    @Slot(float, float, float)
+    def handle_apply_request(self, flow_a: float, flow_b: float, flow_c: float) -> FlowApplyResult:
+        pretest = self.view.pretest_view if self.view and hasattr(self.view, "pretest_view") else None
+        if pretest:
+            pretest.set_applying(True)
+
+        telemetry = self.state.telemetry
+        hardware_ready = self.state.hardware_ready or telemetry.connected or self.state.simulation_mode
+        if not hardware_ready:
+            message = "硬件未就绪，阻断 UI·apply-flow"
+            result = FlowApplyResult(
+                success=False,
+                message=message,
+                a=flow_a,
+                b=flow_b,
+                c=flow_c,
+                a_comp=flow_a + flow_c,
+                error="hardware_not_ready",
+            )
+            self._handle_apply_result(result, pretest=pretest)
+            if pretest:
+                pretest.apply_safety_state("DATA_STALE", message, disabled=True)
+            return result
+
+        result = self.flow_service.apply_flows(
+            a_target=flow_a,
+            b_target=flow_b,
+            c_target=flow_c,
+            mode="rest",
+        )
+        self._handle_apply_result(result, pretest=pretest)
+        return result
 
     @Slot(list, float)
     def handle_breath_samples(self, samples: list, timestamp: float) -> None:
@@ -141,7 +502,7 @@ class MainController(QObject):
         if self.calibration_session.is_active:
             for sample in samples:
                 self.calibration_session.update(sample)
-            
+
             # Check for completion
             if self.calibration_session.is_finished():
                 result = self.calibration_session.stop()
@@ -150,22 +511,30 @@ class MainController(QObject):
                     self.view.calibration_view.update_calibration_stats(
                         result.max_val, result.min_val, result.offset, result.gain
                     )
-                    
+
                     # Apply results (AC3) & Persist (AC5)
                     self.state.signal_offset = result.offset
                     self.state.signal_gain = result.gain
                     self.view.calibration_view.set_signal_transform(result.offset, result.gain)
-                    
+                    if hasattr(self.view, "pretest_view"):
+                        self.view.pretest_view.set_signal_transform(result.offset, result.gain)
+
                     self._persist_config_values({
                         "signal_offset": result.offset,
                         "signal_gain": result.gain
                     })
-                    LOG.info("Calibration applied: Offset=%.3f, Gain=%.3f", result.offset, result.gain)
+                    LOG.info(
+                        "Calibration applied: Offset=%.3f, Gain=%.3f",
+                        result.offset,
+                        result.gain,
+                    )
             elif self.view and hasattr(self.view, "calibration_view"):
                  # Update progress/stats
                  progress = self.calibration_session.get_progress()
                  remaining = self.calibration_session.duration_sec * (1 - progress)
-                 self.view.calibration_view.set_calibration_state(True, f"正在校准... {remaining:.1f}s")
+                 self.view.calibration_view.set_calibration_state(
+                     True, f"正在校准... {remaining:.1f}s"
+                 )
                  self.view.calibration_view.set_calibration_progress(int(progress * 100))
                  self.view.calibration_view.update_calibration_stats(
                      self.calibration_session.current_max,
@@ -176,25 +545,33 @@ class MainController(QObject):
         # Calculate sample interval (assuming 100Hz from worker, or derive from timestamp)
         # We'll assume strict 100Hz (0.01s) as per requirement FR3.1
         dt = 0.01
-        start_ts = timestamp - (len(samples) * dt)
-        
+        sample_count = len(samples)
+        if sample_count == 0:
+            return
+        start_ts = timestamp - ((sample_count - 1) * dt)
+
+        # Apply calibration to samples before gating (AC3 / Bug Fix)
+        # User sees transformed data, so thresholds apply to transformed data.
+        calibrated_samples = [self.state.apply_calibration(s) for s in samples]
+
         transitions = self.gating_service.process_batch(
-            samples,
+            calibrated_samples,
             self.state.telemetry.safety_state,
             timestamp_start=start_ts,
             dt=dt
         )
-        
+
         if transitions:
             # Update current state
             last_transition = transitions[-1]
             self.state.telemetry.gating_state = last_transition.state
             if self.view:
                 self.view.update_gating_state(last_transition.state)
-            
+
             # Log transitions
             for t in transitions:
                 log_entry = {
+                    "event": "threshold_cross",
                     "ts": t.timestamp,
                     "sample_value": t.sample_value,
                     "gate_state": t.state,
@@ -202,7 +579,7 @@ class MainController(QObject):
                     "exhale": self.gating_service.exhale_threshold,
                     "safety_state": t.safety_state,
                 }
-                self._breath_logger.info("threshold_cross | %s", log_entry)
+                self._breath_logger.info(log_entry)
 
     def handle_breath_metrics(self, payload: dict) -> None:
         warning = bool(payload.get("warning_flag"))
@@ -211,6 +588,7 @@ class MainController(QObject):
             "ts": payload.get("ts"),
             "fps_avg": payload.get("fps_avg"),
             "fps_p95": payload.get("fps_p95"),
+            "fps_p05": payload.get("fps_p05"),
             "window_s": payload.get("window_s"),
             "sample_count": payload.get("sample_count"),
             "warning_flag": warning,
@@ -219,7 +597,11 @@ class MainController(QObject):
         self._breath_logger.info("breath_viz | %s", log_payload)
         if warning:
             self._breath_logger.warning("breath_viz_warning | %s", log_payload)
-            message = "波形渲染 FPS 低于 30，已记录" if reason == "fps_low" else "呼吸数据过期，等待新样本"
+            message = (
+                "波形渲染 FPS 低于 30，已记录"
+                if reason == "fps_low"
+                else "呼吸数据过期，等待新样本"
+            )
             self.state.update_status(message)
             if self.view:
                 self.view.update_status(self.state.status_message)
@@ -242,6 +624,8 @@ class MainController(QObject):
         if self.view:
             self.view.update_status(status)
             self.view.render_self_check(self.state.self_check_results, hardware_ready)
+        if hardware_ready:
+            self._reset_startup_flows_to_zero_async()
         self._refresh_toolbar_state()
 
     def request_self_check(self) -> None:
@@ -261,37 +645,47 @@ class MainController(QObject):
         self.state.update_status("正在连接硬件并执行自检...")
         if self.view:
             self.view.update_status(self.state.status_message)
-        self.start_worker()
-        self.worker.request_self_check()
+        self._start_or_request_self_check()
         self._refresh_toolbar_state()
 
     def reset_hardware(self) -> None:
-        if not self.ensure_hardware_ready("Reset"):
-            self._refresh_toolbar_state()
-            return
+        # 允许在未 ready 时执行 reset，用于恢复异常状态；仍需安全检查。
         if not self.ensure_safe_command("Reset", source="UI"):
             self._refresh_toolbar_state()
             return
 
-        self.state.update_status("正在重置硬件，重新握手并刷新自检...")
-        self.state.hardware_ready = False
+        self.state.update_status("正在重置硬件：先安全关阀，再自检重联")
+        if self.view:
+            self.view.update_status(self.state.status_message)
+
+        event = self.shutdown_service.shutdown(
+            source="reset",
+            reason="reset_request",
+            force=True,
+        )
+        self._handle_shutdown_event(event, success_message="重置完成：阀门关闭，准备重新自检")
+
+        if hasattr(self, "valve_service"):
+            self.valve_service.reset_cached_state()
+        if self.view and hasattr(self.view, "pretest_view"):
+            self.view.pretest_view.reset_valve_selection()
+        if hasattr(self.worker, "mark_disconnected"):
+            self.worker.mark_disconnected()
         self.state.telemetry.connected = False
-        self.state.last_shutdown_event = {
-            "state": self.state.telemetry.safety_state,
-            "airflow": self.state.telemetry.airflow,
-            "threshold": self.state.low_flow_threshold,
-            "timestamp": time.time(),
-            "reason": "reset_request",
-            "source": "reset",
-        }
+        self.state.hardware_ready = False
+        self._connect_in_progress = True
+        self.state.update_status("重置完成：正在重新初始化硬件并自检...")
         if self.view:
             self.view.update_status(self.state.status_message)
             self.view.render_telemetry(self.state.telemetry)
-            self.view.render_last_shutdown(self.state.last_shutdown_event)
-        if hasattr(self.worker, "mark_disconnected"):
-            self.worker.mark_disconnected()
-        self.worker.request_self_check()
+        self._start_or_request_self_check()
         self._refresh_toolbar_state()
+
+    def _start_or_request_self_check(self) -> None:
+        was_running = self.worker.isRunning()
+        self.start_worker()
+        if was_running:
+            self.worker.request_self_check()
 
     def stop_hardware(self) -> None:
         self.state.update_status("正在安全停止，关闭阀门并释放资源...")
@@ -303,7 +697,13 @@ class MainController(QObject):
             force=True,
         )
         self._handle_shutdown_event(event, success_message="已停止/已关闭阀门")
+        if hasattr(self, "valve_service"):
+            self.valve_service.reset_cached_state()
         self._connect_in_progress = False
+        self.state.telemetry.connected = False
+        self.state.hardware_ready = False
+        if self.view:
+            self.view.render_telemetry(self.state.telemetry)
         self._refresh_toolbar_state()
 
     def open_help_manual(self) -> None:
@@ -458,6 +858,106 @@ class MainController(QObject):
             tooltips=tooltips,
         )
 
+    def _handle_apply_result(
+        self,
+        result: FlowApplyResult,
+        *,
+        pretest,
+    ) -> None:
+        if result.success:
+            self.state.applied_a = result.a
+            self.state.applied_b = result.b
+            self.state.applied_c = result.c
+            self.state.applied_a_comp = result.a_comp
+            self.state.flow_setpoints_ready = True
+            self.state.update_status(result.message)
+            if pretest:
+                pretest.set_applied_values(
+                    a=result.a,
+                    b=result.b,
+                    c=result.c,
+                    a_comp=result.a_comp,
+                )
+                pretest.set_flow_message(result.message)
+        else:
+            self.state.flow_setpoints_ready = False
+            self.state.update_status(result.message)
+            if pretest:
+                pretest.set_flow_message(result.message)
+        if self.view:
+            self.view.update_status(self.state.status_message)
+        if pretest:
+            pretest.set_applying(False)
+
+    def _reset_startup_flows_to_zero_async(self) -> None:
+        """Ensure opening/connecting the app leaves Alicat setpoints at no-flow."""
+        self.state.flow_setpoints_ready = False
+        self.state.update_status("硬件自检通过，正在清零 A/B/C...")
+        if self.view:
+            self.view.update_status(self.state.status_message)
+            if hasattr(self.view, "pretest_view"):
+                self.view.pretest_view.set_flow_message("正在清零 A/B/C...")
+
+        thread = threading.Thread(target=self._run_startup_zero, daemon=True)
+        thread.start()
+
+    def _run_startup_zero(self) -> None:
+        result = self.flow_service.apply_zero()
+        self._startup_zero_completed.emit(result)
+
+    @Slot(object)
+    def _handle_startup_zero_completed(self, result_obj: object) -> None:
+        result = result_obj if isinstance(result_obj, FlowApplyResult) else None
+        pretest = self.view.pretest_view if self.view and hasattr(self.view, "pretest_view") else None
+        self.state.flow_setpoints_ready = False
+        if result and result.success:
+            self.state.applied_a = 0.0
+            self.state.applied_b = 0.0
+            self.state.applied_c = 0.0
+            self.state.applied_a_comp = 0.0
+            self.state.update_status("硬件自检通过，默认无气流：A/B/C 已清零")
+            if pretest:
+                pretest.set_applied_values(a=0.0, b=0.0, c=0.0, a_comp=0.0)
+                pretest.set_flow_message("默认无气流：A/B/C 已清零")
+                pretest.show_warning("")
+        else:
+            message = result.message if result else "未知错误"
+            self.state.update_status(f"硬件自检通过，但流量清零失败：{message}")
+            if pretest:
+                pretest.set_flow_message(message)
+                pretest.show_warning(self.state.status_message)
+        if self.view:
+            self.view.update_status(self.state.status_message)
+
+    @Slot(str, float, float, float)
+    def handle_flow_sequence_request(self, mode: str, a: float, b: float, c: float) -> FlowApplyResult:
+        telemetry = self.state.telemetry
+        hardware_ready = self.state.hardware_ready or telemetry.connected or self.state.simulation_mode
+        pretest = self.view.pretest_view if self.view and hasattr(self.view, "pretest_view") else None
+        if not hardware_ready:
+            reason = f"硬件未就绪，阻断 UI·flow-seq-{mode}"
+            result = FlowApplyResult(
+                success=False,
+                message=reason,
+                a=a,
+                b=b,
+                c=c,
+                a_comp=a + c,
+                error="hardware_not_ready",
+            )
+            self._handle_apply_result(result, pretest=pretest)
+            if pretest:
+                pretest.apply_safety_state("DATA_STALE", reason, disabled=True)
+            return result
+
+        if mode == "stim_start":
+            result = self.flow_service.apply_stim_start(a_target=a, b_target=b)
+        else:
+            result = self.flow_service.apply_stim_end(a_target=a, b_target=b, c_target=c)
+
+        self._handle_apply_result(result, pretest=pretest)
+        return result
+
     def _apply_previous_shutdown_status(self) -> None:
         """Show last shutdown summary when app starts."""
         event = self.state.last_shutdown_event or {}
@@ -480,6 +980,7 @@ class MainController(QObject):
 
     def _handle_shutdown_event(self, event: dict, *, success_message: str) -> None:
         success = event.get("result") == "success"
+        self.state.flow_setpoints_ready = False
         message = (
             success_message
             if success
@@ -494,7 +995,7 @@ class MainController(QObject):
     def update_breath_threshold(self, name: str, value: float) -> None:
         old_val = 0.0
         new_val = float(value)
-        
+
         if name == "inhale":
             old_val = self.state.inhale_threshold
             self.state.inhale_threshold = new_val
@@ -528,6 +1029,12 @@ class MainController(QObject):
                 "exhale_threshold": self.state.exhale_threshold,
             }
         )
+
+        if self.view and hasattr(self.view, "pretest_view"):
+            self.view.pretest_view.set_thresholds(
+                self.state.inhale_threshold,
+                self.state.exhale_threshold,
+            )
 
     def set_low_flow_threshold(self, value: float) -> bool:
         """Options 阈值更新：校验、更新内存并持久化配置。"""
@@ -606,8 +1113,16 @@ class MainController(QObject):
             if initial:
                 return
 
-            if not self._has_seen_connection and not self.state.hardware_ready and not self._connect_in_progress:
+            if (
+                not self._has_seen_connection
+                and not self.state.hardware_ready
+                and not self._connect_in_progress
+            ):
                 # Still idle, no prior connection; keep waiting message instead of raising emergency.
+                return
+
+            if self._is_expected_disconnect():
+                self._refresh_toolbar_state()
                 return
 
             now_ts = telemetry.timestamp or time.time()
@@ -638,6 +1153,7 @@ class MainController(QObject):
                 self.view.update_status(self.state.status_message)
                 self.view.render_telemetry(telemetry)
                 self.view.render_last_shutdown(self.state.last_shutdown_event)
+                self._update_pretest_view_safety(safety_state)
             self._refresh_toolbar_state()
             return
 
@@ -696,3 +1212,20 @@ class MainController(QObject):
         if self.view and self.state.last_shutdown_event:
             self.view.render_last_shutdown(self.state.last_shutdown_event)
         self._refresh_toolbar_state()
+        self._update_pretest_view_safety(safety_state)
+
+    def _update_pretest_view_safety(self, safety_state: SafetyState) -> None:
+        if self.view and hasattr(self.view, "pretest_view"):
+            disabled = safety_state.state != "SAFE"
+            self.view.pretest_view.apply_safety_state(
+                safety_state.state,
+                safety_state.reason,
+                disabled=disabled,
+            )
+
+    def _is_expected_disconnect(self) -> bool:
+        event = self.state.last_shutdown_event or {}
+        return (
+            event.get("result") == "success"
+            and event.get("source") in {"stop", "reset", "app_exit"}
+        )

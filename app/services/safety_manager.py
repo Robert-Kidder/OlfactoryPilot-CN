@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import math
-from typing import Callable
+from collections.abc import Callable
 
 from app.models import SafetyState
 
@@ -23,7 +23,7 @@ class SafetyManager:
 
     def is_safe(self, airflow: float) -> bool:
         """简化检查，保留向后兼容。"""
-        return airflow >= self.low_flow_threshold
+        return self._coerce_airflow(airflow) is not None
 
     def validate_threshold(self, value: float) -> tuple[bool, str]:
         """阈值校验：必须为正、有穷、不过大。"""
@@ -85,9 +85,6 @@ class SafetyManager:
         hardware_state: str | None = None,
     ) -> SafetyState:
         """综合阈值、滞后、过期判定。"""
-        prev_state_value = (
-            previous.state if previous and previous.state in {"SAFE", "LOW_FLOW"} else "LOW_FLOW"
-        )
         prev_timestamp = previous.updated_at if previous else timestamp
 
         safe_airflow = self._coerce_airflow(airflow)
@@ -108,7 +105,7 @@ class SafetyManager:
                 airflow=0.0,
                 threshold=self.low_flow_threshold,
                 updated_at=timestamp,
-                reason="气流读数异常，默认低流/阻断",
+                reason="Alicat 读数异常，阻断危险动作",
             )
 
         if (
@@ -130,33 +127,16 @@ class SafetyManager:
                 airflow=safe_airflow,
                 threshold=self.low_flow_threshold,
                 updated_at=timestamp,
-                reason="气流数据过期，保持安全阻断",
+                reason="Alicat 数据过期，保持安全阻断",
             )
 
-        if safe_airflow < self.low_flow_threshold:
-            base_state = SafetyState(
-                state="LOW_FLOW",
-                airflow=safe_airflow,
-                threshold=self.low_flow_threshold,
-                updated_at=timestamp,
-                reason=f"气流低于阈值 {self.low_flow_threshold:.2f}",
-            )
-        elif safe_airflow >= self.low_flow_threshold + self.recovery_margin:
-            base_state = SafetyState(
-                state="SAFE",
-                airflow=safe_airflow,
-                threshold=self.low_flow_threshold,
-                updated_at=timestamp,
-                reason="气流正常",
-            )
-        else:
-            base_state = SafetyState(
-                state=prev_state_value,
-                airflow=safe_airflow,
-                threshold=self.low_flow_threshold,
-                updated_at=timestamp,
-                reason="稳定观察，继续工作悬停",
-            )
+        base_state = SafetyState(
+            state="SAFE",
+            airflow=safe_airflow,
+            threshold=self.low_flow_threshold,
+            updated_at=timestamp,
+            reason="Alicat idle/设定状态正常",
+        )
 
         if hardware_state and hardware_state != "SAFE":
             return SafetyState(
@@ -174,7 +154,7 @@ class SafetyManager:
         try:
             if value is None:
                 return None
-            if isinstance(value, (int, float)) and not (math.isnan(value) or math.isinf(value)):
+            if isinstance(value, int | float) and not (math.isnan(value) or math.isinf(value)):
                 return float(value)
             return None
         except (TypeError, ValueError):
@@ -182,7 +162,7 @@ class SafetyManager:
 
     def _from_string(self, state: str, timestamp: float | None) -> SafetyState:
         return SafetyState(
-            state=state if state in {"SAFE", "LOW_FLOW"} else "LOW_FLOW",
+            state=state if state in {"SAFE", "LOW_FLOW"} else "SAFE",
             airflow=0.0,
             threshold=self.low_flow_threshold,
             updated_at=timestamp if timestamp is not None else 0.0,

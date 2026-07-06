@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from PyInstaller.utils.hooks import collect_submodules
+from PyInstaller.utils.hooks import collect_submodules, copy_metadata
 
 spec_path = Path(globals().get("__file__", "pyinstaller.spec")).resolve()
 project_root = spec_path.parent
@@ -31,6 +31,26 @@ hidden_imports = [
 hidden_imports.extend(collect_submodules("jaraco"))
 hidden_imports.extend(collect_submodules("pkg_resources"))
 excluded_modules = [
+    # Not used: PyQt5 (we use PySide6)
+    "PyQt5",
+    # Not used in runtime: Tk, IPython/Jupyter, Matplotlib UIs, pytest
+    "tkinter",
+    "IPython",
+    "ipykernel",
+    "ipython_genutils",
+    "jupyter",
+    "jupyter_core",
+    "jupyter_client",
+    "jupyter_console",
+    "notebook",
+    "matplotlib",
+    "matplotlib.backends",
+    "pytest",
+    "pkg_resources._vendor.jaraco.text.show-newlines",
+    "pkg_resources._vendor.jaraco.text.strip-prefix",
+    "pkg_resources._vendor.jaraco.text.to-dvorak",
+    "pkg_resources._vendor.jaraco.text.to-qwerty",
+    # PySide6 heavy/unused modules
     "PySide6.Qt3DAnimation",
     "PySide6.Qt3DCore",
     "PySide6.Qt3DExtras",
@@ -64,11 +84,17 @@ excluded_modules = [
 
 block_cipher = None
 
+datas = [
+    (str(config_file), "config"),
+    (str(docs_dir), "docs"),
+]
+datas += copy_metadata("nidaqmx")
+
 a = Analysis(
     ["app/main.py"],
     pathex=[str(project_root)],
     binaries=[],
-    datas=[(str(config_file), "config"), (str(docs_dir), "docs")],
+    datas=datas,
     hiddenimports=hidden_imports,
     hookspath=[],
     hooksconfig={},

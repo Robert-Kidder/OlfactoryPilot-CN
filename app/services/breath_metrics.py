@@ -2,14 +2,15 @@ from __future__ import annotations
 
 import time
 from collections import deque
+from collections.abc import Iterable
 from dataclasses import dataclass, replace
-from typing import Iterable
 
 
 @dataclass
 class FrameStats:
     fps_avg: float = 0.0
     fps_p95: float = 0.0
+    fps_p05: float = 0.0
     window_s: float = 10.0
     frame_count: int = 0
     sample_count: int = 0
@@ -58,25 +59,29 @@ class FrameRateTracker:
                 self.last_stats,
                 fps_avg=0.0,
                 fps_p95=0.0,
+                fps_p05=0.0,
                 frame_count=len(self._timestamps),
                 sample_count=sample_count,
                 warning_flag=False,
                 reason=None,
             )
 
-        intervals = [b - a for a, b in zip(self._timestamps, list(self._timestamps)[1:])]
+        intervals = [b - a for a, b in zip(self._timestamps, list(self._timestamps)[1:], strict=False)]
         durations = sum(intervals)
         if durations <= 0:
             fps_avg = 0.0
             fps_p95 = 0.0
+            fps_p05 = 0.0
         else:
             fps_values = [1.0 / max(dt, 1e-6) for dt in intervals]
             fps_avg = len(fps_values) / durations
-            fps_p95 = self._percentile(fps_values, 0.05)
+            fps_p95 = self._percentile(fps_values, 0.95)
+            fps_p05 = self._percentile(fps_values, 0.05)
 
         return FrameStats(
             fps_avg=fps_avg,
             fps_p95=fps_p95,
+            fps_p05=fps_p05,
             window_s=self.window_s,
             frame_count=len(self._timestamps),
             sample_count=sample_count,
@@ -87,7 +92,8 @@ class FrameRateTracker:
     def _apply_warning_state(self, stats: FrameStats, timestamp: float) -> FrameStats:
         warning = stats.warning_flag
         reason = stats.reason
-        if stats.fps_p95 < self.warn_threshold:
+        low_tail = stats.fps_p05
+        if low_tail < self.warn_threshold:
             if self._low_start is None:
                 self._low_start = timestamp
             self._recover_start = None

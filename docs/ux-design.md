@@ -61,18 +61,18 @@
     * Toggle Switch: "Manual Trigger" vs "External (TTL) Trigger".
 * **Safety Gating:** Start is disabled unless airflow > threshold; inline LOW FLOW banner near controls when unsafe.
 
-### 3.4 Tab 1: File (??????)
+### 3.4 Tab 1: File (文件)
 * **Inputs:** Subject, Condition, Session folder selector; protocol file picker (.txt/.csv) with validation (line errors surfaced inline).
 * **Filename Preview:** Shows `{Timestamp}_{Subject}_{Condition}.raw` and paired `.log`; warning if subject/condition empty.
 * **Actions:** `[ Load Protocol ]` (validates and parses), `[ Open Session Folder ]`, recent files list.
 * **States:** Error banner for malformed protocol lines; disable Start until protocol is valid.
 
-### 3.5 Tab 5: Cleaning (??????)
+### 3.5 Tab 5: Cleaning (清洁)
 * **Controls:** `[ Start Cleaning ]`, `[ Abort ]`, `[ Resume ]` (if supported), progress indicator (step/total, elapsed).
 * **Status Panel:** Current step name/duration, airflow/safety indicator (must be SAFE to proceed), log window for each valve action.
 * **Failure Handling:** On error/abort, automatically closes valves, shows reason, and writes step index + reason + elapsed to log.
 
-### 3.6 Tab 6: Options (??????)
+### 3.6 Tab 6: Options (选项)
 * **Hardware Config:** COM ports, NI device IDs (6001/6501) with inline validation and save; hardware variant selector (10 vs 20 channels) updates Pre-test UI on save.
 * **Thresholds & Safety:** Airflow threshold input; option to enable audible/visual LOW FLOW alert.
 * **Localization & UI:** Language toggle (Zh-CN default), font size slider; theme colors locked to spec unless dev mode enabled.

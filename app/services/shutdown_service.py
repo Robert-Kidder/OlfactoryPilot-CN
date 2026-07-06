@@ -3,8 +3,8 @@ from __future__ import annotations
 import json
 import logging
 import time
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
 
 from app.models import AppState, SafetyState
 from app.services.safety_manager import SafetyManager

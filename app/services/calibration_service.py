@@ -3,6 +3,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass
 
+
 @dataclass
 class CalibrationResult:
     offset: float
@@ -31,7 +32,7 @@ class CalibrationSession:
     def update(self, sample: float) -> None:
         if not self.is_active:
             return
-        
+
         if sample > self.current_max:
             self.current_max = sample
         if sample < self.current_min:
@@ -40,9 +41,9 @@ class CalibrationSession:
     def stop(self) -> CalibrationResult | None:
         if not self.is_active:
             return None
-        
+
         self.is_active = False
-        
+
         # Calculate parameters (AC3)
         # Avoid division by zero
         span = self.current_max - self.current_min
@@ -68,7 +69,7 @@ class CalibrationSession:
             return 0.0
         elapsed = time.time() - self.start_time
         return min(elapsed / self.duration_sec, 1.0)
-    
+
     def is_finished(self) -> bool:
         if not self.is_active or not self.start_time:
             return False

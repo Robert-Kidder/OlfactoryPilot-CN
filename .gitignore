@@ -5,6 +5,7 @@ __pycache__/
 
 # Virtual environments
 .venv/
+.venv-win/
 
 # Build outputs
 build/
@@ -18,3 +19,27 @@ dist/
 # Tooling
 .pytest_cache/
 .ruff_cache/
+
+# IDE/editor local settings
+.vscode/
+
+# Local AI/BMAD/Gemini generated or installed tooling
+.gemini/
+.agents/
+_bmad/
+_bmad-output/
+.bmad/**/output.xml
+
+# Runtime state
+logs/
+last_shutdown_event.json
+
+# Local tree export
+structure.txt
+
+# Experiment/runtime output files
+*.raw
+*.header
+*.res
+*.resPS
+*.protocol
