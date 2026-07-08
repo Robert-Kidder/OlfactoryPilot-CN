@@ -37,7 +37,7 @@ class HardwareCheckService:
         self.serial_retry_interval_s = max(0.0, float(serial_retry_interval_s))
 
     @classmethod
-    def from_config(cls, config: dict) -> "HardwareCheckService":
+    def from_config(cls, config: dict) -> HardwareCheckService:
         return cls(
             expected_ni_devices=config.get("ni_devices", []),
             serial_port=config.get("serial_port"),

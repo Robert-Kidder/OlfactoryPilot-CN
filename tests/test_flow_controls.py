@@ -1,5 +1,6 @@
-import pytest
 import time
+
+import pytest
 
 from app.controllers import MainController
 from app.main import DEFAULT_CONFIG, load_config

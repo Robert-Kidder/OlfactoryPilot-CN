@@ -1,7 +1,7 @@
 from .breath_metrics import BreathSampleBuffer, FrameRateTracker, FrameStats  # noqa: F401
 from .calibration_service import CalibrationResult, CalibrationSession  # noqa: F401
-from .gating_service import GatingService  # noqa: F401
 from .flow_service import FlowApplyResult, FlowService  # noqa: F401
+from .gating_service import GatingService  # noqa: F401
 from .hal import HalBase, HalInterface  # noqa: F401
 from .hardware_check_service import HardwareCheckService  # noqa: F401
 from .mock_hal import MockHAL  # noqa: F401

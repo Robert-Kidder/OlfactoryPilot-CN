@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import logging
+import math
 import threading
 import time
-import math
-from typing import Iterable
+from collections.abc import Iterable
 
 from app.models import SelfCheckResult
 from app.services.hal import HalBase
@@ -85,7 +85,7 @@ class RealHAL(HalBase):
         self._ensure_ai_task()
 
     @classmethod
-    def from_config(cls, config: dict) -> "RealHAL":
+    def from_config(cls, config: dict) -> RealHAL:
         valve_lines = _collect_valve_lines(config.get("valve_mapping") or {})
         return cls(
             ai0_channel=str(config.get("ai0_channel", "Dev1/ai0")),

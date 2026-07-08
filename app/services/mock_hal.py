@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import math
 import time
-from typing import Dict
 
 from app.models import SelfCheckResult
 from app.services.hal import HalBase
@@ -22,7 +21,7 @@ class MockHAL(HalBase):
         self.signal_amplitude = signal_amplitude
         self.signal_freq_hz = signal_freq_hz
         self._phase = 0.0
-        self._digital_state: Dict[str, bool] = {}
+        self._digital_state: dict[str, bool] = {}
         self._flow = float(base_flow_sccm)
         self.flow_commands: list[tuple[str, float, bool]] = []
         self.fail_on: set[str] = set()
@@ -45,7 +44,7 @@ class MockHAL(HalBase):
             value = channel
             channel = "A"
         channel = str(channel).upper()
-        if hasattr(self, "fail_on") and channel in getattr(self, "fail_on"):
+        if hasattr(self, "fail_on") and channel in self.fail_on:
             return False
         self._flow = float(value)
         if not hasattr(self, "flow_commands"):

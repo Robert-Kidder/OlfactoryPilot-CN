@@ -24,11 +24,9 @@ dist/
 .vscode/
 
 # Local AI/BMAD/Gemini generated or installed tooling
-.gemini/
 .agents/
 _bmad/
 _bmad-output/
-.bmad/**/output.xml
 
 # Runtime state
 logs/
