@@ -96,3 +96,51 @@ def test_controller_persists_thresholds(controller):
         mock_persist.assert_called_once()
         args = mock_persist.call_args[0][0]
         assert args["inhale_threshold"] == 1.5
+
+
+def test_controller_feeds_calibrated_samples_into_protocol_executor(controller):
+    controller.state.signal_offset = 1.0
+    controller.state.signal_gain = 2.0
+    controller.protocol_executor.process_breath_samples = MagicMock(
+        return_value=controller.protocol_executor.empty_result()
+    )
+
+    controller.handle_breath_samples([-1.4], 50.0)
+
+    args = controller.protocol_executor.process_breath_samples.call_args.kwargs
+    assert args["samples"] == [-0.7999999999999998]
+    assert args["safety_state"] == "SAFE"
+
+
+def test_controller_protocol_executor_trigger_uses_valve_service(controller):
+    from pathlib import Path
+
+    from app.models import ProtocolDocument, ProtocolTrial, TriggerMode
+
+    controller.state.loaded_protocol = ProtocolDocument(
+        source_path=Path("demo.csv"),
+        source_name="demo.csv",
+        trials=[
+            ProtocolTrial(
+                trial_id="1",
+                timing_ms=0,
+                duration_ms=100,
+                valve=1,
+                trigger=TriggerMode.MANUAL,
+            )
+        ],
+    )
+    controller.state.flow_setpoints_ready = True
+    controller.state.hardware_ready = True
+    controller.state.telemetry.connected = True
+    controller.state.telemetry.safety_state = "SAFE"
+    controller.valve_service.set_valve = MagicMock(return_value=(True, "ok"))
+
+    controller.handle_protocol_start_requested()
+    controller.handle_breath_samples([-0.6], 10.0)
+
+    controller.valve_service.set_valve.assert_called_with(
+        1,
+        True,
+        safety_state=controller._build_current_safety_state(),
+    )

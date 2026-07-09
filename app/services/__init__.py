@@ -5,6 +5,11 @@ from .gating_service import GatingService  # noqa: F401
 from .hal import HalBase, HalInterface  # noqa: F401
 from .hardware_check_service import HardwareCheckService  # noqa: F401
 from .mock_hal import MockHAL  # noqa: F401
+from .protocol_executor import (  # noqa: F401
+    ProtocolExecutionConfig,
+    ProtocolExecutor,
+    ProtocolExecutorResult,
+)
 from .protocol_parser import ProtocolParseError, parse_protocol_file  # noqa: F401
 from .real_hal import RealHAL  # noqa: F401
 from .safety_manager import SafetyManager  # noqa: F401
@@ -25,6 +30,9 @@ __all__ = [
     "HardwareCheckService",
     "MockHAL",
     "ProtocolParseError",
+    "ProtocolExecutionConfig",
+    "ProtocolExecutor",
+    "ProtocolExecutorResult",
     "RealHAL",
     "SafetyManager",
     "ShutdownService",

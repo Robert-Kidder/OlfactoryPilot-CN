@@ -6,6 +6,9 @@
   "low_flow_threshold": 0.2,
   "inhale_threshold": 0.47,
   "exhale_threshold": -0.44,
+  "breath_gate_timeout_ms": 5000,
+  "breath_gate_timeout_action": "skip",
+  "breath_gate_max_retries": 1,
   "safety_state": "SAFE",
   "hardware_variant": "20-channel",
   "valve_mapping": {

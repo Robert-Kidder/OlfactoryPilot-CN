@@ -10,7 +10,7 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from PySide6.QtCore import QObject, Signal, Slot
+from PySide6.QtCore import QObject, QTimer, Signal, Slot
 
 from app.models import AppState, SafetyState
 from app.services import (
@@ -19,6 +19,8 @@ from app.services import (
     FlowService,
     GatingService,
     MockHAL,
+    ProtocolExecutor,
+    ProtocolExecutorResult,
     ProtocolParseError,
     SafetyManager,
     ShutdownService,
@@ -74,6 +76,13 @@ class MainController(QObject):
             hardware_variant=state.hardware_variant,
             master_valve_line=state.master_valve_line,
         )
+        self.protocol_executor = ProtocolExecutor(
+            gating_service=self.gating_service,
+            valve_writer=self._write_protocol_valve,
+            config=config or {},
+            clock=time.time,
+        )
+        self._protocol_logger = logging.getLogger("protocol_execution")
         hal_instance = getattr(worker, "hal", None) or MockHAL()
         self.flow_service = FlowService(
             hal_instance,
@@ -94,6 +103,9 @@ class MainController(QObject):
         self._pretest_sequence_completed.connect(self._handle_pretest_sequence_completed)
         self._startup_zero_completed.connect(self._handle_startup_zero_completed)
         self._breath_logger = logging.getLogger("breath_viz")
+        self._protocol_tick_timer = QTimer(self)
+        self._protocol_tick_timer.setInterval(50)
+        self._protocol_tick_timer.timeout.connect(self.handle_protocol_executor_tick)
 
     def bind_view(self, view: MainWindow) -> None:
         self.view = view
@@ -118,6 +130,10 @@ class MainController(QObject):
             self.view.calibration_view.breath_metrics.connect(self.handle_breath_metrics)
             self.view.calibration_view.threshold_changed.connect(self.update_breath_threshold)
             self.view.calibration_view.calibration_requested.connect(self.handle_calibration_request)
+        if hasattr(self.view, "protocol_view"):
+            self._render_protocol_execution_state()
+        if not self._protocol_tick_timer.isActive():
+            self._protocol_tick_timer.start()
         if not self.state.has_active_valve_map():
             LOG.warning(
                 "No valve mapping found for variant %s; PreTestView will be disabled",
@@ -172,6 +188,13 @@ class MainController(QObject):
             hardware_safety=hardware_safety,
             previous_state_override=previous_safety_state,
         )
+        if self.state.telemetry.safety_state != "SAFE":
+            self._publish_protocol_result(
+                self.protocol_executor.handle_safety_update(
+                    self.state.telemetry.safety_state,
+                    timestamp=self.state.telemetry.timestamp or time.time(),
+                )
+            )
         if self.view:
             self.view.render_telemetry(self.state.telemetry)
             self.view.update_status(self.state.status_message)
@@ -556,12 +579,13 @@ class MainController(QObject):
         # User sees transformed data, so thresholds apply to transformed data.
         calibrated_samples = [self.state.apply_calibration(s) for s in samples]
 
-        transitions = self.gating_service.process_batch(
-            calibrated_samples,
-            self.state.telemetry.safety_state,
+        executor_result = self.protocol_executor.process_breath_samples(
+            samples=calibrated_samples,
+            safety_state=self.state.telemetry.safety_state,
             timestamp_start=start_ts,
-            dt=dt
+            dt=dt,
         )
+        transitions = executor_result.transitions
 
         if transitions:
             # Update current state
@@ -582,6 +606,7 @@ class MainController(QObject):
                     "safety_state": t.safety_state,
                 }
                 self._breath_logger.info(log_entry)
+        self._publish_protocol_result(executor_result)
 
     def handle_breath_metrics(self, payload: dict) -> None:
         warning = bool(payload.get("warning_flag"))
@@ -665,14 +690,55 @@ class MainController(QObject):
             return False
 
         self.state.loaded_protocol = document
+        self._publish_protocol_result(self.protocol_executor.reset(document))
         message = f"协议加载成功：{document.source_name}，共 {len(document.trials)} 个 trial"
         self.state.update_status(message)
         if self.view:
             self.view.update_status(message)
             if hasattr(self.view, "protocol_view"):
                 self.view.protocol_view.render_protocol(document)
+                self._render_protocol_execution_state()
         LOG.info("Protocol loaded | path=%s | trials=%d", path, len(document.trials))
         return True
+
+    @Slot()
+    def handle_protocol_start_requested(self) -> None:
+        self._publish_protocol_result(
+            self.protocol_executor.start(
+                self.state.loaded_protocol,
+                safety_state=self.state.telemetry.safety_state,
+                timestamp=time.time(),
+            )
+        )
+
+    @Slot()
+    def handle_protocol_stop_requested(self) -> None:
+        self._publish_protocol_result(
+            self.protocol_executor.stop(
+                safety_state=self.state.telemetry.safety_state,
+                timestamp=time.time(),
+            )
+        )
+
+    @Slot()
+    def handle_protocol_next_requested(self) -> None:
+        self._publish_protocol_result(
+            self.protocol_executor.skip_current(
+                safety_state=self.state.telemetry.safety_state,
+                timestamp=time.time(),
+                message="用户请求跳过当前 trial，准备下一 trial。",
+            )
+        )
+
+    @Slot()
+    def handle_protocol_executor_tick(self) -> None:
+        self._publish_protocol_result(
+            self.protocol_executor.tick(
+                safety_state=self.state.telemetry.safety_state,
+                timestamp=time.time(),
+            ),
+            render_even_without_events=True,
+        )
 
     def reset_hardware(self) -> None:
         # 允许在未 ready 时执行 reset，用于恢复异常状态；仍需安全检查。
@@ -684,6 +750,13 @@ class MainController(QObject):
         if self.view:
             self.view.update_status(self.state.status_message)
 
+        self._publish_protocol_result(
+            self.protocol_executor.stop(
+                safety_state=self.state.telemetry.safety_state,
+                timestamp=time.time(),
+                message="硬件重置请求已停止门控流程。",
+            )
+        )
         event = self.shutdown_service.shutdown(
             source="reset",
             reason="reset_request",
@@ -714,6 +787,13 @@ class MainController(QObject):
             self.worker.request_self_check()
 
     def stop_hardware(self) -> None:
+        self._publish_protocol_result(
+            self.protocol_executor.stop(
+                safety_state=self.state.telemetry.safety_state,
+                timestamp=time.time(),
+                message="用户停止硬件，门控流程已停止。",
+            )
+        )
         self.state.update_status("正在安全停止，关闭阀门并释放资源...")
         if self.view:
             self.view.update_status(self.state.status_message)
@@ -796,6 +876,46 @@ class MainController(QObject):
             self.view.update_status(warning)
         LOG.warning(warning)
         return False
+
+    def _build_current_safety_state(self) -> SafetyState:
+        telemetry = self.state.telemetry
+        return SafetyState(
+            state=telemetry.safety_state,
+            airflow=telemetry.airflow,
+            threshold=self.state.low_flow_threshold,
+            updated_at=telemetry.timestamp,
+            reason=telemetry.safety_reason,
+        )
+
+    def _write_protocol_valve(self, channel_id: int, open_state: bool) -> tuple[bool, str]:
+        return self.valve_service.set_valve(
+            channel_id,
+            open_state,
+            safety_state=self._build_current_safety_state(),
+        )
+
+    def _publish_protocol_result(
+        self,
+        result: ProtocolExecutorResult,
+        *,
+        render_even_without_events: bool = False,
+    ) -> None:
+        if result.events:
+            for event in result.events:
+                self._protocol_logger.info("protocol_gate | %s", event.as_dict())
+            message = result.events[-1].message
+            if message:
+                self.state.update_status(message)
+                if self.view:
+                    self.view.update_status(self.state.status_message)
+        if result.events or render_even_without_events:
+            self._render_protocol_execution_state()
+
+    def _render_protocol_execution_state(self) -> None:
+        if self.view and hasattr(self.view, "protocol_view"):
+            self.view.protocol_view.render_execution_state(
+                self.protocol_executor.snapshot(time.time())
+            )
 
     def ensure_safe_command(self, action: str, source: str | None = None) -> bool:
         """统一安全守卫：硬件就绪 + 安全状态 SAFE 才放行。"""

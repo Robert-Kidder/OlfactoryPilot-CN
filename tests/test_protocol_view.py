@@ -2,7 +2,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from app.models import ProtocolDocument, ProtocolTrial, TriggerMode
+from app.models import (
+    ProtocolDocument,
+    ProtocolExecutionSnapshot,
+    ProtocolExecutionStatus,
+    ProtocolTrial,
+    TriggerMode,
+)
 from app.services import ProtocolParseError
 from app.views.protocol_view import ProtocolView
 
@@ -48,3 +54,34 @@ def test_protocol_view_renders_chinese_parse_error(qt_app, qtbot) -> None:
     assert "第 2 行" in view._error_label.text()
     assert "valve" in view._error_label.text()
     assert "请" in view._error_label.text()
+
+
+def test_protocol_view_renders_execution_state_and_action_enablement(qt_app, qtbot) -> None:
+    view = ProtocolView()
+    qtbot.addWidget(view)
+
+    view.render_execution_state(
+        ProtocolExecutionSnapshot(
+            status=ProtocolExecutionStatus.WAITING_EXHALE,
+            status_text="等待呼气",
+            has_protocol=True,
+            can_start=False,
+            can_stop=True,
+            can_advance=True,
+            trial_label="1/2",
+            trial_id="trial-1",
+            valve=3,
+            trigger="manual",
+            wait_elapsed_ms=1200,
+            planned_duration_ms=100,
+            recent_event="开始等待呼气",
+        )
+    )
+
+    assert "等待呼气" in view._execution_status_label.text()
+    assert "trial-1" in view._execution_trial_label.text()
+    assert "3" in view._execution_valve_label.text()
+    assert "开始等待呼气" in view._execution_event_label.text()
+    assert view._start_button.isEnabled() is False
+    assert view._stop_button.isEnabled() is True
+    assert view._next_trial_button.isEnabled() is True
