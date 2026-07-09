@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import math
 import re
 from collections.abc import Iterable, Mapping
 from pathlib import Path
@@ -47,7 +48,10 @@ def parse_protocol_file(
     if suffix not in _SUPPORTED_SUFFIXES:
         raise ProtocolParseError(None, "file_extension", "仅支持 .txt 和 .csv 协议文件。")
 
-    raw_text = source_path.read_text(encoding="utf-8-sig")
+    try:
+        raw_text = source_path.read_text(encoding="utf-8-sig")
+    except (OSError, UnicodeError) as exc:
+        raise ProtocolParseError(None, "file", f"无法读取协议文件：{exc}") from exc
     if not raw_text.strip():
         raise ProtocolParseError(1, "file", "文件为空，至少需要一行表头和一条 trial。")
 
@@ -201,6 +205,8 @@ def _parse_number(value: str, line_number: int, field: str) -> int | float:
         number = float(value)
     except ValueError as exc:
         raise ProtocolParseError(line_number, field, f"{field} 必须是数字，当前值为 {value!r}。") from exc
+    if not math.isfinite(number):
+        raise ProtocolParseError(line_number, field, f"{field} 必须是有限数字，当前值为 {value!r}。")
     if number.is_integer():
         return int(number)
     return number

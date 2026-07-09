@@ -86,6 +86,11 @@ Story ID: 3.1
   - [x] 运行 `D:\miniconda3\envs\code\python.exe -m pytest`。
   - [x] 运行 `D:\miniconda3\envs\code\python.exe -m ruff check app tests`。
 
+### Review Findings
+
+- [x] [Review][Patch] 文件读取/编码错误未转换为中文解析错误 [app/services/protocol_parser.py:50]
+- [x] [Review][Patch] `NaN`/`inf` 会被当作合法 timing/duration 写入协议对象 [app/services/protocol_parser.py:199]
+
 ## Dev Notes
 
 ### 需求来源
@@ -196,6 +201,10 @@ GPT-5 Codex
 - `D:\miniconda3\envs\code\python.exe -m pytest tests/test_protocol_parser.py tests/test_protocol_view.py`：12 passed。
 - `D:\miniconda3\envs\code\python.exe -m ruff check app tests`：All checks passed。
 - `D:\miniconda3\envs\code\python.exe -m pytest`：134 passed。
+- `D:\miniconda3\envs\code\python.exe -m pytest tests/test_protocol_parser.py`：审查回归测试红灯确认 4 failed / 10 passed。
+- `D:\miniconda3\envs\code\python.exe -m pytest tests/test_protocol_parser.py`：修复后 14 passed。
+- `D:\miniconda3\envs\code\python.exe -m pytest`：138 passed。
+- `D:\miniconda3\envs\code\python.exe -m ruff check app tests`：All checks passed。
 
 ### Completion Notes List
 
@@ -203,6 +212,8 @@ GPT-5 Codex
 - 新增无外部依赖的 `.txt` / `.csv` 解析服务，支持 metadata、字段别名、trial-level metadata、受控 trigger、当前硬件阀门映射校验和中文可操作错误。
 - 新增协议页最小 UI 与控制器加载流程；解析成功才写入 `state.loaded_protocol`，失败时保留上一份有效协议，且开始/手动触发/TTL 触发控件保持禁用。
 - 新增 parser、控制器原子性和 `ProtocolView` 冒烟测试夹具，覆盖有效文件、空文件、缺字段、非法数值、未知 trigger、阀门越界和无有效 trial。
+- 已修复审查发现：文件读取/编码异常会转换为中文 `ProtocolParseError`，避免原始异常穿透到 UI 或调用方。
+- 已修复审查发现：`NaN`、`inf`、`-inf` 等非有限数值会被拒绝，不再进入 `ProtocolDocument`。
 
 ### File List
 
@@ -231,3 +242,4 @@ GPT-5 Codex
 ## Change Log
 
 - 2026-07-09：实现协议文件解析、最小协议 UI、控制器原子加载和自动化测试，状态更新为 review。
+- 2026-07-09：修复 3.1 代码审查发现的文件读取错误包装和非有限数值校验问题，补充回归测试，状态保持 review。

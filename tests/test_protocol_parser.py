@@ -91,6 +91,37 @@ def test_unsupported_extension_returns_chinese_error(tmp_path: Path) -> None:
     assert "仅支持 .txt 和 .csv" in exc_info.value.message
 
 
+def test_read_or_decode_failure_returns_chinese_parse_error(tmp_path: Path) -> None:
+    path = tmp_path / "bad_encoding.csv"
+    path.write_bytes(b"\xff\xfe\x00\x00")
+
+    with pytest.raises(ProtocolParseError) as exc_info:
+        parse_protocol_file(path, valve_map=_valve_map())
+
+    error = exc_info.value
+    assert error.line_number is None
+    assert error.field == "file"
+    assert "无法读取协议文件" in error.message
+    assert "请" in str(error)
+
+
+@pytest.mark.parametrize("bad_value", ["NaN", "inf", "-inf"])
+def test_non_finite_numeric_values_are_rejected(tmp_path: Path, bad_value: str) -> None:
+    path = tmp_path / "non_finite.csv"
+    path.write_text(
+        f"trial,timing_ms,duration_ms,valve,trigger\n1,{bad_value},100,1,manual\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ProtocolParseError) as exc_info:
+        parse_protocol_file(path, valve_map=_valve_map())
+
+    error = exc_info.value
+    assert error.line_number == 2
+    assert error.field == "timing_ms"
+    assert "有限数字" in error.message
+
+
 def test_controller_load_failure_keeps_previous_protocol(qt_app) -> None:
     state = _state()
     worker = HardwareWorker(telemetry_hz=1, hal=MockHAL(), simulation=True)
