@@ -1,4 +1,4 @@
-# Story 2.4: Flow Rate Controls（流量控制）
+﻿# Story 2.4: Flow Rate Controls（流量控制）
 
 Status: ready-for-review  
 Epic: 2 - 校准与手动控制  
@@ -53,7 +53,7 @@ Story ID: 2.4
 
 ## Libraries / Versions (library_framework_requirements)
 
-- PySide6 6.7.2，pyqtgraph 0.13.7，Python 3.10+。  
+- PySide6 6.7.2，pyqtgraph 0.13.7，Python 3.11。  
 - 硬件/通讯：nidaqmx 0.9.0，pyserial 3.5。  
 - 以稳定为主，维持当前版本。
 
@@ -128,3 +128,4 @@ Story ID: 2.4
 - 实现 FlowService 封装 MFC 写入与日志，MockHAL/接口兼容 A/B/C 通道与补偿标记。
 - PreTestView 增加 Apply 交互、安全禁用、气流/已应用显示，MainController 贯通安全前置与状态反馈。
 - Rest/Stim 序列实现（MFC -> 主阀），结束恢复 Rest；新增 tests/test_flow_controls 覆盖主阀开闭顺序；全量 pytest 通过。
+

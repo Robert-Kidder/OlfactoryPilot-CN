@@ -1,4 +1,4 @@
-# Story 1.5: Hardware Simulation Layer (Mock HAL)
+﻿# Story 1.5: Hardware Simulation Layer (Mock HAL)
 
 Status: Ready for Review
 
@@ -114,3 +114,4 @@ Gemini 2.0 Flash
 
 ## Change Log
 - 2025-12-11: 支持模拟模式 CLI 开关，接入 Mock HAL（波形/气流/数字输出），Worker 自检与状态更新走 HAL 接口，并补充全量测试通过。
+

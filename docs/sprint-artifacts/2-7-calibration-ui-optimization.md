@@ -1,4 +1,4 @@
-# Story 2.7: Calibration UI Optimization
+﻿# Story 2.7: Calibration UI Optimization
 Status: done
 Epic: 2 - Calibration & Manual Control
 Story Key: 2-7-calibration-ui-optimization
@@ -71,3 +71,4 @@ Story ID: 2.7
 - **Integration**: Updated `MainController` to drive the new progress bar.
 - **Cleanup**: Removed obsolete helper methods from `CalibrationView`.
 - **Testing**: Added `test_calibration_ui_optimization.py` verifying layout structure.
+

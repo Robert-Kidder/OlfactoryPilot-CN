@@ -1,4 +1,4 @@
-# Story 2.3: Valve Matrix Manual Control
+﻿# Story 2.3: Valve Matrix Manual Control
 Status: Ready for Review
 Epic: 2 - Calibration & Manual Control
 Story Key: 2-3-valve-matrix-manual-control
@@ -85,3 +85,4 @@ So that I can manually test channels without bypassing airflow safety.
 - docs/sprint-artifacts/sprint-status.yaml
 - tests/test_valve_service.py
 - tests/test_calibration_integration.py
+

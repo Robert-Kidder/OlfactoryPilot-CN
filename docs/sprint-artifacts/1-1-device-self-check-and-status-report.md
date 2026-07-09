@@ -1,4 +1,4 @@
-# 故事 1.1: Device Self-Check and Status Report
+﻿# 故事 1.1: Device Self-Check and Status Report
 Status: Ready for Review
 Epic: 1 - Safe Hardware Foundations
 Story Key: 1-1-device-self-check-and-status-report
@@ -37,7 +37,7 @@ Story ID: 1.1
 - 与 Story 1.2 Safe Start Airflow Interlock 兼容：当自检未通过时，同步阻断气流阈值检查链路，防止绕过。
 
 ## Developer Context（developer_context_section）
-- 场景：Windows 10/11 桌面，Python 3.10+，PySide6 + MVC + Worker 模式，硬件 Worker 负责实时控制与自检，UI 仅被动显示。
+- 场景：Windows 10/11 桌面，Python 3.11，PySide6 + MVC + Worker 模式，硬件 Worker 负责实时控制与自检，UI 仅被动显示。
 - 硬件：NI-USB-6001/6501；RS232 质量流量控制器（可配置 COM 与波特率，默认 115200/9600 依据设备，需在配置文件记录）。
 - 安全：任何自检失败都应将安全状态置为“不可用”，并阻断阀门/加热命令；自检成功后才能解除。
 - 性能：自检在启动阶段运行一次，可在用户点击“重新检测”时重复；避免长阻塞（>500ms）影响 UI 线程。
@@ -68,7 +68,7 @@ Story ID: 1.1
 - 性能/安全：保持 UI 响应，失败时立即短路控制命令，避免未授权硬件操作。
 
 ## Library & Framework Requirements（library_framework_requirements）
-- Python 3.10+（推荐 3.11）；与 PySide6 6.10.1 兼容性良好，若使用 3.12 需验证 PyInstaller。
+- Python 3.11；与 PySide6 6.10.1 兼容性良好，若使用 3.12 需验证 PyInstaller。
 - PySide6 最新 6.10.1（当前安装 6.7.2，可评估升级；升级后需验证 PyInstaller onedir/onefile）。
 - pyqtgraph 最新 0.14.0（当前安装 0.13.7，若需升级需验证绘图性能与依赖）。
 - nidaqmx 最新 1.3.0（当前 0.9.0，升级可获取新设备支持；注意 NI-DAQmx 驱动版本匹配）。
@@ -157,3 +157,4 @@ Story ID: 1.1
 - docs/sprint-artifacts/sprint-status.yaml
 - docs/sprint-artifacts/1-1-device-self-check-and-status-report.md
 - tests/test_app.py
+

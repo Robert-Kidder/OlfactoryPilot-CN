@@ -1,4 +1,4 @@
-# 故事 1.4: Safe Shutdown and Valve Reset
+﻿# 故事 1.4: Safe Shutdown and Valve Reset
 Status: Ready for Review
 Epic: 1 - Safe Hardware Foundations
 Story Key: 1-4-safe-shutdown-and-valve-reset
@@ -31,7 +31,7 @@ Story ID: 1.4
 - 退出前要先停止数据记录线程并 flush 文件句柄，避免 .raw/.log 损坏；异常时提示恢复步骤（例如检查 session 目录/删除锁文件）。
 
 ## Developer Context
-- 平台：Windows 10/11，Python 3.10+，PySide6；MVC + Worker Thread；SafetyManager + HardwareWorker 处理硬件安全与 telemetry（5-10 Hz），UI 为被动视图。
+- 平台：Windows 10/11，Python 3.11，PySide6；MVC + Worker Thread；SafetyManager + HardwareWorker 处理硬件安全与 telemetry（5-10 Hz），UI 为被动视图。
 - 硬件：NI-USB-6001/6501（nidaqmx）、RS232 质量流量控制器（pyserial）；Stop/退出需释放 DAQ/串口句柄。
 - 状态模型：AppState 已含 hardware_ready、low_flow_threshold、last_shutdown_event、telemetry；应扩展字段标记 shutdown 结果/未完成原因。
 - 现有组件：MainWindow 全局工具栏已有 Stop；MainController.ensure_safe_command/SafetyManager.guard_command 负责安全校验；Data Logger 记录事件；SafetyState 提供 SAFE/LOW_FLOW/DATA_STALE 判定。
@@ -53,7 +53,7 @@ Story ID: 1.4
 - 通过 signals/slots 向 UI 推送 shutdown 状态/日志摘要；严禁在 UI 线程直接访问硬件句柄。
 
 ## Library & Framework Requirements
-- Python 3.10+；当前 PySide6 6.7.2（最新 6.10.1，升级需验证 PyInstaller 打包/Qt 插件）；pyqtgraph 0.13.7（最新 0.14.0，升级需回归 100Hz 绘制）；nidaqmx 0.9.0（最新 1.3.0，升级需确认 NI 驱动兼容）；pyserial 3.5；PyInstaller 6.x（包含 Help PDF/依赖）。
+- Python 3.11；当前 PySide6 6.7.2（最新 6.10.1，升级需验证 PyInstaller 打包/Qt 插件）；pyqtgraph 0.13.7（最新 0.14.0，升级需回归 100Hz 绘制）；nidaqmx 0.9.0（最新 1.3.0，升级需确认 NI 驱动兼容）；pyserial 3.5；PyInstaller 6.x（包含 Help PDF/依赖）。
 
 ## File Structure Requirements
 - `app/controllers/main_controller.py`：集中 shutdown 协调逻辑、与 UI/toolbar Stop 事件绑定。
@@ -123,3 +123,4 @@ Story ID: 1.4
 
 ### Change Log
 - 2025-12-09：实现统一安全关闭服务与 UI 关闭摘要，配置化重试/记录路径，新增回归测试并标记 Ready for Review。
+

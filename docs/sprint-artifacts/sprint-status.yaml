@@ -1,8 +1,11 @@
-generated: 2025-12-11 12:11
-project: OlfactoryPilot
+# Sprint 状态文件
+# 生成时间: 2026-07-09 16:54
+generated: 2026-07-09 16:54
+project: OlfactoryPilot-CN
 project_key: OLFACTORY
 tracking_system: file-system
 story_location: docs/sprint-artifacts
+
 development_status:
   epic-1: real-hardware-verification
   1-0-project-scaffold-and-ci-baseline: real-hardware-pass
@@ -12,7 +15,8 @@ development_status:
   1-4-safe-shutdown-and-valve-reset: real-hardware-review
   1-5-hardware-simulation-layer-mock-hal: real-hardware-review
   epic-1-retrospective: completed
-  epic-2: in-progress
+
+  epic-2: done
   2-1-real-time-breath-visualization: done
   2-2-threshold-tuning-and-feedback: done
   2-3-valve-matrix-manual-control: done
@@ -21,17 +25,18 @@ development_status:
   2-6-automatic-breath-calibration-session: done
   2-7-calibration-ui-optimization: done
   epic-2-retrospective: done
-  epic-3: backlog
-  3-1-protocol-file-parsing-txtcsv: backlog
+
+  epic-3: next
+  3-1-protocol-file-parsing-txtcsv: next
   3-2-breath-gated-stimulation: backlog
   3-3-manual-vs-ttl-trigger-modes: backlog
   3-4-low-jitter-actuation-20ms: backlog
   3-5-session-file-naming-and-logging: backlog
   epic-3-retrospective: optional
+
   epic-4: backlog
   4-1-cleaning-automation: backlog
   4-2-configurable-com-and-ni-ids: backlog
   4-3-chinese-ui-localization: backlog
   4-4-compensation-logic-automation: backlog
   epic-4-retrospective: optional
-

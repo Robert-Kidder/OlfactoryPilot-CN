@@ -1,7 +1,7 @@
-# Validation Report
+﻿# Validation Report
 
 **Document:** docs/sprint-artifacts/1-1-device-self-check-and-status-report.md  
-**Checklist:** .bmad/bmm/workflows/4-implementation/create-story/checklist.md  
+**Checklist:** 当前 BMAD 工具链中的 create-story 检查清单（旧路径已不再使用）。  
 **Date:** 2025-12-08
 
 ## Summary
@@ -52,3 +52,4 @@
 1. Must Fix: 无阻塞性问题；故事可直接进入开发。  
 2. Should Improve: 明确串口默认参数，便于实现与测试一致。  
 3. Consider: 初始化 git 仓库以便后续故事提取提交情报。  
+

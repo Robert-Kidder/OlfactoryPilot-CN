@@ -1,88 +1,74 @@
-# UI/UX Specification
-**Project:** OlfactoryPilot
-**Version:** 1.0
+# OlfactoryPilot-CN UX 设计说明
 
-## 1. UX Overview
-* **Design Philosophy:** "Page-as-Subsystem". Each major function is an isolated tab to prevent cognitive overload.
-* **Primary Users:** Psychology Researchers (Simplicity) and Lab Techs (Hardware Control).
-* **Language:** Simplified Chinese (Zh-CN).
+## 1. 设计目标
 
-## 2. Information Architecture
-### 2.1 Navigation
-* **Style:** Top Tab Bar (Linear Workflow).
-* **Tabs:**
-    1.  **File (文件):** Setup and Params.
-    2.  **Calibration (校准):** Signal acquisition.
-    3.  **Pre-test (预测试):** Manual hardware check.
-    4.  **Protocol (协议):** Automated experiment.
-    5.  **Cleaning (清洗):** Maintenance.
-    6.  **Options (选项):** System config.
+界面服务于实验操作，不做营销式展示。用户打开软件后应能马上判断硬件是否安全、当前处在哪个实验步骤、下一步可以做什么。所有主要文字使用简体中文，技术名词可保留英文缩写。
 
-### 2.2 Global Elements (Persistent Footer/Header)
-* **Hardware Status:** Connection Icon (Green/Red), Air Flow Value (ml/min).
-* **Safety Status:** "SAFE" (Green) vs "LOW FLOW" (Red - Flashing).
-* **Simulation Indicator:** If in Simulation Mode, display "[SIMULATION]" (Yellow/Orange) prominently in the title bar or status area.
-* **Status Refresh:** Hardware worker pushes connection/airflow/safety telemetry to UI via signals/slots at ~5-10 Hz; footer shows last-updated timestamp and flashes LOW FLOW within <500ms of unsafe state.
-* **Controls:**
-    * `[ Connect ]` (Main initialization).
-    * `[ Reset ]` (Emergency re-handshake / Close valves).
-    * `[ Stop ]` (Release resources).
-    * `[ Help ]` (Open PDF Manual).
+## 2. 全局布局
 
-### 2.3 Performance & Safety Targets
-* **Breath Graph Rendering:** ≥30 FPS sustained (measured over 10s window); warn if <30 FPS for >2s.
-* **Telemetry Staleness:** LOW FLOW alert flashes within <500ms of unsafe airflow; show last-updated timestamp.
-* **Sampling:** Breath waveform stream at 100Hz from hardware worker to UI.
+- 顶部：全局工具栏，包含“连接”“重置”“停止”“帮助”。
+- 主区域：标签页式功能区。
+- 底部：持久状态栏，显示连接状态、气流数值、安全状态和最近错误。
 
-## 3. Screen Specifications
+建议标签页：
 
-### 3.1 Tab 2: Calibration (校准页面)
-* **Visuals:**
-    * **Graph:** Black background, White Signal Line (2px).
-    * **Thresholds:** Red Dashed Line (Exhale - Draggable), Yellow Dotted Line (Inhale - Draggable).
-    * **Feedback:** LED indicators that light up in real-time when signal crosses thresholds.
-* **Interactions:**
-    * "Auto-Scale" button to fit waveform to view.
-    * Numeric spinners to fine-tune threshold voltages.
+- 文件：受试者、条件、输出目录和会话文件名。
+- 校准：呼吸波形、阈值、LED 状态和自动缩放。
+- 预实验：阀门矩阵、流量设置和硬件变体。
+- 协议：协议加载、手动/TTL 模式、当前 trial、剩余时间。
+- 清洗：清洗流程、步骤进度和中止。
+- 选项：COM 端口、NI 设备 ID、阈值、默认流量和其他配置。
 
-### 3.2 Tab 3: Pre-test (预测试页面)
-* **Layout:** Dashboard Grid.
-* **Valve Matrix:** 4x5 Grid of Toggle Buttons (Channels 1-20).
-    * **OFF State:** Gray.
-    * **ON State:** Green (only allowed if Air Flow > Threshold).
-* **Flow Control:** Input fields for Air (B), Exhaust (C), Odor (A). "Apply" button sends RS232 commands.
+## 3. 视觉规范
 
-### 3.3 Tab 4: Protocol (协议模式)
-* **Layout:** Focus Mode (Minimalist).
-* **Display:** Large text for "Current Trial", "Next Odor", "Time Remaining".
-* **Controls:**
-    * `[ Start Experiment ]` (Green, big).
-    * `[ Pause ]` (Yellow).
-    * Toggle Switch: "Manual Trigger" vs "External (TTL) Trigger".
-* **Safety Gating:** Start is disabled unless airflow > threshold; inline LOW FLOW banner near controls when unsafe.
+- 字体：Windows 默认中文字体优先，建议 Microsoft YaHei 或系统等效字体。
+- 基础字号：12px 到 14px，面板标题可略大。
+- 背景：浅灰工作台风格，避免装饰性渐变和夸张色块。
+- 危险色：红色，用于低气流、急停、硬件错误。
+- 安全/通过：绿色，用于连接成功、安全状态和阀门开启状态。
+- 警告：黄色或橙色，用于待确认、临界状态和非阻断风险。
 
-### 3.4 Tab 1: File (文件)
-* **Inputs:** Subject, Condition, Session folder selector; protocol file picker (.txt/.csv) with validation (line errors surfaced inline).
-* **Filename Preview:** Shows `{Timestamp}_{Subject}_{Condition}.raw` and paired `.log`; warning if subject/condition empty.
-* **Actions:** `[ Load Protocol ]` (validates and parses), `[ Open Session Folder ]`, recent files list.
-* **States:** Error banner for malformed protocol lines; disable Start until protocol is valid.
+## 4. 页面要求
 
-### 3.5 Tab 5: Cleaning (清洁)
-* **Controls:** `[ Start Cleaning ]`, `[ Abort ]`, `[ Resume ]` (if supported), progress indicator (step/total, elapsed).
-* **Status Panel:** Current step name/duration, airflow/safety indicator (must be SAFE to proceed), log window for each valve action.
-* **Failure Handling:** On error/abort, automatically closes valves, shows reason, and writes step index + reason + elapsed to log.
+### 校准页
 
-### 3.6 Tab 6: Options (选项)
-* **Hardware Config:** COM ports, NI device IDs (6001/6501) with inline validation and save; hardware variant selector (10 vs 20 channels) updates Pre-test UI on save.
-* **Thresholds & Safety:** Airflow threshold input; option to enable audible/visual LOW FLOW alert.
-* **Localization & UI:** Language toggle (Zh-CN default), font size slider; theme colors locked to spec unless dev mode enabled.
-* **Persistence:** `[ Save ]` writes to config; `[ Revert ]` restores last saved; dirty-state indicator.
+- 呼吸图背景为深色，信号线清晰可见。
+- 呼气阈值使用红色线，吸气阈值使用黄色线。
+- 阈值既能拖动，也能用数值输入微调。
+- LED 指示当前是否越过阈值。
+- 图形提供自动缩放开关。
 
-## 4. Visual Standards
-* **Framework:** PySide6 Native Style.
-* **Colors:**
-    * Background: `#F0F0F0` (Windows Default).
-    * Graph BG: `#000000`.
-    * Danger/Stop: `#DC3545` (Red).
-    * Safety/Go: `#28A745` (Green).
-* **Typography:** Microsoft YaHei (Windows Chinese Standard), 12px base size.
+### 预实验页
+
+- 阀门矩阵根据 10/20 通道配置动态显示。
+- 气流不足时，阀门按钮不可执行危险动作，并给出中文提示。
+- 阀门关闭为灰色，开启为绿色。
+- Alicat A/B/C 流量输入应清楚标注用途。
+
+### 协议页
+
+- 显示当前 trial、下一个气味、触发模式、剩余时间和运行状态。
+- 支持手动触发和 TTL 触发切换。
+- 协议解析错误必须定位到行号，并说明字段问题。
+- 开始、暂停、停止按钮始终遵守安全联锁。
+
+### 清洗页
+
+- 显示清洗步骤、当前通道、剩余时间和是否允许中止。
+- 中止或失败时自动关闭阀门，并在状态栏显示结果。
+
+## 5. 文案规范
+
+- 所有面向用户的按钮、标签、提示和错误使用简体中文。
+- 错误提示要说明“发生了什么”和“用户下一步应做什么”。
+- 示例：
+  - “气流不足，请检查管路后重试。”
+  - “协议文件无效，第 12 行缺少 valve 字段。”
+  - “写入失败，请检查磁盘空间或目录权限。”
+
+## 6. 可用性原则
+
+- 安全状态始终可见。
+- 危险动作必须有明确反馈。
+- 不让用户猜测硬件是否已连接或阀门是否已关闭。
+- 开发新页面时应优先复用现有控件、配色和状态栏机制。

@@ -1,69 +1,72 @@
-# Product Requirements Document (PRD)
-**Project:** OlfactoryPilot
-**Version:** 1.0
-**Status:** Approved
+# OlfactoryPilot-CN 产品需求文档
 
-## 1. Goals and Background Context
-### 1.1 Goals
-* **Hardware Safety Assurance:** Eliminate the risk of hardware overheating by enforcing strict initialization sequences (Air Flow ON before Heating) and safety interlocks.
-* **Localization & Usability:** Deliver a 100% Chinese-localized interface that simplifies the workflow for local researchers.
-* **Protocol Reproducibility:** Implement a standardized parameter file format (CSV/TXT) that guarantees identical stimulation sequences.
-* **High-Precision Control:** Achieve reliable millisecond-level timing for odor delivery synchronized with breathing signals.
-* **Seamless Integration:** Support both manual autonomous operation and external triggering (TTL) from paradigm software like SuperLab.
+## 1. 背景与目标
 
-### 1.2 Background Context
-The current workflow relies on a legacy LabView system ("ProgOlfacto") with French documentation. This project refactors that system into a modern **Windows 10/11** desktop application using **Python (PySide6)**. A critical driver is the need to protect the Mass Flow Controllers from damage caused by operating without airflow.
+OlfactoryPilot-CN 用于替代原有法国软件 **ProgOlfactoTao**，服务本地嗅觉刺激实验。旧软件依赖 LabView 生态和法文说明，维护、培训和本地化成本较高。新软件需要用 Python 3.11 和 PySide6 实现中文桌面应用，保留旧系统的核心实验能力，并提高安全性、可测试性和可维护性。
 
-## 2. Requirements
+成功交付后，实验人员应能在 Windows 电脑上完成设备连接、呼吸校准、阀门预实验、实验协议执行、数据记录和清洗流程。
 
-### 2.1 Functional Requirements (FR)
-**FR1: Hardware Safety & Initialization**
-* **FR1.1:** System performs startup self-check of NI-USB-6001, NI-USB-6501, and RS232 ports.
-* [cite_start]**FR1.2 (CRITICAL):** "Safe Start" Interlock: The system must verify Air Flow > Threshold (physical or simulated) before allowing any Odor Valve activation or heating[cite: 1489].
-* **FR1.3:** Auto-Reset: On exit or emergency stop, all valves must reset to "Closed".
-* **FR1.4:** Global Toolbar: A persistent toolbar must provide Connect, Reset (Hardware Recovery), Stop (Soft Disconnect), and Help (Manual) buttons.
+## 2. 用户与场景
 
-**FR2: File & Parameter Management**
-* **FR2.1:** Auto-generate filenames: `{Timestamp}_{Subject}_{Condition}.raw`.
-* **FR2.2:** Parse legacy-compatible experimental protocol files (.txt/.csv).
-* **FR2.3:** Save `.raw` (Signal) and `.log` (Event) files for every session.
+- 研究人员：加载实验协议，观察呼吸信号，启动实验，保存原始信号和事件日志。
+- 实验室技术人员：配置 COM/NI 设备，校准阈值，手动测试阀门，清洗管路，处理硬件异常。
+- 开发维护人员：通过清晰架构、测试和中文文档持续扩展软件。
 
-**FR3: Calibration Module**
-* **FR3.1:** Real-time, auto-scaling breathing waveform (100Hz).
-* **FR3.2:** Visual threshold setting (Red = Exhale, Yellow = Inhale).
+## 3. 功能需求
 
-**FR4: Pre-test & Manual Control**
-* **FR4.1:** Manual toggle matrix for 20 odor channels.
-* **FR4.2:** Flow rate control for Air (B), Exhaust (C), and Odor (A).
-* **FR4.3:** Compensation Logic: Automatically calculate `A_comp = A_target + C_target` during resting phases.
+### FR1：安全硬件基础
 
-**FR5: Protocol Execution**
-* **FR5.1:** Modes: Manual Trigger (UI Button) and External Trigger (TTL from SuperLab).
-* **FR5.2:** Breath Logic: Wait for signal > Exhale Threshold before stimulation.
-* **FR5.3:** Precision: Target <20ms software jitter for valve actuation.
+- FR1.1：启动或点击连接时，自检 NI USB-6001、NI USB-6501 和 RS232 端口。
+- FR1.2：气流必须高于配置阈值，才允许气味阀、主阀和加热器等危险动作。
+- FR1.3：退出、急停、异常断连或停止操作时，必须关闭所有阀门并进入安全状态。
+- FR1.4：全局工具栏提供连接、重置、停止和帮助入口。
 
-**FR6: Cleaning Module**
-* **FR6.1:** Automated sequence to cycle valves and flush residue.
+### FR2：文件与会话
 
-**FR7: Options & Configuration**
-* **FR7.1:** Configurable COM ports and NI Device IDs via UI.
-* **FR7.2:** Interface language: Simplified Chinese.
-* **FR7.3:** Dynamic UI: Options to select hardware variant (10 vs 20 channels) to adapt the Pre-test UI.
+- FR2.1：根据时间、受试者和条件自动生成 `{Timestamp}_{Subject}_{Condition}.raw` 文件名。
+- FR2.2：解析旧系统兼容的 `.txt` 和 `.csv` 实验协议文件。
+- FR2.3：每次实验会话保存 `.raw` 信号文件和 `.log` 事件日志。
 
-**FR8: Hardware Simulation Mode**
-* **FR8.1:** System can start in a "Simulation Mode" where no physical hardware is required.
-* **FR8.2:** Simulation provides synthetic breath signals (e.g., sine wave or configurable pattern) for calibration and protocol testing.
-* **FR8.3:** Simulation mimics hardware responses (connection success, valve state changes, airflow reading updates) to validate software logic.
-* **FR8.4:** UI clearly indicates when system is running in Simulation Mode (e.g., "[SIMULATION]" in title/status).
+### FR3：呼吸校准
 
-### 2.2 Non-Functional Requirements (NFR)
-* **NFR1 (Safety):** Hardware safety logic runs in a high-priority thread, independent of UI responsiveness.
-* **NFR2 (Performance):** Breathing graph updates at >30 FPS.
-* **NFR3 (Licensing):** Use PySide6 (LGPL) to allow for potential closed-source distribution.
-* **NFR4 (Reliability):** Robust error handling for USB disconnections (attempt safe shutdown and data save).
+- FR3.1：以 100Hz 数据流采集呼吸信号，并以不低于 30 FPS 的速度刷新图形。
+- FR3.2：提供可拖动和可数值微调的呼气阈值、吸气阈值，并显示 LED 状态反馈。
 
-## 3. Epic List
-* **Epic 1:** Foundation, Safety Interlocks, HAL, and Global Toolbar.
-* **Epic 2:** Manual Control (Pre-test) and Visual Calibration.
-* **Epic 3:** Protocol Engine, File Parsing, and Data Logging.
-* **Epic 4:** External Integration, Cleaning Module, and Polish.
+### FR4：手动阀门与流量控制
+
+- FR4.1：提供 20 通道气味阀手动开关矩阵，并支持 10 通道硬件变体。
+- FR4.2：控制 Alicat A/B/C 三路流量：气味/补偿、载气、排空。
+- FR4.3：静息阶段自动使用 `A_comp = A_target + C_target` 补偿逻辑。
+
+### FR5：协议执行
+
+- FR5.1：支持手动触发和外部 TTL 触发两种实验模式。
+- FR5.2：刺激前等待呼吸信号超过呼气阈值，实现呼吸门控。
+- FR5.3：阀门动作软件抖动目标为小于 20ms，并记录关键时序。
+
+### FR6：清洗
+
+- FR6.1：提供自动清洗流程，按设定顺序循环阀门并冲洗残留气味。
+
+### FR7：配置与本地化
+
+- FR7.1：通过界面配置 COM 端口、NI 设备 ID、阈值和硬件变体。
+- FR7.2：界面、错误、提示、日志摘要和帮助入口使用简体中文。
+- FR7.3：根据 10/20 通道硬件变体动态调整预实验界面。
+
+## 4. 非功能需求
+
+- NFR1 安全：硬件安全逻辑必须独立于 UI 响应能力，UI 卡顿不能绕过安全联锁。
+- NFR2 性能：呼吸图形刷新不低于 30 FPS；关键硬件状态推送保持 5-10Hz。
+- NFR3 可靠性：USB、串口、磁盘写入异常必须有明确错误、日志和安全降级。
+- NFR4 可维护性：保留 MVC + Worker + HAL 结构，新增功能必须有相应测试。
+- NFR5 分发：使用 PyInstaller 生成 Windows 可执行产物。
+
+## 5. 里程碑
+
+- Epic 1：安全硬件基础。
+- Epic 2：校准与手动控制。
+- Epic 3：协议执行与数据记录。
+- Epic 4：运行维护、清洗与本地化。
+
+当前建议优先推进 Epic 3，从 Story 3.1 “协议文件解析 .txt/.csv” 开始。

@@ -1,4 +1,4 @@
-# Epic 1 真实硬件复核清单
+﻿# Epic 1 真实硬件复核清单
 
 Status: In Progress
 Epic: 1 - Safe Hardware Foundations
@@ -329,3 +329,4 @@ Pending
 | 1.3 | Pending | Pending | 待验证工具栏真实硬件流程 |
 | 1.4 | Pending | Pending | 待验证真实 Stop/退出安全复位 |
 | 1.5 | Pending | Pending | 待验证 Mock/Real 模式边界 |
+

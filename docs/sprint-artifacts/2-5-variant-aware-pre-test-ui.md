@@ -1,4 +1,4 @@
-# Story 2.5: Variant-Aware Pre-Test UI
+﻿# Story 2.5: Variant-Aware Pre-Test UI
 
 Status: ready-for-review  
 Epic: 2 - Calibration & Manual Control  
@@ -34,7 +34,7 @@ Story ID: 2.5
 - 日志复用现有 logger（如 `valve_events`、状态栏）；不新增全局单例或破坏目录结构（`app/controllers|services|views|models`）。
 
 ## Libraries / Versions (library_framework_requirements)
-- Python 3.10+；PySide6 6.7.2，pyqtgraph 0.13.7；nidaqmx 0.9.0，pyserial 3.5。保持现有版本，20 通道仅涉及 UI/控制逻辑，无需升级依赖。[Source: docs/architecture.md:32-37]
+- Python 3.11；PySide6 6.7.2，pyqtgraph 0.13.7；nidaqmx 0.9.0，pyserial 3.5。保持现有版本，20 通道仅涉及 UI/控制逻辑，无需升级依赖。[Source: docs/architecture.md:32-37]
 
 ## File & Implementation Plan (file_structure_requirements)
 - `app/views/pretest_view.py`：渲染 20 通道矩阵与主阀指示，保留波形/Flow Apply/阈值 UI，继承安全禁用态。
@@ -116,3 +116,4 @@ Story ID: 2.5
 - 为缺失的阀门映射增加 20-channel 回退与前端禁用提示，避免误写入。
 - 阀门服务在无映射时阻断，主阀保持常开并同步到 UI，控制器阻断无映射的开关请求。
 - 预检视图 2x10 渲染保持、中文提示完善，新增单测覆盖映射缺失与主阀常开状态；全量 pytest 通过。
+

@@ -1,26 +1,16 @@
-# Workflow Status Template
-
-# This tracks progress through BMM methodology Analysis, Planning, and Solutioning phases.
-# Implementation phase is tracked separately in sprint-status.yaml
-
-# STATUS DEFINITIONS:
-# ==================
-# Initial Status (before completion):
-#   - required: Must be completed to progress
-#   - optional: Can be completed but not required
-#   - recommended: Strongly suggested but not required
-#   - conditional: Required only if certain conditions met (e.g., if_has_ui)
+# BMAD 规划阶段状态
 #
-# Completion Status:
-#   - {file-path}: File created/found (e.g., "docs/product-brief.md")
-#   - skipped: Optional/conditional workflow that was skipped
+# 本文件记录 PRD、UX、架构、Epic/Story 和实施就绪检查等规划产物。
+# 具体 story 开发进度由 docs/sprint-artifacts/sprint-status.yaml 跟踪。
 
 generated: "2025-12-08"
-project: "OlfactoryPilot"
+updated: "2026-07-09"
+project: "OlfactoryPilot-CN"
 project_type: "internal-tool"
 selected_track: "method"
-field_type: "greenfield"
-workflow_path: ".bmad/bmm/workflows/workflow-status/paths/method-greenfield.yaml"
+field_type: "brownfield"
+active_tooling: ".agents + _bmad"
+workflow_reference: "_bmad/_config/bmad-help.csv"
 workflow_status:
   prd: docs/prd.md
   create-ux-design: docs/ux-design.md
@@ -28,5 +18,5 @@ workflow_status:
   create-epics-and-stories: docs/epics.md
   test-design: recommended
   validate-architecture: optional
-  implementation-readiness: required
-  sprint-planning: required
+  implementation-readiness: docs/implementation-readiness-report-2025-12-08.md
+  sprint-planning: docs/sprint-artifacts/sprint-status.yaml

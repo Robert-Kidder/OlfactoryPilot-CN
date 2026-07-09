@@ -1,4 +1,4 @@
-# 故事 1.2: Safe Alicat Flow Command and Valve Interlock
+﻿# 故事 1.2: Safe Alicat Flow Command and Valve Interlock
 Status: real-hardware-pass
 Epic: 1 - Safe Hardware Foundations
 Story Key: 1-2-safe-start-airflow-interlock
@@ -59,7 +59,7 @@ Story ID: 1.2
 - 线程安全：安全状态读写使用线程安全原语/Qt 线程上下文，避免竞态。
 
 ## Library & Framework Requirements（library_framework_requirements）
-- Python 3.10+；PySide6 当前 6.7.2，最新 6.10.1（pip index）；若评估升级需验证 PyInstaller 打包。
+- Python 3.11；PySide6 当前 6.7.2，最新 6.10.1（pip index）；若评估升级需验证 PyInstaller 打包。
 - pyqtgraph 已装 0.13.7，最新 0.14.0，升级需回归 100Hz 绘制与 Qt 兼容性。
 - nidaqmx 已装 0.9.0，最新 1.3.0，升级需确认 NI-DAQmx 驱动匹配与 API 变更。
 - pyserial 3.5 为最新；保持。
@@ -159,3 +159,4 @@ Story ID: 1.2
 - tests/test_safety_manager.py
 - tests/test_app.py
 - app/main.py
+

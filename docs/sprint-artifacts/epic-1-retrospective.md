@@ -1,4 +1,4 @@
-# Epic 1 Retrospective — Safe Hardware Foundations
+﻿# Epic 1 Retrospective — Safe Hardware Foundations
 Status: Completed  
 Scope: Stories 1.0–1.4 (scaffold/CI, self-check, safe start interlock, global toolbar, safe shutdown)
 
@@ -24,3 +24,4 @@ Scope: Stories 1.0–1.4 (scaffold/CI, self-check, safe start interlock, global 
 - Dry-run `python -m PyInstaller pyinstaller.spec`; confirm inclusion of manual PDF and shutdown record path, adjust spec if missing.
 - Add operator playbook snippets (and link in Help/manual) for unsafe shutdown recovery and for re-checking after hardware reconnection.
 - After hardware validation/code review, promote stories 1.0–1.4 and close Epic 1.
+

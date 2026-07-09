@@ -1,4 +1,4 @@
-# Sprint Change Proposal: Hardware Simulation Strategy
+﻿# Sprint Change Proposal: Hardware Simulation Strategy
 **Date:** 2025-12-10
 **Status:** Approved
 **Trigger:** Lack of physical hardware availability for development and testing.
@@ -55,3 +55,4 @@ The development team currently lacks access to the physical OlfactoryPilot hardw
 *   The application launches in simulation mode without errors.
 *   "Breath" waveform is visible and adjustable in Calibration tab without hardware.
 *   Complex flow compensation logic (Rest vs. Stim) can be verified via logs in simulation.
+

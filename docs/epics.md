@@ -10,396 +10,281 @@ inputDocuments:
   - docs/ux-design.md
 ---
 
-# OlfactoryPilot - Epic Breakdown
+# OlfactoryPilot-CN Epic 与 Story 拆分
 
-## Overview
+## 需求清单
 
-This document provides the complete epic and story breakdown for OlfactoryPilot, decomposing the requirements from the PRD, UX Design if it exists, and Architecture requirements into implementable stories.
+### 功能需求
 
-## Requirements Inventory
+- FR1.1：启动自检 NI USB-6001、NI USB-6501 和 RS232 端口。
+- FR1.2：气流高于阈值后才允许阀门、主阀或加热器动作。
+- FR1.3：退出、急停或异常断连时关闭所有阀门。
+- FR1.4：提供连接、重置、停止和帮助全局工具栏。
+- FR2.1：自动生成 `{Timestamp}_{Subject}_{Condition}.raw` 文件名。
+- FR2.2：解析旧系统兼容的 `.txt` 和 `.csv` 协议文件。
+- FR2.3：每次会话保存 `.raw` 信号文件和 `.log` 事件日志。
+- FR3.1：以 100Hz 数据流显示呼吸波形，图形刷新不低于 30 FPS。
+- FR3.2：支持呼气/吸气阈值调节和可视反馈。
+- FR4.1：提供 20 通道阀门矩阵，并支持 10 通道变体。
+- FR4.2：控制 Alicat A/B/C 三路流量。
+- FR4.3：静息阶段执行 `A_comp = A_target + C_target` 补偿逻辑。
+- FR5.1：支持手动触发和外部 TTL 触发。
+- FR5.2：刺激前等待呼吸信号超过呼气阈值。
+- FR5.3：阀门动作软件抖动目标小于 20ms。
+- FR6.1：提供自动清洗流程。
+- FR7.1：通过界面配置 COM 端口和 NI 设备 ID。
+- FR7.2：界面和用户提示使用简体中文。
+- FR7.3：预实验界面根据硬件通道数动态调整。
 
-### Functional Requirements
+### 非功能需求
 
-FR1.1: Startup self-check of NI-USB-6001, NI-USB-6501, and RS232 ports  
-FR1.2 (CRITICAL): Safe Start interlock requiring Air Flow > Threshold before any odor valve activation or heating  
-FR1.3: Auto-reset to close all valves on exit or emergency stop  
-FR1.4: Global toolbar with Connect, Reset (hardware recovery), Stop (soft disconnect), and Help buttons  
-FR2.1: Auto-generate filenames as `{Timestamp}_{Subject}_{Condition}.raw`  
-FR2.2: Parse legacy-compatible experimental protocol files (.txt/.csv)  
-FR2.3: Save `.raw` (signal) and `.log` (event) files for every session  
-FR3.1: Real-time, auto-scaling breathing waveform at 100Hz  
-FR3.2: Visual threshold setting with distinct exhale (red) and inhale (yellow) cues  
-FR4.1: Manual toggle matrix for 20 odor channels  
-FR4.2: Flow rate control for Air (B), Exhaust (C), and Odor (A)  
-FR4.3: Compensation logic to calculate `A_comp = A_target + C_target` during resting phases  
-FR5.1: Protocol execution modes: Manual Trigger (UI button) and External Trigger (TTL from SuperLab)  
-FR5.2: Breath logic waits for signal > Exhale Threshold before stimulation  
-FR5.3: Target <20ms software jitter for valve actuation  
-FR6.1: Cleaning module with automated valve cycling and residue flush  
-FR7.1: Configurable COM ports and NI device IDs via UI  
-FR7.2: Interface language: Simplified Chinese  
-FR7.3: Dynamic UI options for hardware variant selection (10 vs 20 channels) to adapt Pre-test UI  
+- NFR1：硬件安全逻辑运行在线程/服务层，不能只依赖 UI 状态。
+- NFR2：呼吸图形刷新不低于 30 FPS。
+- NFR3：使用 PySide6，便于 Windows 桌面交付。
+- NFR4：USB、串口和磁盘异常必须安全降级并记录。
+- NFR5：使用 Python 3.11、pip requirements、ruff、pytest 和 PyInstaller。
 
-### NonFunctional Requirements
+## Epic 1: 安全硬件基础
 
-NFR1 (Safety): Hardware safety logic runs in a high-priority thread, independent of UI responsiveness  
-NFR2 (Performance): Breathing graph updates at >30 FPS  
-NFR3 (Licensing): Use PySide6 (LGPL) to allow for potential closed-source distribution  
-NFR4 (Reliability): Robust error handling for USB disconnections with safe shutdown and data save  
+建立可运行、可测试、可打包的安全控制基础，包括项目脚手架、硬件自检、安全联锁、全局工具栏、安全退出和模拟硬件层。
 
-### Additional Requirements
+覆盖需求：FR1.1、FR1.2、FR1.3、FR1.4。
 
-- Architecture: MVC with PySide6 views, controllers orchestrating logic, and a dedicated hardware worker thread for jitter mitigation  
-- Architecture: Data logger thread writing to disk; signals/slots queue between UI and worker threads  
-- Architecture: Tech stack constraints: Python 3.10+, PySide6, `nidaqmx`, `pyserial`, `pyqtgraph`; packaging with poetry and pyinstaller  
-- Architecture: Maintain source tree structure with app/controllers/models/views/workers/services and config/docs/tests directories  
-- Architecture: HAL between worker thread and hardware, covering NI DAQ and RS232 mass flow controllers  
-- Architecture: Windows 10/11 desktop target with emphasis on hardware safety, real-time precision, and maintainability  
-- UX: Top tab bar (File, Calibration, Pre-test, Protocol, Cleaning, Options) with "page-as-subsystem" isolation to reduce cognitive load  
-- UX: Persistent status/footer showing connection icon, air flow value, and safety status ("SAFE"/"LOW FLOW" flashing red)  
-- UX: Global controls available throughout: Connect, Reset, Stop, Help  
-- UX: Calibration visuals—black graph background, white signal line, draggable red (exhale) and yellow (inhale) thresholds, LED indicators, auto-scale button, numeric spinners  
-- UX: Pre-test valve matrix 4x5 toggle grid with safe-on gating (Air Flow > Threshold) and gray/green states  
-- UX: Protocol mode focus layout with current trial/next odor/time remaining, start/pause buttons, and manual vs TTL trigger toggle  
-- UX: Chinese localization across UI (Microsoft YaHei, 12px base); color standards (background #F0F0F0, danger #DC3545, go #28A745)  
+#### Story 1.0: 项目脚手架与 CI 基线
 
-### FR Coverage Map
+作为开发者，我需要一个可运行的 PySide6/MVC 项目骨架和自动化检查流程，以便后续功能能在统一结构中安全迭代。
 
-FR1.1: Epic 1 - Startup safety and device validation foundation  
-FR1.2: Epic 1 - Safe Start interlock for airflow-gated control  
-FR1.3: Epic 1 - Safe shutdown and valve reset  
-FR1.4: Epic 1 - Global toolbar for safety controls  
-FR2.1: Epic 3 - File/session management and logging  
-FR2.2: Epic 3 - Protocol file parsing (.txt/.csv)  
-FR2.3: Epic 3 - Raw signal and event log output per session  
-FR3.1: Epic 2 - Calibration waveform visualization and autoscale  
-FR3.2: Epic 2 - Threshold tuning with visual cues  
-FR4.1: Epic 2 - Pre-test manual valve matrix  
-FR4.2: Epic 2 - Flow rate controls for Air/Exhaust/Odor  
-FR4.3: Epic 2 - Compensation logic for resting phases  
-FR5.1: Epic 3 - Protocol execution modes (manual vs TTL)  
-FR5.2: Epic 3 - Breath-gated stimulation logic  
-FR5.3: Epic 3 - <20ms jitter target for actuation  
-FR6.1: Epic 4 - Cleaning automation  
-FR7.1: Epic 4 - Configurable COM/NI IDs  
-FR7.2: Epic 4 - Chinese UI language support  
-FR7.3: Epic 2 - Hardware variant selection in Pre-test UI  
+验收标准：
 
-## Epic List
+- 使用 Python 3.11 安装 `requirements-dev.txt` 后，应用可以启动占位窗口。
+- `ruff` 和 `pytest` 能在本地和 GitHub Actions 中通过。
+- PyInstaller 能生成 Windows 可执行产物，并输出路径、大小和哈希。
 
-### Epic 1: Safe Hardware Foundations
-建立安全硬件控制基础，完成上电自检、气流安全联锁、全局安全工具栏，并确保退出/急停时硬件安全复位。
-**FRs covered:** FR1.1, FR1.2, FR1.3, FR1.4
+#### Story 1.1: 设备自检与状态报告
 
-#### Story 1.0: Project Scaffold and CI Baseline
-As a developer,  
-I want a ready-to-run PySide6/MVC scaffold with lint/test/packaging CI,  
-So that the team can build and ship safely on day one.
+作为实验室技术人员，我需要启动或连接时看到 NI 和 RS232 设备状态，以便确认硬件可以安全使用。
 
-**Acceptance Criteria:**
-- **Given** the repo is initialized  
-  **When** I run dependency setup (poetry/pip)  
-  **Then** the PySide6 MVC skeleton (views/controllers/workers/services) launches a placeholder window without errors.
-- **Given** tooling is installed  
-  **When** I run lint and tests (ruff/flake8 + pytest)  
-  **Then** they pass locally and in CI without manual edits.
-- **Given** packaging is configured  
-  **When** I run the packaging job (pyinstaller)  
-  **Then** it produces a Windows executable artifact and logs size/hash/path.
-- **Given** CI is triggered on push/PR  
-  **When** the pipeline runs  
-  **Then** it executes lint, tests, and packaging, failing the build on any error.
+验收标准：
 
-#### Story 1.1: Device Self-Check and Status Report
-As a lab technician,  
-I want the system to verify NI-USB-6001/6501 and RS232 ports at startup and show a status report,  
-So that I know the hardware is connected and safe to proceed.
+- 连接时检查 NI USB-6001、NI USB-6501 和 RS232 配置。
+- 每个设备显示通过或失败状态。
+- 设备缺失、波特率不匹配或端口不可用时，阻止控制动作并显示中文错误。
 
-**Acceptance Criteria:**
-- **Given** the app launches  
-  **When** startup begins  
-  **Then** it checks NI-USB-6001, NI-USB-6501, and RS232 connectivity and baud settings  
-  **And** shows a status summary (pass/fail per device) with any detected errors.
-- **Given** a device is missing or baud mismatch  
-  **When** checks run  
-  **Then** the system blocks control actions and shows a clear error with retry guidance.
+#### Story 1.2: 气流安全联锁
 
-#### Story 1.2: Safe Start Airflow Interlock
-As a lab technician,  
-I want airflow > threshold to be required before any valve or heater activation,  
-So that hardware cannot overheat or run without proper airflow.
+作为实验室技术人员，我需要气流高于阈值后才允许危险动作，以避免无气流状态下误开阀门或加热器。
 
-**Acceptance Criteria:**
-- **Given** the system is idle  
-  **When** airflow is below the configured threshold  
-  **Then** valve/heater commands are blocked and a “LOW FLOW” warning is shown.
-- **Given** airflow rises above threshold  
-  **When** commands are issued  
-  **Then** valve/heater operations proceed normally.
-- **Given** airflow drops below threshold mid-operation  
-  **When** the condition is detected  
-  **Then** valves/heater are safely shut down and a warning is surfaced.
+验收标准：
 
-#### Story 1.3: Global Safety Toolbar
-As a lab technician,  
-I want persistent Connect, Reset (hardware recovery), Stop (soft disconnect), and Help controls,  
-So that I can safely initialize, recover, halt, or access the manual at any time.
+- 气流低于阈值时，阀门和加热器命令被阻止。
+- 气流恢复后，允许执行合法命令。
+- 运行中气流跌落时，系统关闭危险输出并记录事件。
 
-**Acceptance Criteria:**
-- **Given** the app is open  
-  **When** I click Connect  
-  **Then** it runs the device self-check and initializes connections with clear success/fail feedback.
-- **Given** a hardware fault or mismatch  
-  **When** I click Reset  
-  **Then** it re-handshakes NI/RS232, closes valves, and reports status.
-- **Given** I need to halt safely  
-  **When** I click Stop  
-  **Then** it stops active operations, closes valves, and leaves UI responsive.
-- **Given** I need documentation  
-  **When** I click Help  
-  **Then** the local manual/PDF opens in Chinese.
+#### Story 1.3: 全局安全工具栏
 
-#### Story 1.4: Safe Shutdown and Valve Reset
-As a lab technician,  
-I want the system to close all valves and stop heaters on exit or emergency stop,  
-So that hardware always returns to a safe state.
+作为实验室技术人员，我需要随时可见的连接、重置、停止和帮助按钮，以便快速处理实验前后的硬件状态。
 
-**Acceptance Criteria:**
-- **Given** I exit the app or press emergency stop  
-  **When** shutdown is triggered  
-  **Then** all valves close, heaters stop, and the action is logged.
-- **Given** shutdown completes  
-  **When** I relaunch  
-  **Then** the system starts from a clean/safe state with prior issues reported.
+验收标准：
 
-#### Story 1.5: Hardware Simulation Layer (Mock HAL)
-As a developer,
-I want a software-only simulation mode that mimics hardware behavior,
-So that I can verify UI, safety logic, and protocols without physical devices.
+- “连接”触发自检和初始化。
+- “重置”重新握手硬件并关闭阀门。
+- “停止”中止当前操作并进入安全状态。
+- “帮助”打开本地帮助材料或说明入口。
 
-**Acceptance Criteria:**
-- **Given** I launch the app with `--simulation` flag
-  **When** the app starts
-  **Then** it bypasses physical hardware checks and loads the Mock HAL.
-  **And** the UI Title Bar displays "[SIMULATION MODE]".
-- **Given** Simulation Mode is active
-  **When** I navigate to Calibration
-  **Then** a synthetic breath waveform (e.g., sine wave) is visible and reacts to thresholds.
-- **Given** Simulation Mode is active
-  **When** I toggle valves or change flow rates
-  **Then** the system logs the "virtual" state changes and simulates appropriate feedback (e.g., flow values update).
+#### Story 1.4: 安全退出与阀门复位
 
-### Epic 2: Calibration & Manual Control
-让用户安全地查看呼吸信号、设定阈值、手动切换阀门与流量，支持不同硬件规格的预检操作。
-**FRs covered:** FR3.1, FR3.2, FR4.1, FR4.2, FR4.3, FR7.3
+作为实验室技术人员，我需要退出或急停时所有阀门自动关闭，以确保硬件不会停留在危险状态。
 
-#### Story 2.1: Real-Time Breath Visualization
-As a researcher,  
-I want a 100Hz breathing waveform with auto-scale,  
-So that I can see stable signals for calibration.
+验收标准：
 
-**Acceptance Criteria:**
-- **Given** sensors stream data  
-  **When** the graph renders  
-  **Then** it updates at >=30 FPS (measured over a 10s sliding window; avg + p95 FPS logged) with auto-scale toggle and black/white visual standard.
-- **Given** FPS drops below 30 for more than 2 seconds  
-  **When** detected  
-  **Then** a warning surfaces and is recorded in the session log.
-- **Given** thresholds are visible  
-  **When** I drag red (exhale) or yellow (inhale) lines  
-  **Then** values update and LED indicators reflect crossings in real time.
+- 退出、急停和异常断连都会关闭所有阀门。
+- 关闭动作写入事件日志。
+- 重新启动时系统从安全状态开始。
 
-#### Story 2.2: Threshold Tuning and Feedback
-As a researcher,  
-I want draggable inhale/exhale thresholds with numeric fine-tune,  
-So that gating is precise and repeatable.
+#### Story 1.5: 硬件模拟层 Mock HAL
 
-**Acceptance Criteria:**
-- **Given** thresholds are set  
-  **When** I adjust via drag or numeric spinners  
-  **Then** both the graph and numeric fields stay in sync, persisting across sessions.
-- **Given** signal crosses thresholds  
-  **When** events occur  
-  **Then** LED indicators light and a status label shows current gating state.
+作为开发者，我需要不连接真实硬件也能运行软件，以便开发、演示和自动化测试。
 
-#### Story 2.3: Valve Matrix Manual Control
-As a lab technician,  
-I want a 4x5 toggle matrix for 20 odor valves with safe-on gating,  
-So that I can manually test channels without bypassing airflow safety.
+验收标准：
 
-**Acceptance Criteria:**
-- **Given** airflow < threshold  
-  **When** I try to enable a valve  
-  **Then** the action is blocked and a “LOW FLOW” message appears.
-- **Given** airflow ≥ threshold  
-  **When** I toggle a valve  
-  **Then** it switches state (gray→green) and logs the change.
-- **Given** hardware variant differs (10 vs 20 channels)  
-  **When** selected in settings  
-  **Then** the matrix displays the appropriate number of toggles.
+- 使用 `--simulation` 启动后加载 Mock HAL。
+- 模拟模式显示合成呼吸信号。
+- 阀门和流量设置会记录虚拟状态变化。
 
-#### Story 2.4: Flow Rate Controls
-As a lab technician,  
-I want to set flow rates for Air (B), Exhaust (C), and Odor (A) with apply action,  
-So that I can calibrate desired flows safely.
+## Epic 2: 校准与手动控制
 
-**Acceptance Criteria:**
-- **Given** airflow is below threshold  
-  **When** I click Apply  
-  **Then** the action is blocked, a LOW FLOW warning is shown, and no RS232 command is sent (aligns with FR1.2).
-- **Given** numeric inputs are available  
-  **When** I enter targets and click Apply  
-  **Then** commands send to RS232 with confirmation or error feedback.
-- **Given** compensation is needed  
-  **When** resting phases occur  
-  **Then** `A_comp = A_target + C_target` is applied automatically and displayed.
+让用户安全地查看呼吸信号、调整阈值、手动测试阀门、设置流量，并适配不同硬件通道数量。
 
-#### Story 2.5: Variant-Aware Pre-Test UI
-As a lab technician,  
-I want the Pre-test UI to adapt to 10 or 20 channel hardware,  
-So that controls stay aligned with the connected device.
+覆盖需求：FR3.1、FR3.2、FR4.1、FR4.2、FR4.3、FR7.3。
 
-**Acceptance Criteria:**
-- **Given** I select hardware variant  
-  **When** the UI renders  
-  **Then** valve toggles and flow controls reflect the chosen configuration.
-- **Given** variant changes mid-session  
-  **When** updated  
-  **Then** UI refreshes safely without leaving stale valve states.
+#### Story 2.1: 实时呼吸波形显示
 
-### Epic 3: Protocol Execution & Data Logging
-支持协议文件解析、呼吸门控的实验执行、手动/TTL 触发模式，并输出高精度信号与日志文件，满足 <20ms 抖动要求。
-**FRs covered:** FR2.1, FR2.2, FR2.3, FR5.1, FR5.2, FR5.3
+作为研究人员，我需要看到稳定的呼吸波形，以便完成实验前校准。
 
-#### Story 3.1: Protocol File Parsing (.txt/.csv)
-As a researcher,  
-I want to load legacy-compatible protocol files,  
-So that I can run existing stimulation sequences without re-authoring.
+验收标准：
 
-**Acceptance Criteria:**
-- **Given** a valid .txt or .csv protocol file  
-  **When** I load it  
-  **Then** the system parses trials, timing, valves, and metadata; errors are reported with line numbers.
-- **Given** malformed rows  
-  **When** detected  
-  **Then** loading fails with a clear message and no partial run state.
+- 以 100Hz 数据流采集呼吸信号。
+- 图形刷新不低于 30 FPS。
+- 支持自动缩放并记录性能警告。
 
-#### Story 3.2: Breath-Gated Stimulation
-As a researcher,  
-I want stimulation to wait for exhale threshold before triggering,  
-So that delivery aligns with the breathing cycle.
+#### Story 2.2: 阈值调节与反馈
 
-**Acceptance Criteria:**
-- **Given** a running protocol  
-  **When** a trial is ready  
-  **Then** the system waits for exhale signal > threshold before actuating valves.
-- **Given** threshold not reached within timeout  
-  **When** condition occurs  
-  **Then** it logs a skip or retry per configuration and notifies the user.
+作为研究人员，我需要拖动和数值微调呼气/吸气阈值，以便刺激门控可重复。
 
-#### Story 3.3: Manual vs TTL Trigger Modes
-As a researcher,  
-I want to switch between manual trigger button and external TTL trigger,  
-So that experiments integrate with SuperLab or run standalone.
+验收标准：
 
-**Acceptance Criteria:**
-- **Given** mode = Manual  
-  **When** I press Start  
-  **Then** trials advance per protocol timing with UI progress (current/next/time remaining).
-- **Given** mode = TTL  
-  **When** TTL pulses arrive  
-  **Then** trials advance on pulse, and UI shows received pulses; missing pulses are logged.
-- **Given** mode changes  
-  **When** switched  
-  **Then** the system safely transitions without leaving stale state.
+- 拖动线和数值输入保持同步。
+- 阈值跨越状态实时更新 LED。
+- 阈值设置可持久化。
 
-#### Story 3.4: Low-Jitter Actuation (<20ms)
-As a lab technician,  
-I want valve actuation jitter under 20ms,  
-So that timing is reliable for experiments.
+#### Story 2.3: 阀门矩阵手动控制
 
-**Acceptance Criteria:**
-- **Given** hardware worker thread handles actuation  
-  **When** trials run  
-  **Then** measured software jitter (expected vs actual command time delta) stays under 20ms, logged per actuation (timestamp, expected_ms, actual_ms, jitter_ms).
-- **Given** jitter exceeds 20ms in a rolling 30s window (p95 > 20ms or any single >30ms)  
-  **When** detected  
-  **Then** the system logs the incident, surfaces a warning with suggested mitigations, and pauses new actuations or falls back to a safe-degraded mode until jitter recovers.
+作为实验室技术人员，我需要 10/20 通道阀门矩阵，以便安全测试气味通道。
 
-#### Story 3.5: Session File Naming and Logging
-As a researcher,  
-I want auto-generated filenames and paired signal/log outputs,  
-So that data is consistent and traceable.
+验收标准：
 
-**Acceptance Criteria:**
-- **Given** subject/condition inputs  
-  **When** a session starts  
-  **Then** it creates `{Timestamp}_{Subject}_{Condition}.raw` plus `.log` in the session folder.
-- **Given** a session completes  
-  **When** saving  
-  **Then** both signal and event logs are stored with run metadata (mode, thresholds, variant).
-- **Given** a write failure occurs (disk full/permission)  
-  **When** saving  
-  **Then** the app shows an error, rolls back partial files, logs the failure (path, error, timestamp), and offers retry after the issue is fixed.
+- 气流不足时不能打开阀门。
+- 阀门状态以灰色/绿色区分。
+- 通道数根据硬件变体动态显示。
 
-### Epic 4: Operations, Cleaning & Localization
-提供清洗流程、设备配置（串口/NI ID）、中文界面与整体运维要素，便于安全运行与本地化交付。
-**FRs covered:** FR6.1, FR7.1, FR7.2
+#### Story 2.4: 流量设置控制
 
-#### Story 4.1: Cleaning Automation
-As a lab technician,  
-I want an automated cleaning sequence,  
-So that residue is flushed without manual valve scripting.
+作为实验室技术人员，我需要设置 Alicat A/B/C 三路流量，以便校准气路。
 
-**Acceptance Criteria:**
-- **Given** cleaning mode is available  
-  **When** I start it  
-  **Then** valves cycle through the prescribed pattern and durations, respecting airflow safety.
-- **Given** a cleaning step fails or the user aborts  
-  **When** the run stops  
-  **Then** all valves close safely and the log records step index, failure reason, and elapsed time.
+验收标准：
 
-#### Story 4.2: Configurable COM and NI IDs
-As a lab technician,  
-I want to set COM ports and NI device IDs via the UI,  
-So that the system matches our hardware wiring.
+- 低气流时阻止危险流量应用动作。
+- 合法输入会发送 RS232 命令并显示结果。
+- 静息阶段显示并应用补偿流量。
 
-**Acceptance Criteria:**
-- **Given** settings UI is open  
-  **When** I enter COM/NI IDs and save  
-  **Then** values persist and are used on next Connect.
-- **Given** invalid IDs are entered  
-  **When** saved  
-  **Then** validation errors show and connections are blocked until fixed.
+#### Story 2.5: 硬件变体适配的预实验界面
 
-#### Story 4.3: Chinese UI Localization
-As a researcher,
-I want the interface fully in Simplified Chinese,
-So that local users can operate without language friction.
+作为实验室技术人员，我需要界面适配 10 或 20 通道硬件，以避免误操作不存在的通道。
 
-**Acceptance Criteria:**
-- **Given** UI renders
-  **When** I navigate tabs
-  **Then** labels, buttons, statuses, and help content are in Chinese (微软雅黑 12px).
-- **Given** errors/warnings occur
-  **When** displayed
-  **Then** messages are Chinese-localized, concise, and use consistent phrasing (e.g., “协议文件无效，第 {line} 行格式错误”; “气流不足，请检查管路后重试”; “写入失败，请释放磁盘空间或检查权限”).
+验收标准：
 
-#### Story 4.4 (Refined): Compensation Logic & Automation
-As a researcher,
-I want the system to automatically handle flow compensation and Master Valve logic between Rest and Stimulation phases,
-So that pressure balance is maintained.
+- 设置硬件变体后，阀门矩阵立即匹配通道数量。
+- 变体切换时先关闭活动阀门，再刷新界面。
 
-**Acceptance Criteria:**
-- **Given** Resting Phase (No Stim)
-  **Then** Master Valve = Bypass (P1.0 OFF), Odor Valves = Closed.
-  **And** MFC A (Odor/Comp) set to `A_target + C_target` (Default: 500+500=1000 ml/min).
-  **And** MFC C (Exhaust) set to 500 ml/min.
-  **And** MFC B (Carrier) remains constant (Default: 1000 ml/min).
-- **Given** Stimulation Phase
-  **Then** Master Valve = Main (P1.0 ON), Specific Odor Valve = Open.
-  **And** MFC A set to `A_target` (Default: 500 ml/min).
-  **And** MFC C set to 0 ml/min.
-- **Given** transition between phases
-  **When** executing
-  **Then** commands are sent in correct order to minimize pressure spikes (e.g., adjust MFCs before switching Master Valve).
+#### Story 2.6: 自动呼吸校准会话
+
+作为研究人员，我需要根据一段呼吸采样自动建议阈值，以减少人工调节时间。
+
+验收标准：
+
+- 可以采集固定时长的呼吸样本。
+- 自动给出呼气和吸气阈值建议。
+- 用户确认后才写入当前配置。
+
+#### Story 2.7: 校准界面优化
+
+作为研究人员，我需要更清晰的校准界面布局，以便快速判断信号质量和阈值状态。
+
+验收标准：
+
+- 关键信号、阈值、LED 和数值控件布局清楚。
+- 文案为中文。
+- 控件不会在常见窗口尺寸下重叠。
+
+## Epic 3: 协议执行与数据记录
+
+支持旧系统实验协议导入、呼吸门控刺激、手动/TTL 触发、低抖动阀门动作和会话数据输出。
+
+覆盖需求：FR2.1、FR2.2、FR2.3、FR5.1、FR5.2、FR5.3。
+
+#### Story 3.1: 协议文件解析 .txt/.csv
+
+作为研究人员，我需要加载旧系统兼容的协议文件，以便复用现有实验序列。
+
+验收标准：
+
+- 支持 `.txt` 和 `.csv` 文件。
+- 解析 trial、timing、valve、trigger 和 metadata。
+- 格式错误要提示具体行号和字段。
+- 解析失败时不能留下部分运行状态。
+
+#### Story 3.2: 呼吸门控刺激
+
+作为研究人员，我需要刺激等待呼气阈值达成，以便刺激与呼吸周期对齐。
+
+验收标准：
+
+- trial 准备完成后等待呼吸信号超过呼气阈值。
+- 超时后按配置跳过或重试，并记录事件。
+- UI 显示等待、触发、跳过等状态。
+
+#### Story 3.3: 手动与 TTL 触发模式
+
+作为研究人员，我需要在手动触发和外部 TTL 触发之间切换，以便既能独立运行，也能接入 SuperLab。
+
+验收标准：
+
+- 手动模式下由界面按钮推进 trial。
+- TTL 模式下由外部脉冲推进 trial。
+- 模式切换时安全清理旧状态。
+
+#### Story 3.4: 低抖动阀门动作
+
+作为实验室技术人员，我需要阀门动作软件抖动小于 20ms，以保证实验时序可靠。
+
+验收标准：
+
+- 记录 expected、actual 和 jitter 时间。
+- p95 抖动超过 20ms 或单次超过 30ms 时提示警告。
+- 严重超限时暂停新动作或进入安全降级。
+
+#### Story 3.5: 会话文件命名与日志
+
+作为研究人员，我需要自动生成信号和事件文件，以便实验数据可追踪。
+
+验收标准：
+
+- 会话开始时生成 `{Timestamp}_{Subject}_{Condition}.raw` 和 `.log`。
+- 日志包含模式、阈值、硬件变体、trial 和关键事件。
+- 磁盘写入失败时提示中文错误，并避免留下误导性半成品。
+
+## Epic 4: 运行维护、清洗与本地化
+
+完善清洗流程、硬件配置、中文帮助和长期维护能力，让软件可以稳定交付给实验室使用。
+
+覆盖需求：FR6.1、FR7.1、FR7.2。
+
+#### Story 4.1: 自动清洗流程
+
+作为实验室技术人员，我需要自动清洗序列，以便实验后冲洗残留气味。
+
+验收标准：
+
+- 按配置循环阀门和持续时间。
+- 全程遵守气流安全联锁。
+- 中止或失败时关闭阀门并记录步骤。
+
+#### Story 4.2: COM 与 NI ID 配置界面
+
+作为实验室技术人员，我需要在界面中配置串口和 NI 设备 ID，以匹配实际接线。
+
+验收标准：
+
+- 配置保存后下次连接生效。
+- 无效 ID 会阻止保存或连接。
+- 错误提示为中文。
+
+#### Story 4.3: 中文界面本地化
+
+作为研究人员，我需要界面、提示和帮助内容全部为中文，以降低培训成本。
+
+验收标准：
+
+- 标签、按钮、状态、错误、帮助入口均为简体中文。
+- 文案风格一致、简洁、可操作。
+- 不再出现乱码或旧英文用户提示。
+
+#### Story 4.4: 补偿逻辑与主阀自动化
+
+作为研究人员，我需要系统自动处理静息和刺激阶段的补偿流量与主阀状态，以保持气压稳定。
+
+验收标准：
+
+- 静息阶段主阀关闭，气味阀关闭，MFC A 设置为 `A_target + C_target`。
+- 刺激阶段主阀打开，目标气味阀打开，MFC A 设置为 `A_target`，MFC C 设置为 0。
+- 阶段切换时先调整流量，再切换主阀，减少压力突变。

@@ -1,4 +1,4 @@
-# 故事 2.2: Threshold Tuning and Feedback
+﻿# 故事 2.2: Threshold Tuning and Feedback
 Status: done
 Epic: 2 - Calibration & Manual Control
 Story Key: 2-2-threshold-tuning-and-feedback
@@ -31,7 +31,7 @@ Story ID: 2.2
 - 阈值/状态变更写入 Data Logger（与 2.1 的 breath_viz 事件兼容），方便后续 Protocol/Breath-gated 逻辑复用。
 
 ## Developer Context
-- 平台：Windows 10/11，Python 3.10+，PySide6；MVC + Worker Thread；硬件 worker 推送 100Hz 信号与 5-10 Hz SafetyState telemetry。  
+- 平台：Windows 10/11，Python 3.11，PySide6；MVC + Worker Thread；硬件 worker 推送 100Hz 信号与 5-10 Hz SafetyState telemetry。  
 - 硬件：NI-USB-6001/6501（nidaqmx），RS232 质量流量控制器（pyserial）；Air Flow 阈值与 Options 配置共用。  
 - 状态模型：AppState 已含 low_flow_threshold、telemetry、config_path；本故事需新增 inhale/exhale 阈值、gating 状态缓存，并保持与 SafetyState 共存不冲突。  
 - 现有组件：SafetyManager.guard_command、MainController.ensure_safe_command 与 footer 状态展示已存在；config/default_config.json 提供默认阈值；Data Logger 事件格式在 2.1 中定义（breath_viz）。  
@@ -54,7 +54,7 @@ Story ID: 2.2
 - 按 docs/architecture.md 的 telemetry 流（5-10 Hz 状态 + 100Hz 信号）和安全封锁要求实现，保持与 SafetyManager 低流量判定兼容。
 
 ## Library & Framework Requirements
-- Python 3.10+；PySide6 6.7.2（上游最新 6.10.1，升级需验证打包/兼容性）；pyqtgraph 0.13.7（上游 0.14.0，升级需回归 100Hz 性能）；nidaqmx 0.9.0（上游 1.3.0，升级需验证 NI 驱动）；pyserial 3.5；PyInstaller 6.x。
+- Python 3.11；PySide6 6.7.2（上游最新 6.10.1，升级需验证打包/兼容性）；pyqtgraph 0.13.7（上游 0.14.0，升级需回归 100Hz 性能）；nidaqmx 0.9.0（上游 1.3.0，升级需验证 NI 驱动）；pyserial 3.5；PyInstaller 6.x。
 
 ## File Structure Requirements
 - `app/views/calibration_view.py`（或同名文件）：实现阈值线、LED、状态标签与数值输入控件，暴露更新接口供 controller 调用。  
@@ -125,5 +125,6 @@ Story ID: 2.2
 - config/default_config.json
 - tests/test_gating_service.py
 - tests/test_integration_gating.py
+
 
 

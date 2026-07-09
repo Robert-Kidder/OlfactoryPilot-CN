@@ -1,4 +1,4 @@
-# 故事 2.1: Real-Time Breath Visualization
+﻿# 故事 2.1: Real-Time Breath Visualization
 Status: done
 Epic: 2 - Calibration & Manual Control
 Story Key: 2-1-real-time-breath-visualization
@@ -31,7 +31,7 @@ Story ID: 2.1
 - 日志：Data Logger 记录 `breath_viz` 事件（ts, fps_avg, fps_p95, window_s, warning_flag, reason）；数据缺失/异常值要记录 source 与恢复时间。
 
 ## Developer Context
-- 平台：Windows 10/11，Python 3.10+，PySide6；MVC + Worker Thread；硬件 worker 提供 100Hz 信号与 SafetyState（5-10 Hz）telemetry，UI 被动订阅。
+- 平台：Windows 10/11，Python 3.11，PySide6；MVC + Worker Thread；硬件 worker 提供 100Hz 信号与 SafetyState（5-10 Hz）telemetry，UI 被动订阅。
 - 硬件：NI-USB-6001/6501（nidaqmx），信号源为呼吸传感器；安全阈值来自 config/Options；LOW FLOW 会阻断下游控制但不应阻塞波形渲染。
 - 现有组件：MainWindow tab 布局与 footer 状态显示；SafetyManager.guard_command + hardware_ready 已存在；Data Logger 用于事件记录；AppState/SafetyState 已定义 safe/low_flow/data_stale。
 - 性能：UI 主线程需保持 >=30 FPS（绘制），worker 在独立线程；避免过度对象创建与主线程阻塞；必要时使用 Qt 定时器/pyqtgraph setData 重用。
@@ -51,7 +51,7 @@ Story ID: 2.1
 - 遵循状态推送节奏（telemetry 5-10 Hz，数据 100Hz），保持线程安全与最小阻塞；配置读写走 config/default_config.json。
 
 ## Library & Framework Requirements
-- Python 3.10+；PySide6 6.7.2（最新 6.10.1，升级需验证打包/Qt 插件）；pyqtgraph 0.13.7（最新 0.14.0，升级需回归 100Hz 性能与 Qt 兼容）；nidaqmx 0.9.0（最新 1.3.0，升级需验证驱动）；pyserial 3.5；PyInstaller 6.x。
+- Python 3.11；PySide6 6.7.2（最新 6.10.1，升级需验证打包/Qt 插件）；pyqtgraph 0.13.7（最新 0.14.0，升级需回归 100Hz 性能与 Qt 兼容）；nidaqmx 0.9.0（最新 1.3.0，升级需验证驱动）；pyserial 3.5；PyInstaller 6.x。
 
 ## File Structure Requirements
 - `app/views/...`：校准视图组件/pyqtgraph 曲线与阈值线、LED 指示器；MainWindow 中挂载 Tab。
@@ -120,3 +120,4 @@ Story ID: 2.1
 - app/views/__init__.py
 - config/default_config.json
 - tests/test_breath_metrics.py
+

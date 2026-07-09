@@ -1,4 +1,4 @@
-# 故事 1.3: Global Safety Toolbar
+﻿# 故事 1.3: Global Safety Toolbar
 Status: Ready for Review
 Epic: 1 - Safe Hardware Foundations
 Story Key: 1-3-global-safety-toolbar
@@ -31,7 +31,7 @@ Story ID: 1.3
 - 所有操作需非阻塞 UI，使用 signals/slots 调度 Worker/Service；任何异常都要记录（时间戳、动作、来源、原因）。
 
 ## Developer Context（developer_context_section）
-- 平台：Windows 10/11，Python 3.10+，PySide6；MVC + Worker 线程；硬件线程负责自检、telemetry、安全守卫，UI 仅被动渲染。
+- 平台：Windows 10/11，Python 3.11，PySide6；MVC + Worker 线程；硬件线程负责自检、telemetry、安全守卫，UI 仅被动渲染。
 - 硬件：NI-USB-6001/6501（nidaqmx）、RS232 质量流量控制器（pyserial）；气流阈值为安全判定输入。
 - 状态模型：`AppState` 内含 telemetry（airflow/safety_state/timestamp）、`hardware_ready`、`low_flow_threshold`、`last_shutdown_event`；已有 `SafetyState`、`SafetyManager` 负责安全判定和命令护栏。
 - 现有 UI：`MainWindow` 具备 tab + 状态栏、telemetry 展示与“重新自检”按钮；需要扩展为全局工具栏（新增按钮/布局），并与状态栏联动。
@@ -53,7 +53,7 @@ Story ID: 1.3
 - 保持现有目录与命名：`app/controllers|views|workers|services|models`，`config/default_config.json`，`tests/`。
 
 ## Library & Framework Requirements（library_framework_requirements）
-- Python 3.10+（建议 3.11）；PySide6 当前 6.7.2，最新 6.10.1（升级需验证 PyInstaller 打包/Qt 插件）。
+- Python 3.11；PySide6 当前 6.7.2，最新 6.10.1（升级需验证 PyInstaller 打包/Qt 插件）。
 - pyqtgraph 0.13.7（最新 0.14.0，升级需验证 100Hz 绘图性能）。
 - nidaqmx 0.9.0（最新 1.3.0，升级需确认 NI-DAQmx 驱动兼容）。
 - pyserial 3.5（最新）。
@@ -136,3 +136,4 @@ Story ID: 1.3
 
 ### Change Log
 - 2025-12-09：完成全局工具栏 UI，新增禁用提示与按钮状态护栏测试，保持状态栏文案与安全/自检联动。
+

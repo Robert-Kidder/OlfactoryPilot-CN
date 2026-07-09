@@ -1,4 +1,4 @@
-# 故事 1.0：Project Scaffold and CI Baseline
+﻿# 故事 1.0：Project Scaffold and CI Baseline
 Status: review
 Epic: 1 - Safe Hardware Foundations
 Story Key: 1-0-project-scaffold-and-ci-baseline
@@ -9,14 +9,14 @@ Story Key: 1-0-project-scaffold-and-ci-baseline
 这样团队可以在第一天就安全构建与交付。
 
 ## Acceptance Criteria
-1. **骨架可运行**：仓库初始化后，安装依赖（poetry/pip）即可启动 PySide6 MVC 骨架，显示占位窗口且无错误。
+1. **骨架可运行**：仓库初始化后，安装依赖（pip/requirements）即可启动 PySide6 MVC 骨架，显示占位窗口且无错误。
 2. **本地与 CI 工具链通过**：安装工具后，运行 lint（ruff/flake8）与 pytest 全部通过，本地与 CI 保持一致。
 3. **打包可用**：配置 pyinstaller，运行打包任务生成 Windows 可执行产物，并输出大小/哈希/路径。
 4. **CI 守护**：push/PR 触发 CI，执行 lint/测试/打包，任一失败则构建失败。
 
 ## Tasks / Subtasks
 - [x] 初始化项目结构与依赖（PySide6/MVC 骨架、requirements、基础配置）
-  - [x] 锁定 Python 3.10+ 兼容的 PySide6、pyqtgraph、nidaqmx、pyserial 依赖
+  - [x] 锁定 Python 3.11 兼容的 PySide6、pyqtgraph、nidaqmx、pyserial 依赖
   - [x] 创建占位 UI（主窗口 + 顶部标签页框架），验证可运行
   - [x] 配置 lint 与测试：ruff/pytest 配置与最小示例测试
   - [x] 配置打包：pyinstaller spec/配置，验证生成的 Windows 可执行文件
@@ -44,10 +44,10 @@ Story Key: 1-0-project-scaffold-and-ci-baseline
 - 成功定义：本地一键安装与运行成功；CI 自动执行 lint/pytest/pyinstaller 并产出可执行文件；中文界面与安全占位清晰。
 
 ## Technical Requirements
-- 平台：Windows 10/11，Python 3.10+（建议锁定 3.10/3.11 以兼容 PySide6、nidaqmx）。
+- 平台：Windows 10/11，Python 3.11（建议锁定 3.10/3.11 以兼容 PySide6、nidaqmx）。
 - 线程模型：预置 Worker 线程与信号/槽通路；UI 禁止直接硬件调用。
 - 打包：pyinstaller 生成单机可执行，记录产物路径/大小/哈希；确保打包包含 Qt 依赖与资源。
-- 配置：poetry/requirements.txt 二选一但需一致，CI 使用同一依赖源；启用锁文件。
+- 配置：requirements.txt 与 requirements-dev.txt 分工明确，CI 使用 requirements-dev.txt。
 - 日志：基础日志配置（info/debug），后续故事可扩展到安全/性能日志。
 
 ## Architecture Compliance
@@ -58,11 +58,11 @@ Story Key: 1-0-project-scaffold-and-ci-baseline
 - 安全占位：UI/控制器在无安全状态时不直接发硬件命令（占位逻辑/注释说明）。
 
 ## Library & Framework Requirements
-- Python 3.10+，首选 3.11；固定 minor 版本。
+- Python 3.11；固定 minor 版本。
 - PySide6（建议 6.7+ LTS），启用 Qt Widgets；确保与 pyinstaller 兼容。
 - pyqtgraph（0.13+）用于后续 100Hz 波形；保持与 PySide6 版本匹配。
 - nidaqmx（0.9+）与 pyserial（3.5+）预留依赖但可在硬件故事中按需安装；需在 README/CI 中标注可选或使用 extras。
-- 工具链：ruff 或 flake8，pytest，pyinstaller 6+，poetry 1.7+；CI 中统一版本以避免漂移。
+- 工具链：ruff 或 flake8，pytest，pyinstaller 6+，CI 中统一版本以避免漂移。
 
 ## File Structure Requirements
 - 根目录：`app/main.py` 启动应用；`app/views/main_window.py` 创建占位窗口与 Tab 框架。
@@ -141,3 +141,4 @@ Story Key: 1-0-project-scaffold-and-ci-baseline
 - 配置 ruff/pytest/pyinstaller 工具链与本地/CI 脚本，完善 README。
 - 建立 CI 工作流（Windows）执行 lint/pytest/pyinstaller 并上传工件。
 - 完成打包验证并记录产物大小与哈希。
+

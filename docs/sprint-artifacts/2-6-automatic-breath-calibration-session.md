@@ -1,4 +1,4 @@
-# Story 2.6: Automatic Breath Calibration Session
+﻿# Story 2.6: Automatic Breath Calibration Session
 Status: done
 Epic: 2 - Calibration & Manual Control
 Story Key: 2-6-automatic-breath-calibration-session
@@ -93,3 +93,4 @@ Story ID: 2.6
 - tests/test_calibration_ui.py
 - tests/test_calibration_logic.py
 - tests/test_calibration_integration.py
+
