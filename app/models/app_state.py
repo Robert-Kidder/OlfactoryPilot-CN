@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from app.models.protocol import ProtocolDocument
 from app.models.safety_state import SafetyState
 from app.models.self_check import SelfCheckResult
 
@@ -48,6 +49,7 @@ class AppState:
     master_valve_line: str = ""
     last_shutdown_event: dict | None = None
     simulation_mode: bool = False
+    loaded_protocol: ProtocolDocument | None = None
 
     @classmethod
     def from_config(cls, config: dict[str, Any]) -> AppState:

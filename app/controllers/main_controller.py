@@ -19,9 +19,11 @@ from app.services import (
     FlowService,
     GatingService,
     MockHAL,
+    ProtocolParseError,
     SafetyManager,
     ShutdownService,
     ValveService,
+    parse_protocol_file,
 )
 from app.workers import HardwareWorker
 
@@ -647,6 +649,30 @@ class MainController(QObject):
             self.view.update_status(self.state.status_message)
         self._start_or_request_self_check()
         self._refresh_toolbar_state()
+
+    @Slot(str)
+    def handle_protocol_file_selected(self, path: str | Path) -> bool:
+        try:
+            document = parse_protocol_file(path, valve_map=self.state.get_active_valve_map())
+        except ProtocolParseError as exc:
+            message = f"协议解析失败：{exc}"
+            self.state.update_status(message)
+            if self.view:
+                self.view.update_status(message)
+                if hasattr(self.view, "protocol_view"):
+                    self.view.protocol_view.render_error(exc)
+            LOG.warning("Protocol parse failed | path=%s | error=%s", path, exc)
+            return False
+
+        self.state.loaded_protocol = document
+        message = f"协议加载成功：{document.source_name}，共 {len(document.trials)} 个 trial"
+        self.state.update_status(message)
+        if self.view:
+            self.view.update_status(message)
+            if hasattr(self.view, "protocol_view"):
+                self.view.protocol_view.render_protocol(document)
+        LOG.info("Protocol loaded | path=%s | trials=%d", path, len(document.trials))
+        return True
 
     def reset_hardware(self) -> None:
         # 允许在未 ready 时执行 reset，用于恢复异常状态；仍需安全检查。

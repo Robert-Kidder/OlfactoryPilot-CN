@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
 from app.models import AppState, Telemetry
 from app.views.calibration_view import CalibrationView
 from app.views.pretest_view import PreTestView
+from app.views.protocol_view import ProtocolView
 
 if TYPE_CHECKING:
     from app.controllers import MainController
@@ -66,14 +67,16 @@ class MainWindow(QMainWindow):
             signal_offset=self.state.signal_offset,
             signal_gain=self.state.signal_gain,
         )
+        self.protocol_view = ProtocolView()
         self.pretest_view.toggle_requested.connect(self.controller.handle_valve_toggle_request)
         self.pretest_view.apply_requested.connect(self.controller.handle_apply_request)
         self.pretest_view.valve_sequence_requested.connect(self.controller.handle_valve_sequence_request)
         self.pretest_view.sequence_requested.connect(self.controller.handle_pretest_sequence_request)
+        self.protocol_view.load_requested.connect(self.controller.handle_protocol_file_selected)
         self.tabs.addTab(self._build_tab("概览", "硬件连接、安全状态概览"), "概览")
         self.tabs.addTab(self.calibration_view, "校准")
         self.tabs.addTab(self.pretest_view, "预检")
-        self.tabs.addTab(self._build_tab("协议", "协议执行占位"), "协议")
+        self.tabs.addTab(self.protocol_view, "协议")
 
         container = QWidget()
         layout = QVBoxLayout()

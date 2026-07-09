@@ -1,0 +1,5 @@
+# operator: Jing
+experiment=txt demo
+trial timing duration channel mode note
+3 0 100 2 manual lemon
+4 1000 150 3 ttl lavender

@@ -1,0 +1,5 @@
+operator=Jing
+session: demo
+trial,timing_ms,duration_ms,valve,trigger,odor
+1,0,100,1,manual,rose
+2,1500,200,10,ttl,mint
