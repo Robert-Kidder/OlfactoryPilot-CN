@@ -2,6 +2,7 @@
 #
 # 本文件记录 PRD、UX、架构、Epic/Story 和实施就绪检查等规划产物。
 # 具体 story 开发进度由 docs/sprint-artifacts/sprint-status.yaml 跟踪。
+# _bmad-output/ 是本地 BMAD 输出工作区，不纳入 Git；长期资料整理进 docs/。
 
 generated: "2025-12-08"
 updated: "2026-07-09"

@@ -8,7 +8,7 @@
 
 项目已具备继续实施的基础条件。PRD、UX、架构、Epic/Story 拆分和 sprint 状态文件已经存在，并已在 2026-07-09 统一为中文主线文档和 Python 3.11 工程基线。
 
-当前建议进入 Epic 3 “协议执行与数据记录”，优先开发 Story 3.1 “协议文件解析 .txt/.csv”。
+本报告保留实施就绪检查结论；当前 Epic/Story 进度只以 `docs/sprint-artifacts/sprint-status.yaml` 为准。
 
 ## 已确认资料
 
@@ -24,7 +24,7 @@
 ## 技术基线
 
 - Python 版本：3.11。
-- 当前开发解释器：`D:\miniconda3\envs\code\python.exe`。
+- Python 运行环境：Python 3.11。开发者可使用 conda、venv 或系统 Python；不要在主线文档中固定某台电脑的解释器绝对路径。
 - GUI：PySide6。
 - 图形：pyqtgraph。
 - 硬件：nidaqmx、pyserial。
@@ -36,10 +36,10 @@
 ## 覆盖情况
 
 - FR1 安全硬件基础：已在 Epic 1 覆盖。
-- FR2 文件与会话：由 Epic 3 覆盖，尚待实现。
+- FR2 文件与会话：由 Epic 3 覆盖，具体实现状态以 sprint 状态文件为准。
 - FR3 呼吸校准：已在 Epic 2 覆盖。
 - FR4 手动阀门与流量控制：已在 Epic 2 覆盖。
-- FR5 协议执行：由 Epic 3 覆盖，尚待实现。
+- FR5 协议执行：由 Epic 3 覆盖，具体实现状态以 sprint 状态文件为准。
 - FR6 清洗：由 Epic 4 覆盖，尚待实现。
 - FR7 配置与中文本地化：由 Epic 2 和 Epic 4 覆盖，仍需继续完善。
 
@@ -52,6 +52,6 @@
 
 ## 建议下一步
 
-1. 使用 `bmad-sprint-status` 确认 sprint 状态和下一 story。
-2. 使用 `bmad-create-story` 为 `3-1-protocol-file-parsing-txtcsv` 创建或更新开发用 story。
-3. 使用 `bmad-dev-story` 实现协议解析、错误定位和测试。
+1. 使用 `docs/sprint-artifacts/sprint-status.yaml` 或 `bmad-sprint-status` 确认当前 sprint 状态和下一 story。
+2. 如果需要新增或更新 story，使用对应 BMAD story 技能生成开发用 story。
+3. 实施前先核对相关 story、架构、测试和配置说明，避免依据过期进度描述开发。

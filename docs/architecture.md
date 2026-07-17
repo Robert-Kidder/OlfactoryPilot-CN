@@ -28,7 +28,7 @@ app/
   workers/             # 硬件工作线程、低抖动执行逻辑
   services/            # HAL、配置、日志、协议解析等服务
 config/
-  default_config.json  # 默认配置
+  default_config.json  # 通用默认配置
   local_config.example.json  # 本机覆盖配置模板
 docs/                  # 中文需求、架构、UX、story 和项目说明
 scripts/               # 本地 CI、硬件探测、状态生成脚本
@@ -62,7 +62,7 @@ tests/                 # 自动化测试
 
 ### 协议与数据
 
-Epic 3 将实现协议文件解析与执行。建议新增：
+协议文件解析与执行能力按 Epic 3 逐步实现，具体完成状态以 `docs/sprint-artifacts/sprint-status.yaml` 为准。相关模块包括：
 
 - 协议模型：保存 trial、timing、valve、trigger、metadata。
 - 协议解析服务：负责 `.txt`、`.csv` 解析和错误定位。

@@ -1,5 +1,6 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+from importlib.util import find_spec
 from pathlib import Path
 
 from PyInstaller.utils.hooks import collect_submodules, copy_metadata
@@ -19,17 +20,18 @@ hidden_imports = [
     "serial.tools.list_ports",
     "nidaqmx",
     "nidaqmx.system",
-    # pkg_resources runtime hook pulls in setuptools deps under the jaraco namespace.
-    "jaraco",
-    "jaraco.text",
-    "jaraco.functools",
-    "jaraco.context",
-    "jaraco.collections",
 ]
 
-# Collect the full jaraco and pkg_resources trees for compatibility with recent setuptools.
-hidden_imports.extend(collect_submodules("jaraco"))
-hidden_imports.extend(collect_submodules("pkg_resources"))
+
+def optional_submodules(package_name: str) -> list[str]:
+    if find_spec(package_name) is None:
+        return []
+    return collect_submodules(package_name)
+
+
+# Collect optional setuptools dependency trees only when present in the active environment.
+hidden_imports.extend(optional_submodules("jaraco"))
+hidden_imports.extend(optional_submodules("pkg_resources"))
 excluded_modules = [
     # Not used: PyQt5 (we use PySide6)
     "PyQt5",

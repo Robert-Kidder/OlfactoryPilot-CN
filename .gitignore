@@ -23,7 +23,8 @@ dist/
 # IDE/editor local settings
 .vscode/
 
-# Local AI/BMAD/Gemini installed tooling; regenerate with npx bmad-method install
+# Local AI/BMAD/Codex tooling and generated output.
+# Long-lived project documents belong in docs/ and are committed.
 .agents/
 _bmad/
 _bmad-output/

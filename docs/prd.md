@@ -69,4 +69,4 @@ OlfactoryPilot-CN 用于替代原有法国软件 **ProgOlfactoTao**，服务本�
 - Epic 3：协议执行与数据记录。
 - Epic 4：运行维护、清洗与本地化。
 
-当前建议优先推进 Epic 3，从 Story 3.1 “协议文件解析 .txt/.csv” 开始。
+具体 Epic/Story 开发进度不在 PRD 中维护，统一以 `docs/sprint-artifacts/sprint-status.yaml` 为准。

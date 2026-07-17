@@ -17,14 +17,14 @@ OlfactoryPilot-CN 是 Windows 桌面嗅觉刺激实验控制软件，目标是�
 ```text
 OlfactoryPilot-CN/
   app/                    # 应用主代码
-  config/                 # 默认配置
+  config/                 # 通用默认配置和本机配置模板
   docs/                   # 项目文档、需求、架构、UX、story 和参考资料
   scripts/                # 工程脚本和辅助工具
   tests/                  # 自动化测试
   .github/workflows/      # GitHub Actions 持续集成配置
-  .agents/                # 当前 Codex/BMAD 技能文件，本地工具目录
-  _bmad/                  # 当前 BMAD 本地配置，本地工具目录
-  _bmad-output/           # BMAD 输出目录，本地工具目录
+  .agents/                # 当前 Codex/BMAD 技能文件，本机工具目录，不提交
+  _bmad/                  # 当前 BMAD 本地配置和安装文件，不提交
+  _bmad-output/           # BMAD 本地输出工作区，不提交；长期资料整理进 docs/
   logs/                   # 运行日志，本地生成目录
 ```
 
@@ -67,16 +67,13 @@ app/
 
 ## 4. config 目录
 
-`config/default_config.json` 是当前默认配置来源，包含：
+仓库默认配置和本机硬件配置分开管理：
 
-- 窗口标题和界面默认值。
-- NI 设备 ID 和通道映射。
-- 阀门映射。
-- Alicat 串口和 MFC 默认参数。
-- 气流安全阈值。
-- 模拟模式默认值。
+- `config/default_config.json`：提交到 Git，保存通用界面、安全阈值、阀门映射、协议门控、Alicat 参数和 Mock HAL 默认值。该文件必须能在没有真实硬件的开发电脑上启动。
+- `config/local_config.example.json`：提交到 Git，作为真实硬件电脑的本机覆盖配置模板。
+- `config/local_config.json`：不提交到 Git，用于保存某台电脑自己的真实 COM 端口、NI 设备名、Alicat 配置和现场校准值。
 
-后续如果做“选项”页面，保存结果也应进入配置体系，不能让多个配置文件同时成为真实来源。
+应用启动时按“默认配置 + 本机覆盖”的顺序合并配置。后续如果做“选项”页面，现场或个人机器特有的值应写入本机覆盖配置，通用项目约定才进入 `default_config.json`。
 
 ## 5. docs 目录
 
@@ -123,7 +120,7 @@ app/
 运行：
 
 ```powershell
-D:\miniconda3\envs\code\python.exe -m pytest
+python -m pytest
 ```
 
 测试的意义是防止后续开发破坏已经完成的 Epic 1 和 Epic 2 功能，并允许无真实硬件的 CI 环境验证核心逻辑。
@@ -137,7 +134,7 @@ D:\miniconda3\envs\code\python.exe -m pytest
 安装：
 
 ```powershell
-D:\miniconda3\envs\code\python.exe -m pip install -r requirements.txt
+python -m pip install -r requirements.txt
 ```
 
 `requirements-dev.txt` 是开发、测试、检查和打包所需依赖。它先引用 `requirements.txt`，再额外安装 pytest、pytest-qt、ruff、PyInstaller 等工具。
@@ -145,7 +142,7 @@ D:\miniconda3\envs\code\python.exe -m pip install -r requirements.txt
 安装：
 
 ```powershell
-D:\miniconda3\envs\code\python.exe -m pip install -r requirements-dev.txt
+python -m pip install -r requirements-dev.txt
 ```
 
 简单理解：只运行软件用 `requirements.txt`；参与开发用 `requirements-dev.txt`。
@@ -159,7 +156,7 @@ pytest 是 Python 测试框架，配置文件是 `pytest.ini`。
 运行：
 
 ```powershell
-D:\miniconda3\envs\code\python.exe -m pytest
+python -m pytest
 ```
 
 ### ruff
@@ -175,7 +172,7 @@ ruff 是代码检查工具，配置文件是 `ruff.toml`。
 运行：
 
 ```powershell
-D:\miniconda3\envs\code\python.exe -m ruff check app tests
+python -m ruff check app tests
 ```
 
 ### CI
@@ -197,7 +194,7 @@ PyInstaller 用于把 Python 桌面程序打包成 Windows 可执行文件。
 运行：
 
 ```powershell
-D:\miniconda3\envs\code\python.exe -m PyInstaller pyinstaller.spec
+python -m PyInstaller pyinstaller.spec
 ```
 
 产物通常位于：
@@ -206,13 +203,15 @@ D:\miniconda3\envs\code\python.exe -m PyInstaller pyinstaller.spec
 
 ## 10. BMAD 相关目录
 
-当前有效的本地 BMAD/Codex 工具目录是：
+当前有效的本地 BMAD/Codex 工具与输出目录是：
 
 - `.agents/`
 - `_bmad/`
 - `_bmad-output/`
 
-长期项目资料应保存在：
+`.agents/` 和 `_bmad/` 是工具安装、技能和本机配置目录。`_bmad-output/` 是 BMAD 工作流可能生成的本地输出工作区，不是本仓库长期项目资料的权威来源。三者均不纳入 Git。
+
+长期项目资料应整理并保存在：
 
 - `docs/`
 - `docs/sprint-artifacts/`
@@ -225,20 +224,13 @@ D:\miniconda3\envs\code\python.exe -m PyInstaller pyinstaller.spec
 
 如果以后又出现类似目录，需要先确认是否为当前工具链必需，再决定是否保留。
 
-## 11. 当前项目进度
+## 11. 项目进度来源
 
-根据当前文档和 sprint 状态：
+当前 Epic/Story 状态只维护在：
 
-- Epic 1：安全硬件基础，主体功能完成，部分记录处于真实硬件复核阶段。
-- Epic 2：校准与手动控制，主体功能完成。
-- Epic 3：协议执行与数据记录，下一阶段优先开发。
-- Epic 4：运行维护、清洗与本地化，后续开发。
+- `docs/sprint-artifacts/sprint-status.yaml`
 
-当前推荐下一 story：
-
-- `3-1-protocol-file-parsing-txtcsv`
-
-目标是实现 `.txt/.csv` 协议文件解析，为后续手动/TTL 触发、呼吸门控、低抖动执行和数据记录打基础。
+其他主线文档不重复写具体进度或“下一 story”，避免状态在多个位置漂移。需要判断下一步开发任务时，先读取 sprint 状态文件，再查看对应 `docs/sprint-artifacts/` story。
 
 ## 12. 新增文件放置规则
 
@@ -247,7 +239,8 @@ D:\miniconda3\envs\code\python.exe -m PyInstaller pyinstaller.spec
 - 新状态对象：`app/models/`。
 - 新硬件或业务服务：`app/services/`。
 - 新后台线程：`app/workers/`。
-- 新配置项：`config/default_config.json`。
+- 新通用配置项：`config/default_config.json`。
+- 新本机硬件/端口/校准覆盖：`config/local_config.json`，并视需要同步更新 `config/local_config.example.json`。
 - 新测试：`tests/test_*.py`。
 - 新工程脚本：`scripts/`。
 - 新需求、story、验证和回顾：`docs/` 或 `docs/sprint-artifacts/`。
@@ -257,20 +250,20 @@ D:\miniconda3\envs\code\python.exe -m PyInstaller pyinstaller.spec
 ## 13. 常用命令
 
 ```powershell
-D:\miniconda3\envs\code\python.exe -m pip install -r requirements-dev.txt
-D:\miniconda3\envs\code\python.exe -m app.main
-D:\miniconda3\envs\code\python.exe -m app.main --simulation
-D:\miniconda3\envs\code\python.exe -m pytest
-D:\miniconda3\envs\code\python.exe -m ruff check app tests
-D:\miniconda3\envs\code\python.exe -m PyInstaller pyinstaller.spec
+python -m pip install -r requirements-dev.txt
+python -m app.main
+python -m app.main --simulation
+python -m pytest
+python -m ruff check app tests
+python -m PyInstaller pyinstaller.spec
 ```
 
 ## 14. 推荐下一步 BMAD 流程
 
 建议每个 BMAD 技能使用新的对话窗口，以减少旧上下文干扰。
 
-1. 使用 `bmad-sprint-status` 确认 sprint 状态。
-2. 使用 `bmad-create-story` 为 Story 3.1 生成开发用 story。
-3. 使用 `bmad-dev-story` 实现 Story 3.1。
+1. 使用 `docs/sprint-artifacts/sprint-status.yaml` 或 `bmad-sprint-status` 确认 sprint 状态。
+2. 根据状态文件选择下一条 story，再使用对应 BMAD 技能创建、更新或执行 story。
+3. 开发前阅读对应 story、`docs/architecture.md`、`docs/project-context.md` 和相关测试。
 
 每次准备新开窗口前，应让当前窗口更新“下一步应该找哪个智能体、要说什么、目的是什么”的说明。

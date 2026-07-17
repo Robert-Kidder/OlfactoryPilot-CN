@@ -9,7 +9,7 @@ OlfactoryPilot-CN 是用于嗅觉刺激实验的 Windows 桌面控制软件，�
 ## 当前技术基线
 
 - 操作系统：Windows 10/11。
-- Python：3.11，当前开发环境为 `D:\miniconda3\envs\code\python.exe`。
+- Python：3.11。开发者可使用 conda、venv 或系统 Python；文档和脚本不依赖某一台电脑的解释器绝对路径。
 - GUI：PySide6。
 - 实时图形：pyqtgraph。
 - 硬件接口：nidaqmx、pyserial。
@@ -70,12 +70,9 @@ OlfactoryPilot-CN 是用于嗅觉刺激实验的 Windows 桌面控制软件，�
   - MFC B：载气气路。
   - MFC C：排空气路。
 
-## 当前进展
+## 项目进度来源
 
-- Epic 1：安全硬件基础，主体功能已经完成，部分条目处于真实硬件复核记录阶段。
-- Epic 2：校准与手动控制，主体功能已经完成，sprint 状态已统一为完成。
-- Epic 3：协议执行与数据记录，尚未正式实现，下一步建议从协议文件解析开始。
-- Epic 4：清洗、配置和本地化，仍在待办队列。
+Epic/Story 的当前状态只维护在 `docs/sprint-artifacts/sprint-status.yaml`。本文档只说明项目背景、技术基线和长期规则，不重复写动态进度，避免与 sprint 状态文件不同步。
 
 ## 文档语言规范
 

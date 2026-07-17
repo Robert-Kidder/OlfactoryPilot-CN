@@ -91,12 +91,14 @@ pwsh scripts/run-ci.ps1 ci
 
 需要同步到 Git 的 BMAD 项目知识已经放在 `docs/` 下，包括 PRD、架构、UX、epics、sprint artifacts、workflow/status 文档和真实硬件验证记录。
 
-不需要提交的内容包括 `.agents/`、`_bmad/`、`_bmad-output/` 等 BMAD/Agent 安装产物和运行产物。这些文件可在另一台电脑克隆代码后重新通过 BMAD 安装命令生成，例如：
+`.agents/` 和 `_bmad/` 是本机 BMAD/Codex 工具安装与配置目录，不提交到 Git。`_bmad-output/` 是 BMAD 工作流可能生成的本地输出工作区，不作为本仓库长期资料的权威来源；需要长期保存、协作和追踪的项目资料应整理进 `docs/` 或 `docs/sprint-artifacts/` 后再提交。
+
+在另一台电脑克隆代码后，可以重新安装 BMAD 工具链，例如：
 
 ```powershell
 npx bmad-method install
 ```
 
-## 当前开发重点
+## 项目进度
 
-Epic 1 和 Epic 2 的主体能力已经进入完成或真实硬件复核阶段。下一阶段建议优先推进 **Epic 3：协议执行与数据记录**，先从 Story 3.1 “协议文件解析 .txt/.csv” 开始，把旧软件实验协议导入能力建立起来。
+当前 Epic/Story 状态只维护在 `docs/sprint-artifacts/sprint-status.yaml`。README 不重复写具体进度，避免状态在多个文档中漂移。
