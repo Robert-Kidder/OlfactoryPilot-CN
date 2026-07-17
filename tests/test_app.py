@@ -75,6 +75,51 @@ def test_build_application_with_temp_config(tmp_path: Path, qt_app):
     assert window.windowTitle() == "测试窗口"
 
 
+def test_build_application_uses_local_config_for_machine_overrides(tmp_path: Path, qt_app):
+    config_dir = tmp_path / "config"
+    default_config_path = config_dir / "default_config.json"
+    local_config_path = config_dir / "local_config.json"
+    save_config(
+        default_config_path,
+        {
+            "language": "zh-CN",
+            "window_title": "默认窗口",
+            "log_level": "INFO",
+            "telemetry_hz": 1,
+            "low_flow_threshold": 0.2,
+            "safety_state": "SAFE",
+            "hal_mode": "mock",
+            "valve_mapping": {
+                "master_valve": "Dev1/P1.0",
+                "variants": {"20-channel": {"1": "Dev1/P0.0"}},
+            },
+        },
+    )
+    save_config(
+        local_config_path,
+        {
+            "window_title": "本机窗口",
+            "low_flow_threshold": 0.4,
+            "serial_port": "COM9",
+        },
+    )
+
+    _, window = build_application(
+        default_config_path,
+        start_worker=False,
+        hal=MockHAL(),
+        local_config_path=local_config_path,
+    )
+
+    assert window.windowTitle() == "本机窗口 [模拟模式]"
+    assert abs(window.state.low_flow_threshold - 0.4) < 1e-6
+    assert window.state.config_path == local_config_path
+
+    assert window.controller.set_low_flow_threshold(0.7) is True
+    assert abs(load_config(default_config_path)["low_flow_threshold"] - 0.2) < 1e-6
+    assert abs(load_config(local_config_path)["low_flow_threshold"] - 0.7) < 1e-6
+
+
 def test_bundled_user_config_migrates_com3_to_com6(tmp_path: Path, monkeypatch, qt_app):
     bundle_dir = tmp_path / "bundle"
     bundled_config_path = bundle_dir / "config" / "default_config.json"

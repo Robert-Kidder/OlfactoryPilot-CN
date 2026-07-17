@@ -23,6 +23,7 @@ from app.workers import HardwareWorker
 
 BASE_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent.parent))
 DEFAULT_CONFIG = BASE_DIR / "config" / "default_config.json"
+DEFAULT_LOCAL_CONFIG = BASE_DIR / "config" / "local_config.json"
 
 
 def load_config(config_path: Path) -> dict:
@@ -36,6 +37,23 @@ def save_config(config_path: Path, data: dict) -> None:
     config_path.parent.mkdir(parents=True, exist_ok=True)
     with config_path.open("w", encoding="utf-8") as handle:
         json.dump(data, handle, ensure_ascii=False, indent=2)
+
+
+def merge_config(base: dict, override: dict) -> dict:
+    merged = dict(base)
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = merge_config(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def load_effective_config(config_path: Path, local_config_path: Path | None = None) -> dict:
+    config = load_config(config_path)
+    if local_config_path and local_config_path.exists():
+        config = merge_config(config, load_config(local_config_path))
+    return config
 
 
 def migrate_bundled_user_config(user_config: dict, bundled_config: dict) -> bool:
@@ -63,14 +81,19 @@ def build_application(
     start_worker: bool = True,
     simulation: bool = False,
     hal: HalInterface | None = None,
+    local_config_path: Path | None = None,
 ) -> tuple[QApplication, MainWindow]:
     config_path = Path(config_path)
-    config = load_config(config_path)
+    is_default_config = config_path.resolve() == Path(DEFAULT_CONFIG).resolve()
+    bundled = bool(getattr(sys, "_MEIPASS", None) and is_default_config)
+    if local_config_path is None and not bundled and is_default_config:
+        local_config_path = DEFAULT_LOCAL_CONFIG
+    config = load_effective_config(config_path, local_config_path)
 
     # When running from a PyInstaller bundle, keep a user-writable copy of the config
     # to persist threshold updates instead of touching the read-only bundled file.
     user_config_path: Path | None = None
-    if getattr(sys, "_MEIPASS", None) and config_path == DEFAULT_CONFIG:
+    if bundled:
         user_config_path = Path.home() / ".olfactorypilot" / config_path.name
         user_config_path.parent.mkdir(parents=True, exist_ok=True)
         if not user_config_path.exists():
@@ -86,8 +109,12 @@ def build_application(
 
     configure_logging(config.get("log_level", "INFO"))
     config["_config_path"] = config_path
+    if local_config_path:
+        config["_local_config_path"] = local_config_path
+        config["_config_write_path"] = local_config_path
     if user_config_path:
         config["_user_config_path"] = user_config_path
+        config["_config_write_path"] = user_config_path
     state = AppState.from_config(config)
     hal_mode = str(config.get("hal_mode", "auto")).strip().lower()
     if hal_mode in {"mock", "simulation"}:
@@ -156,6 +183,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help="配置文件路径，默认使用 config/default_config.json",
     )
     parser.add_argument(
+        "--local-config",
+        type=Path,
+        default=None,
+        help="本机覆盖配置路径，默认使用 config/local_config.json（若存在）",
+    )
+    parser.add_argument(
         "--no-worker",
         action="store_true",
         help="跳过占位硬件线程（用于CI/测试）",
@@ -201,6 +234,7 @@ def main(argv: list[str] | None = None) -> int:
             args.config,
             start_worker=not args.no_worker,
             simulation=args.simulation,
+            local_config_path=args.local_config,
         )
     except Exception as exc:
         report_startup_error(exc)

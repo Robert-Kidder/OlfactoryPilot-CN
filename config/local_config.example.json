@@ -1,0 +1,13 @@
+{
+  "hal_mode": "real",
+  "serial_port": "COM6",
+  "baud_rate": 19200,
+  "ni_devices": [
+    "Dev1",
+    "Dev2",
+    "Dev3"
+  ],
+  "ai0_channel": "Dev1/ai0",
+  "signal_offset": 3.0472976569884125e-07,
+  "signal_gain": 10.000009535533744
+}

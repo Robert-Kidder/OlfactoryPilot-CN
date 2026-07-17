@@ -23,10 +23,13 @@ dist/
 # IDE/editor local settings
 .vscode/
 
-# Local AI/BMAD/Gemini generated or installed tooling
+# Local AI/BMAD/Gemini installed tooling; regenerate with npx bmad-method install
 .agents/
 _bmad/
 _bmad-output/
+
+# Local hardware/developer overrides
+config/local_config.json
 
 # Runtime state
 logs/

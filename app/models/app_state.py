@@ -55,7 +55,7 @@ class AppState:
     def from_config(cls, config: dict[str, Any]) -> AppState:
         manual_path_value = config.get("manual_path")
         manual_path: Path | None = None
-        manual_anchor = config.get("_config_path") or config.get("_user_config_path")
+        manual_anchor = config.get("_config_path") or config.get("_local_config_path") or config.get("_user_config_path")
         if manual_path_value:
             manual_candidate = Path(manual_path_value)
             if not manual_candidate.is_absolute() and manual_anchor:
@@ -99,7 +99,12 @@ class AppState:
             signal_offset=float(config.get("signal_offset", 0.0)),
             signal_gain=float(config.get("signal_gain", 1.0)),
             telemetry=Telemetry(safety_state=config.get("safety_state", "SAFE")),
-            config_path=config.get("_user_config_path") or config.get("_config_path"),
+            config_path=(
+                config.get("_config_write_path")
+                or config.get("_user_config_path")
+                or config.get("_local_config_path")
+                or config.get("_config_path")
+            ),
             manual_path=manual_path,
             hardware_variant=hardware_variant,
             valve_variants=valve_variants,

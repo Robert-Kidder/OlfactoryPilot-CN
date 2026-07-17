@@ -50,16 +50,15 @@
       }
     }
   },
-  "serial_port": "COM6",
+  "serial_port": null,
   "baud_rate": 19200,
   "serial_open_retries": 2,
   "serial_retry_interval_s": 0.25,
   "ni_devices": [
-    "Dev1",
-    "Dev2",
-    "Dev3"
+    "USB-6001",
+    "USB-6501"
   ],
-  "hal_mode": "real",
+  "hal_mode": "mock",
   "ai0_channel": "Dev1/ai0",
   "alicat_unit_ids": {
     "A": "a",
@@ -78,6 +77,6 @@
   "shutdown_retry_limit": 2,
   "shutdown_retry_interval_s": 0.2,
   "shutdown_record_path": "logs/last_shutdown_event.json",
-  "signal_offset": 3.0472976569884125e-07,
-  "signal_gain": 10.000009535533744
+  "signal_offset": 0.0,
+  "signal_gain": 1.0
 }

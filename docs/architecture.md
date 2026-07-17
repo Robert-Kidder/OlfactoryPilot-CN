@@ -29,6 +29,7 @@ app/
   services/            # HAL、配置、日志、协议解析等服务
 config/
   default_config.json  # 默认配置
+  local_config.example.json  # 本机覆盖配置模板
 docs/                  # 中文需求、架构、UX、story 和项目说明
 scripts/               # 本地 CI、硬件探测、状态生成脚本
 tests/                 # 自动化测试
@@ -70,7 +71,11 @@ Epic 3 将实现协议文件解析与执行。建议新增：
 
 ## 5. 配置来源
 
-默认配置位于 `config/default_config.json`。运行时应以该文件为默认来源，未来可扩展用户配置文件，但不能让多个配置文件同时成为“真实来源”。硬件通道映射、主阀线路、阈值、默认流量和界面文字应保持清晰可追踪。
+默认配置位于 `config/default_config.json`，作为仓库内通用默认来源提交到 Git。该文件必须能在没有真实硬件的开发电脑上启动，默认使用 Mock HAL。
+
+本机真实硬件、端口和校准参数通过 `config/local_config.json` 覆盖默认配置。该文件不提交到 Git；仓库只提交 `config/local_config.example.json` 作为模板。运行时按“默认配置 + 本机覆盖”的顺序合并，嵌套字典递归合并，因此本机可以只覆盖 `serial_port`、`ni_devices`、`ai0_channel`、`hal_mode`、校准值等差异项。
+
+硬件通道映射、主阀线路、阈值、默认流量和界面文字应保持清晰可追踪。通用项目约定优先放入 `default_config.json`；只与某台电脑或某次现场校准有关的值必须放入本机覆盖配置，避免 Git 同步互相覆盖。
 
 ## 6. 测试策略
 
