@@ -98,7 +98,3 @@ pwsh scripts/run-ci.ps1 ci
 ```powershell
 npx bmad-method install
 ```
-
-## 项目进度
-
-当前 Epic/Story 状态只维护在 `docs/sprint-artifacts/sprint-status.yaml`。README 不重复写具体进度，避免状态在多个文档中漂移。
