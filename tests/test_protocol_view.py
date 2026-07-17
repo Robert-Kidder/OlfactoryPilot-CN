@@ -85,3 +85,30 @@ def test_protocol_view_renders_execution_state_and_action_enablement(qt_app, qtb
     assert view._start_button.isEnabled() is False
     assert view._stop_button.isEnabled() is True
     assert view._next_trial_button.isEnabled() is True
+
+
+def test_protocol_view_disables_start_and_next_when_not_safe(qt_app, qtbot) -> None:
+    view = ProtocolView()
+    qtbot.addWidget(view)
+
+    view.render_execution_state(
+        ProtocolExecutionSnapshot(
+            status=ProtocolExecutionStatus.WAITING_EXHALE,
+            status_text="等待呼气",
+            has_protocol=True,
+            can_start=False,
+            can_stop=True,
+            can_advance=False,
+            trial_label="1/2",
+            trial_id="trial-1",
+            valve=3,
+            trigger="manual",
+            wait_elapsed_ms=1200,
+            planned_duration_ms=100,
+            recent_event="安全状态 LOW_FLOW，不能推进 trial。",
+        )
+    )
+
+    assert view._start_button.isEnabled() is False
+    assert view._next_trial_button.isEnabled() is False
+    assert view._stop_button.isEnabled() is True

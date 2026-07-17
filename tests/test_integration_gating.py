@@ -143,4 +143,42 @@ def test_controller_protocol_executor_trigger_uses_valve_service(controller):
         1,
         True,
         safety_state=controller._build_current_safety_state(),
+        safety_close=False,
+    )
+
+
+def test_controller_protocol_close_uses_safety_close_path(controller):
+    from pathlib import Path
+
+    from app.models import ProtocolDocument, ProtocolTrial, TriggerMode
+
+    controller.state.loaded_protocol = ProtocolDocument(
+        source_path=Path("demo.csv"),
+        source_name="demo.csv",
+        trials=[
+            ProtocolTrial(
+                trial_id="1",
+                timing_ms=0,
+                duration_ms=100,
+                valve=1,
+                trigger=TriggerMode.MANUAL,
+            )
+        ],
+    )
+    controller.state.flow_setpoints_ready = True
+    controller.state.hardware_ready = True
+    controller.state.telemetry.connected = True
+    controller.state.telemetry.safety_state = "SAFE"
+    controller.valve_service.set_valve = MagicMock(return_value=(True, "ok"))
+
+    controller.handle_protocol_start_requested()
+    controller.handle_breath_samples([-0.6], 10.0)
+    controller.state.telemetry.safety_state = "LOW_FLOW"
+    controller.protocol_executor.handle_safety_update("LOW_FLOW", timestamp=10.2)
+
+    controller.valve_service.set_valve.assert_any_call(
+        1,
+        False,
+        safety_state=controller._build_current_safety_state(),
+        safety_close=True,
     )

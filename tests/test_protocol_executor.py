@@ -178,6 +178,96 @@ def test_non_safe_state_blocks_and_closes_open_valve() -> None:
     assert actions == [(3, True), (3, False)]
     assert result.events[-1].event == "safety_block"
     assert result.events[-1].safety_state == "LOW_FLOW"
+    assert result.events[-1].result == "blocked"
+    assert "已关闭活动阀门" in result.events[-1].message
+
+
+def test_non_safe_close_failure_keeps_active_valve_for_recovery() -> None:
+    actions: list[tuple[int, bool]] = []
+
+    def valve_writer(channel: int, open_state: bool) -> tuple[bool, str]:
+        actions.append((channel, open_state))
+        if not open_state:
+            return False, "数字输出失败"
+        return True, "ok"
+
+    executor = ProtocolExecutor(
+        gating_service=GatingService(inhale_threshold=0.5, exhale_threshold=-0.5),
+        valve_writer=valve_writer,
+        clock=lambda: 10.0,
+    )
+    executor.start(_document(), safety_state="SAFE", timestamp=10.0)
+    executor.process_breath_samples([-0.6], safety_state="SAFE", timestamp_start=10.1, dt=0.01)
+
+    result = executor.handle_safety_update("DATA_STALE", timestamp=10.2)
+
+    assert result.state.status == ProtocolExecutionStatus.BLOCKED
+    assert result.state.active_valve == 3
+    assert actions == [(3, True), (3, False)]
+    assert result.events[-1].event == "safety_block"
+    assert result.events[-1].result == "close_failed"
+    assert "关闭活动阀门失败" in result.events[-1].message
+
+
+def test_blocked_state_with_active_valve_can_retry_safe_close() -> None:
+    outcomes = [False, True]
+    actions: list[tuple[int, bool]] = []
+
+    def valve_writer(channel: int, open_state: bool) -> tuple[bool, str]:
+        actions.append((channel, open_state))
+        if not open_state:
+            ok = outcomes.pop(0)
+            return ok, "ok" if ok else "第一次关闭失败"
+        return True, "ok"
+
+    executor = ProtocolExecutor(
+        gating_service=GatingService(inhale_threshold=0.5, exhale_threshold=-0.5),
+        valve_writer=valve_writer,
+        clock=lambda: 10.0,
+    )
+    executor.start(_document(), safety_state="SAFE", timestamp=10.0)
+    executor.process_breath_samples([-0.6], safety_state="SAFE", timestamp_start=10.1, dt=0.01)
+    first = executor.handle_safety_update("LOW_FLOW", timestamp=10.2)
+    assert first.state.active_valve == 3
+
+    retry = executor.handle_safety_update("LOW_FLOW", timestamp=10.3)
+
+    assert retry.state.status == ProtocolExecutionStatus.BLOCKED
+    assert retry.state.active_valve is None
+    assert actions == [(3, True), (3, False), (3, False)]
+    assert retry.events[-1].event == "safety_block"
+    assert retry.events[-1].result == "blocked"
+    assert "已关闭活动阀门" in retry.events[-1].message
+
+
+def test_stop_after_close_failure_retries_active_valve() -> None:
+    outcomes = [False, True]
+    actions: list[tuple[int, bool]] = []
+
+    def valve_writer(channel: int, open_state: bool) -> tuple[bool, str]:
+        actions.append((channel, open_state))
+        if not open_state:
+            ok = outcomes.pop(0)
+            return ok, "ok" if ok else "关闭失败"
+        return True, "ok"
+
+    executor = ProtocolExecutor(
+        gating_service=GatingService(inhale_threshold=0.5, exhale_threshold=-0.5),
+        valve_writer=valve_writer,
+        clock=lambda: 10.0,
+    )
+    executor.start(_document(), safety_state="SAFE", timestamp=10.0)
+    executor.process_breath_samples([-0.6], safety_state="SAFE", timestamp_start=10.1, dt=0.01)
+    failed_stop = executor.stop(safety_state="LOW_FLOW", timestamp=10.2)
+    assert failed_stop.state.status == ProtocolExecutionStatus.BLOCKED
+    assert failed_stop.state.active_valve == 3
+    assert failed_stop.events[-1].result == "close_failed"
+
+    recovered = executor.stop(safety_state="LOW_FLOW", timestamp=10.3)
+
+    assert recovered.state.status == ProtocolExecutionStatus.STOPPED
+    assert recovered.state.active_valve is None
+    assert actions == [(3, True), (3, False), (3, False)]
 
 
 def test_open_or_close_failure_blocks_successful_trial_progression() -> None:
@@ -202,6 +292,66 @@ def test_open_or_close_failure_blocks_successful_trial_progression() -> None:
     assert result.state.trial_index == 0
     assert result.events[-1].event == "blocked"
     assert "MFC" in result.events[-1].message
+
+
+def test_close_failure_does_not_advance_and_allows_stop_recovery() -> None:
+    outcomes = [False, True]
+    actions: list[tuple[int, bool]] = []
+    now = {"value": 10.0}
+
+    def valve_writer(channel: int, open_state: bool) -> tuple[bool, str]:
+        actions.append((channel, open_state))
+        if not open_state:
+            ok = outcomes.pop(0)
+            return ok, "ok" if ok else "写入关闭失败"
+        return True, "ok"
+
+    executor = ProtocolExecutor(
+        gating_service=GatingService(inhale_threshold=0.5, exhale_threshold=-0.5),
+        valve_writer=valve_writer,
+        clock=lambda: now["value"],
+    )
+    executor.start(_document(), safety_state="SAFE", timestamp=10.0)
+    executor.process_breath_samples([-0.6], safety_state="SAFE", timestamp_start=10.1, dt=0.01)
+
+    now["value"] = 10.2
+    failed_close = executor.tick(safety_state="SAFE", timestamp=now["value"])
+
+    assert failed_close.state.status == ProtocolExecutionStatus.BLOCKED
+    assert failed_close.state.trial_index == 0
+    assert failed_close.state.active_valve == 3
+    assert failed_close.events[-1].result == "close_failed"
+
+    recovered = executor.stop(safety_state="SAFE", timestamp=10.3)
+
+    assert recovered.state.status == ProtocolExecutionStatus.STOPPED
+    assert recovered.state.active_valve is None
+    assert actions == [(3, True), (3, False), (3, False)]
+
+
+def test_non_safe_skip_current_blocks_without_advancing() -> None:
+    executor = _executor()
+    executor.start(_document(), safety_state="SAFE", timestamp=10.0)
+
+    result = executor.skip_current(safety_state="LOW_FLOW", timestamp=10.2)
+
+    assert result.state.status == ProtocolExecutionStatus.BLOCKED
+    assert result.state.trial_index == 0
+    assert result.state.current_trial.trial_id == "trial-1"
+    assert result.events[-1].event == "safety_block"
+    assert "不能推进" in result.events[-1].message
+
+
+def test_enter_waiting_requires_safe_state_after_advance() -> None:
+    executor = _executor()
+    executor.reset(_document())
+    executor.state.trial_index = 1
+
+    result = executor.skip_current(safety_state="DATA_STALE", timestamp=10.0)
+
+    assert result.state.status == ProtocolExecutionStatus.BLOCKED
+    assert result.state.trial_index == 1
+    assert result.events[-1].event == "safety_block"
 
 
 def test_finished_last_trial_marks_completed() -> None:
@@ -249,3 +399,20 @@ def test_executor_uses_existing_gating_service_for_exhale_detection() -> None:
 
     assert result.transitions[-1].state == GatingState.EXHALE
     assert executor.gating_service.current_state == GatingState.EXHALE
+
+
+def test_snapshot_disables_start_and_advance_when_not_safe() -> None:
+    executor = _executor()
+    executor.reset(_document())
+
+    ready_snapshot = executor.snapshot(safety_state="LOW_FLOW", timestamp=10.0)
+
+    assert ready_snapshot.can_start is False
+    assert ready_snapshot.can_advance is False
+
+    executor.start(_document(), safety_state="SAFE", timestamp=10.0)
+    waiting_snapshot = executor.snapshot(safety_state="DATA_STALE", timestamp=10.1)
+
+    assert waiting_snapshot.can_start is False
+    assert waiting_snapshot.can_advance is False
+    assert waiting_snapshot.can_stop is True

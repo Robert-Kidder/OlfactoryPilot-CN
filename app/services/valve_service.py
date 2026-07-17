@@ -54,6 +54,7 @@ class ValveService:
         state: bool,
         *,
         safety_state: SafetyState | None = None,
+        safety_close: bool = False,
     ) -> tuple[bool, str]:
         """按映射写入阀门状态，并在安全状态不满足时拦截。"""
         channel_id = int(channel_id)
@@ -67,14 +68,15 @@ class ValveService:
         safety = safety_state or self._build_safety_state()
         if state and not self.state.flow_setpoints_ready:
             return False, "MFC 流量设定尚未建立，已阻断阀门打开"
-        allowed, reason = self.safety_manager.guard_command(
-            safety_state=safety,
-            hardware_ready=self._is_hardware_ready(),
-            action=f"valve-{channel_id}",
-            source="manual-toggle",
-        )
-        if not allowed:
-            return False, reason
+        if not safety_close:
+            allowed, reason = self.safety_manager.guard_command(
+                safety_state=safety,
+                hardware_ready=self._is_hardware_ready(),
+                action=f"valve-{channel_id}",
+                source="manual-toggle",
+            )
+            if not allowed:
+                return False, reason
 
         if state and self.master_valve_line and not self._ensure_master_open():
             return False, "主阀切换失败，已阻断阀门写入"
@@ -91,6 +93,8 @@ class ValveService:
             return False, f"阀门 {channel_id} 已写入，但主阀控制失败"
         self._log_event(channel_id, state, target, safety)
         suffix = "（主阀保持开启）" if master_opened else ""
+        if safety_close and not state:
+            return True, f"阀门 {channel_id} 已安全关闭{suffix}"
         return True, f"阀门 {channel_id} 已切换为 {'打开' if state else '关闭'}{suffix}"
 
     def _apply_master_valve(self, state: bool) -> tuple[bool, bool]:

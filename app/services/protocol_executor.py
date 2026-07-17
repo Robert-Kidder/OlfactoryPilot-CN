@@ -212,6 +212,12 @@ class ProtocolExecutor:
         message: str = "当前 trial 已跳过，准备下一 trial。",
     ) -> ProtocolExecutorResult:
         now = self._now(timestamp)
+        if safety_state != "SAFE":
+            return self._safety_block(
+                now,
+                safety_state=safety_state,
+                message=f"安全状态为 {safety_state}，不能推进 trial；请恢复 SAFE 后再继续。",
+            )
         if not self.state.document:
             return self.start(None, safety_state=safety_state, timestamp=now)
         events = [self._event("skip", now, safety_state=safety_state, message=message)]
@@ -233,9 +239,20 @@ class ProtocolExecutor:
         if self.state.active_valve is not None:
             ok, close_message = self.valve_writer(self.state.active_valve, False)
             if not ok:
-                message = f"{message} 关闭阀门失败：{close_message}"
+                self.state.status = ProtocolExecutionStatus.BLOCKED
+                events.append(
+                    self._event(
+                        "stopped",
+                        now,
+                        safety_state=safety_state,
+                        result="close_failed",
+                        message=f"{message} 关闭活动阀门失败：{close_message}；请检查硬件后再次停止。",
+                    )
+                )
+                return self._result_with_events(events)
+            self.state.active_valve = None
+            message = f"{message} 已关闭活动阀门。"
         self.state.status = ProtocolExecutionStatus.STOPPED
-        self.state.active_valve = None
         events.append(self._event("stopped", now, safety_state=safety_state, message=message))
         return self._result_with_events(events)
 
@@ -250,30 +267,22 @@ class ProtocolExecutor:
         if self.state.status in {
             ProtocolExecutionStatus.IDLE,
             ProtocolExecutionStatus.COMPLETED,
-            ProtocolExecutionStatus.BLOCKED,
             ProtocolExecutionStatus.STOPPED,
-        }:
+        } and self.state.active_valve is None:
             return self.empty_result()
         now = self._now(timestamp)
-        if self.state.active_valve is not None:
-            self.valve_writer(self.state.active_valve, False)
-            self.state.active_valve = None
-        self.state.status = ProtocolExecutionStatus.BLOCKED
-        self.state.waiting_started_at = None
-        self.state.triggered_at = None
-        return self._result_with_events(
-            [
-                self._event(
-                    "safety_block",
-                    now,
-                    safety_state=safety_state,
-                    result="blocked",
-                    message=f"安全状态变为 {safety_state}，已中断门控并关闭危险输出。",
-                )
-            ]
+        return self._safety_block(
+            now,
+            safety_state=safety_state,
+            message=f"安全状态变为 {safety_state}，已中断门控。",
         )
 
-    def snapshot(self, timestamp: float | None = None) -> ProtocolExecutionSnapshot:
+    def snapshot(
+        self,
+        timestamp: float | None = None,
+        *,
+        safety_state: str = "SAFE",
+    ) -> ProtocolExecutionSnapshot:
         now = self._now(timestamp)
         trial = self.state.current_trial
         total = len(self.state.document.trials) if self.state.document else 0
@@ -281,18 +290,22 @@ class ProtocolExecutor:
         if self.state.status == ProtocolExecutionStatus.WAITING_EXHALE and self.state.waiting_started_at:
             wait_elapsed_ms = max(0, int((now - self.state.waiting_started_at) * 1000))
         recent = self.state.recent_event.message if self.state.recent_event else "-"
+        is_safe = safety_state == "SAFE"
         return ProtocolExecutionSnapshot(
             status=self.state.status,
             status_text=_STATUS_TEXT.get(self.state.status, self.state.status.value),
             has_protocol=bool(self.state.document and self.state.document.trials),
             can_start=bool(
+                is_safe
+                and
                 self.state.document
                 and self.state.document.trials
                 and self.state.status in {ProtocolExecutionStatus.IDLE, ProtocolExecutionStatus.READY}
             ),
             can_stop=self.state.status
-            in {ProtocolExecutionStatus.WAITING_EXHALE, ProtocolExecutionStatus.TRIGGERED},
-            can_advance=self.state.status == ProtocolExecutionStatus.WAITING_EXHALE,
+            in {ProtocolExecutionStatus.WAITING_EXHALE, ProtocolExecutionStatus.TRIGGERED}
+            or (self.state.status == ProtocolExecutionStatus.BLOCKED and self.state.active_valve is not None),
+            can_advance=is_safe and self.state.status == ProtocolExecutionStatus.WAITING_EXHALE,
             trial_label=f"{self.state.trial_index + 1}/{total}" if trial else "-",
             trial_id=trial.trial_id if trial else "-",
             valve=trial.valve if trial else None,
@@ -303,6 +316,12 @@ class ProtocolExecutor:
         )
 
     def _enter_waiting(self, timestamp: float, *, safety_state: str) -> ProtocolExecutorResult:
+        if safety_state != "SAFE":
+            return self._safety_block(
+                timestamp,
+                safety_state=safety_state,
+                message=f"安全状态为 {safety_state}，不能进入等待呼气；请恢复 SAFE 后再继续。",
+            )
         trial = self.state.current_trial
         invalid = self._validate_trial(trial)
         if invalid:
@@ -370,8 +389,8 @@ class ProtocolExecutor:
                         "blocked",
                         timestamp,
                         safety_state=safety_state,
-                        result="blocked",
-                        message=f"关闭阀门失败：{message}",
+                        result="close_failed",
+                        message=f"关闭阀门失败：{message}；已保持阻断状态，请再次停止以重试安全关闭。",
                     )
                 ]
             )
@@ -443,8 +462,27 @@ class ProtocolExecutor:
 
     def _block(self, timestamp: float, *, safety_state: str, message: str) -> ProtocolExecutorResult:
         if self.state.active_valve is not None:
-            self.valve_writer(self.state.active_valve, False)
-            self.state.active_valve = None
+            ok, close_message = self.valve_writer(self.state.active_valve, False)
+            if ok:
+                self.state.active_valve = None
+                message = f"{message} 已关闭活动阀门。"
+            else:
+                message = f"{message} 关闭活动阀门失败：{close_message}；请再次停止以重试安全关闭。"
+                result = "close_failed"
+                self.state.status = ProtocolExecutionStatus.BLOCKED
+                self.state.waiting_started_at = None
+                self.state.triggered_at = None
+                return self._result_with_events(
+                    [
+                        self._event(
+                            "blocked",
+                            timestamp,
+                            safety_state=safety_state,
+                            result=result,
+                            message=message,
+                        )
+                    ]
+                )
         self.state.status = ProtocolExecutionStatus.BLOCKED
         self.state.waiting_started_at = None
         self.state.triggered_at = None
@@ -455,6 +493,37 @@ class ProtocolExecutor:
                     timestamp,
                     safety_state=safety_state,
                     result="blocked",
+                    message=message,
+                )
+            ]
+        )
+
+    def _safety_block(
+        self,
+        timestamp: float,
+        *,
+        safety_state: str,
+        message: str,
+    ) -> ProtocolExecutorResult:
+        result = "blocked"
+        if self.state.active_valve is not None:
+            ok, close_message = self.valve_writer(self.state.active_valve, False)
+            if ok:
+                self.state.active_valve = None
+                message = f"{message} 已关闭活动阀门。"
+            else:
+                result = "close_failed"
+                message = f"{message} 关闭活动阀门失败：{close_message}；请再次停止以重试安全关闭。"
+        self.state.status = ProtocolExecutionStatus.BLOCKED
+        self.state.waiting_started_at = None
+        self.state.triggered_at = None
+        return self._result_with_events(
+            [
+                self._event(
+                    "safety_block",
+                    timestamp,
+                    safety_state=safety_state,
+                    result=result,
                     message=message,
                 )
             ]

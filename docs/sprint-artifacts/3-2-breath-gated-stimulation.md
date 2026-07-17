@@ -136,6 +136,12 @@ Story ID: 3.2
   - [x] 运行 `D:\miniconda3\envs\code\python.exe -m pytest`。
   - [x] 运行 `D:\miniconda3\envs\code\python.exe -m ruff check app tests`。
 
+- [x] Review Follow-ups (AI)
+  - [x] [AI-Review][High] 非 SAFE 安全中断必须通过安全关闭路径关阀，关闭失败不得标记为已关闭，并记录真实关闭结果。
+  - [x] [AI-Review][High] 关阀失败后 `BLOCKED` 状态必须保留活动阀并允许用户或安全路径继续重试关闭。
+  - [x] [AI-Review][High] 非 SAFE 下 `skip_current` / 下一 trial / 手动推进不得进入下一 trial 等待态。
+  - [x] [AI-Review][Medium] 协议页开始、停止、下一 trial 启用状态必须反映当前安全状态和有效协议。
+
 ## Dev Notes
 
 ### 需求来源
@@ -252,6 +258,10 @@ GPT-5 Codex
 - `D:\miniconda3\envs\code\python.exe -m pytest tests/test_protocol_parser.py tests/test_protocol_view.py`：17 passed。
 - `D:\miniconda3\envs\code\python.exe -m pytest`：150 passed。
 - `D:\miniconda3\envs\code\python.exe -m ruff check app tests`：All checks passed。
+- `D:\miniconda3\envs\code\python.exe -m pytest tests/test_protocol_executor.py tests/test_integration_gating.py tests/test_protocol_view.py`：26 passed。
+- `D:\miniconda3\envs\code\python.exe -m pytest tests/test_protocol_parser.py tests/test_protocol_view.py`：18 passed。
+- `D:\miniconda3\envs\code\python.exe -m pytest`：160 passed。
+- `D:\miniconda3\envs\code\python.exe -m ruff check app tests`：All checks passed。
 
 ### Completion Notes List
 
@@ -260,6 +270,10 @@ GPT-5 Codex
 - `MainController` 已接入协议加载 reset、校准后呼吸样本、Qt tick、LOW_FLOW/DATA_STALE/断连阻断和结构化 `protocol_execution` 日志；协议解析失败仍保留上一份有效 `loaded_protocol`。
 - 协议页新增门控状态、当前 trial、目标阀门、触发模式、等待时长、最近事件，以及开始/停止/下一 trial 控件；手动/TTL 仍保留为后续 story。
 - 新增默认配置 `breath_gate_timeout_ms=5000`、`breath_gate_timeout_action=skip`、`breath_gate_max_retries=1`，旧配置缺字段时由服务默认值兜底。
+- 修复 review 发现的安全关闭缺口：`ValveService` 新增 `safety_close` 关阀路径，允许非 SAFE 下执行安全关闭但仍保留映射和硬件写入结果检查。
+- 修复 executor 关闭失败处理：安全中断、阻断和 stop 不再在关阀失败时清空 `active_valve`，`BLOCKED` 且仍有活动阀时可继续通过停止/安全更新重试关闭。
+- 修复非 SAFE 推进行为：`skip_current()` 和等待态入口在非 SAFE 下直接进入阻断并记录中文原因，不推进 trial。
+- 修复协议页动作启用：`ProtocolExecutor.snapshot()` 结合当前安全状态禁用开始/下一 trial，保留活动阀未关闭时的停止恢复入口。
 
 ### File List
 
@@ -268,11 +282,13 @@ GPT-5 Codex
 - `app/models/protocol_execution.py`
 - `app/services/__init__.py`
 - `app/services/protocol_executor.py`
+- `app/services/valve_service.py`
 - `app/views/main_window.py`
 - `app/views/protocol_view.py`
 - `config/default_config.json`
 - `tests/test_integration_gating.py`
 - `tests/test_protocol_executor.py`
+- `tests/test_valve_service.py`
 - `tests/test_protocol_view.py`
 - `docs/sprint-artifacts/3-2-breath-gated-stimulation.md`
 - `docs/sprint-artifacts/sprint-status.yaml`
@@ -281,3 +297,4 @@ GPT-5 Codex
 
 - 2026-07-09：创建 Story 3.2 呼吸门控刺激，状态设为 ready-for-dev。
 - 2026-07-09：实现呼吸门控执行状态机、controller/UI 接入、配置项和自动化测试，状态更新为 review。
+- 2026-07-17：修复 code review 安全关闭与非 SAFE 推进问题，补充恢复路径和按钮安全态测试，状态保持 review。

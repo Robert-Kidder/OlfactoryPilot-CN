@@ -892,6 +892,7 @@ class MainController(QObject):
             channel_id,
             open_state,
             safety_state=self._build_current_safety_state(),
+            safety_close=not open_state,
         )
 
     def _publish_protocol_result(
@@ -914,7 +915,10 @@ class MainController(QObject):
     def _render_protocol_execution_state(self) -> None:
         if self.view and hasattr(self.view, "protocol_view"):
             self.view.protocol_view.render_execution_state(
-                self.protocol_executor.snapshot(time.time())
+                self.protocol_executor.snapshot(
+                    time.time(),
+                    safety_state=self.state.telemetry.safety_state,
+                )
             )
 
     def ensure_safe_command(self, action: str, source: str | None = None) -> bool:
