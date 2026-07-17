@@ -4,7 +4,7 @@ baseline_commit: 91b3830fe7c3536987e6fb6ae1aeb9ff54122362
 
 # Story 3.1: 协议文件解析 .txt/.csv
 
-Status: review
+Status: done
 Epic: 3 - 协议执行与数据记录
 Story Key: 3-1-protocol-file-parsing-txtcsv
 Story ID: 3.1

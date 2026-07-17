@@ -6,7 +6,7 @@ depends_on:
 
 # Story 3.2: 呼吸门控刺激
 
-Status: review
+Status: done
 Epic: 3 - 协议执行与数据记录
 Story Key: 3-2-breath-gated-stimulation
 Story ID: 3.2
