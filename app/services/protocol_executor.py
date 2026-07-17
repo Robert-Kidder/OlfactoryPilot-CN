@@ -267,6 +267,7 @@ class ProtocolExecutor:
         if self.state.status in {
             ProtocolExecutionStatus.IDLE,
             ProtocolExecutionStatus.COMPLETED,
+            ProtocolExecutionStatus.BLOCKED,
             ProtocolExecutionStatus.STOPPED,
         } and self.state.active_valve is None:
             return self.empty_result()

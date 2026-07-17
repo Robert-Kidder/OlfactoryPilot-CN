@@ -141,6 +141,8 @@ Story ID: 3.2
   - [x] [AI-Review][High] 关阀失败后 `BLOCKED` 状态必须保留活动阀并允许用户或安全路径继续重试关闭。
   - [x] [AI-Review][High] 非 SAFE 下 `skip_current` / 下一 trial / 手动推进不得进入下一 trial 等待态。
   - [x] [AI-Review][Medium] 协议页开始、停止、下一 trial 启用状态必须反映当前安全状态和有效协议。
+  - [x] [AI-Review][Medium] `safety_close=True` 只能用于关闭阀门，误用于开阀时必须显式拒绝且不得写硬件。
+  - [x] [AI-Review][Medium] `BLOCKED` 且无活动阀时安全 tick 不得反复记录 `safety_block` 事件。
 
 ## Dev Notes
 
@@ -262,6 +264,10 @@ GPT-5 Codex
 - `D:\miniconda3\envs\code\python.exe -m pytest tests/test_protocol_parser.py tests/test_protocol_view.py`：18 passed。
 - `D:\miniconda3\envs\code\python.exe -m pytest`：160 passed。
 - `D:\miniconda3\envs\code\python.exe -m ruff check app tests`：All checks passed。
+- `D:\miniconda3\envs\code\python.exe -m pytest tests/test_protocol_executor.py tests/test_integration_gating.py tests/test_protocol_view.py tests/test_valve_service.py`：36 passed。
+- `D:\miniconda3\envs\code\python.exe -m pytest tests/test_protocol_parser.py tests/test_protocol_view.py`：18 passed。
+- `D:\miniconda3\envs\code\python.exe -m pytest`：162 passed。
+- `D:\miniconda3\envs\code\python.exe -m ruff check app tests`：All checks passed。
 
 ### Completion Notes List
 
@@ -274,6 +280,8 @@ GPT-5 Codex
 - 修复 executor 关闭失败处理：安全中断、阻断和 stop 不再在关阀失败时清空 `active_valve`，`BLOCKED` 且仍有活动阀时可继续通过停止/安全更新重试关闭。
 - 修复非 SAFE 推进行为：`skip_current()` 和等待态入口在非 SAFE 下直接进入阻断并记录中文原因，不推进 trial。
 - 修复协议页动作启用：`ProtocolExecutor.snapshot()` 结合当前安全状态禁用开始/下一 trial，保留活动阀未关闭时的停止恢复入口。
+- 收紧 `ValveService` 的安全关闭语义：`safety_close=True` 若用于 `state=True` 开阀会被显式拒绝，不会绕过 `SafetyManager.guard_command()` 写硬件。
+- 收敛 `ProtocolExecutor.handle_safety_update()`：`BLOCKED` 且无活动阀时直接返回空结果，避免 50ms tick 重复写入 `safety_block`；`BLOCKED` 且仍有活动阀时继续保留重试关闭路径。
 
 ### File List
 
@@ -298,3 +306,4 @@ GPT-5 Codex
 - 2026-07-09：创建 Story 3.2 呼吸门控刺激，状态设为 ready-for-dev。
 - 2026-07-09：实现呼吸门控执行状态机、controller/UI 接入、配置项和自动化测试，状态更新为 review。
 - 2026-07-17：修复 code review 安全关闭与非 SAFE 推进问题，补充恢复路径和按钮安全态测试，状态保持 review。
+- 2026-07-17：修复复审发现的 safety_close 误用开阀与 BLOCKED 重复 safety_block 事件问题，状态保持 review。

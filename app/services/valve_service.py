@@ -65,6 +65,9 @@ class ValveService:
         if not target:
             return False, f"阀门 {channel_id} 未配置映射"
 
+        if safety_close and state:
+            return False, "安全关闭参数不能用于打开阀门，已阻断写入"
+
         safety = safety_state or self._build_safety_state()
         if state and not self.state.flow_setpoints_ready:
             return False, "MFC 流量设定尚未建立，已阻断阀门打开"

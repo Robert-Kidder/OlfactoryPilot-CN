@@ -204,3 +204,27 @@ def test_safety_close_is_allowed_when_not_safe():
     assert "安全关闭" in message
     assert service.is_open(1) is False
     assert service.worker.commands == [("Dev1", "P0.0", False)]
+
+
+def test_safety_close_cannot_open_when_not_safe():
+    service = build_service()
+    service.state.flow_setpoints_ready = True
+    safety_state = SafetyState(
+        state="LOW_FLOW",
+        airflow=0.0,
+        threshold=0.2,
+        updated_at=1.0,
+        reason="气流低",
+    )
+
+    ok, message = service.set_valve(
+        1,
+        True,
+        safety_state=safety_state,
+        safety_close=True,
+    )
+
+    assert ok is False
+    assert "安全关闭参数不能用于打开阀门" in message
+    assert service.is_open(1) is False
+    assert service.worker.commands == []

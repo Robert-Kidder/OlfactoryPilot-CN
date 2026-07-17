@@ -240,6 +240,20 @@ def test_blocked_state_with_active_valve_can_retry_safe_close() -> None:
     assert "已关闭活动阀门" in retry.events[-1].message
 
 
+def test_blocked_state_without_active_valve_does_not_repeat_safety_block() -> None:
+    executor = _executor()
+    blocked = executor.start(_document(), safety_state="LOW_FLOW", timestamp=10.0)
+    assert blocked.state.status == ProtocolExecutionStatus.BLOCKED
+    assert blocked.state.active_valve is None
+    assert blocked.events[-1].event == "safety_block"
+
+    repeated = executor.handle_safety_update("LOW_FLOW", timestamp=10.1)
+
+    assert repeated.events == []
+    assert repeated.state.status == ProtocolExecutionStatus.BLOCKED
+    assert repeated.state.active_valve is None
+
+
 def test_stop_after_close_failure_retries_active_valve() -> None:
     outcomes = [False, True]
     actions: list[tuple[int, bool]] = []
