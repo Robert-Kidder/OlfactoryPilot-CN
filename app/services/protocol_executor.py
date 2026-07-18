@@ -8,11 +8,13 @@ from typing import Any
 
 from app.models import (
     ProtocolDocument,
+    ProtocolExecutionReadiness,
     ProtocolExecutionSnapshot,
     ProtocolExecutionState,
     ProtocolExecutionStatus,
     ProtocolGateEvent,
     ProtocolTrial,
+    TriggerMode,
 )
 from app.services.gating_service import GatingService, GatingState, GatingTransition
 
@@ -73,55 +75,330 @@ class ProtocolExecutor:
     def empty_result(self) -> ProtocolExecutorResult:
         return ProtocolExecutorResult(state=self.state)
 
-    def reset(self, document: ProtocolDocument | None = None) -> ProtocolExecutorResult:
+    def reset(
+        self,
+        document: ProtocolDocument | None = None,
+        *,
+        timestamp: float | None = None,
+    ) -> ProtocolExecutorResult:
+        if self.state.active_valve is not None:
+            return self._rejected(
+                "reset_rejected",
+                self._now(timestamp),
+                safety_state=None,
+                message="仍有活动阀门未关闭，不能重置；请先停止并重试安全关闭。",
+            )
         status = ProtocolExecutionStatus.READY if document and document.trials else ProtocolExecutionStatus.IDLE
         self.state = ProtocolExecutionState(document=document, status=status)
+        self._sync_trial_mode(clear_override=True)
         return self.empty_result()
 
     def start(
         self,
         document: ProtocolDocument | None = None,
         *,
-        safety_state: str,
+        readiness: ProtocolExecutionReadiness | None = None,
+        safety_state: str | None = None,
         timestamp: float | None = None,
     ) -> ProtocolExecutorResult:
         now = self._now(timestamp)
+        ready = self._readiness(readiness, safety_state)
+        if self.state.active_valve is not None:
+            return self._rejected(
+                "start_rejected",
+                now,
+                safety_state=ready.safety_state,
+                message="仍有活动阀门未关闭，不能开始；请先停止并重试安全关闭。",
+            )
         if document is not None:
-            self.state.document = document
-            self.state.trial_index = 0
-            self.state.retry_count = 0
+            if not document.trials:
+                document = None
+            self.state = ProtocolExecutionState(
+                document=document,
+                status=ProtocolExecutionStatus.READY if document else ProtocolExecutionStatus.IDLE,
+            )
+            self._sync_trial_mode(clear_override=True)
 
         if not self.state.document or not self.state.document.trials:
-            self.state.status = ProtocolExecutionStatus.IDLE
-            return self._result_with_events(
-                [
-                    self._event(
-                        "invalid_protocol",
-                        now,
-                        safety_state=safety_state,
-                        result="blocked",
-                        message="请先加载有效协议，然后再开始呼吸门控。",
-                    )
-                ]
+            return self._rejected(
+                "invalid_protocol",
+                now,
+                safety_state=ready.safety_state,
+                message="请先加载有效协议，然后再开始协议执行。",
             )
 
-        if safety_state != "SAFE":
-            self.state.status = ProtocolExecutionStatus.BLOCKED
-            return self._result_with_events(
-                [
-                    self._event(
-                        "safety_block",
-                        now,
-                        safety_state=safety_state,
-                        result="blocked",
-                        message=f"安全状态为 {safety_state}，请恢复 SAFE 后再开始。",
-                    )
-                ]
+        reason = ready.rejection_reason(
+            has_protocol=True,
+            require_ttl=self.state.current_mode == TriggerMode.TTL,
+        )
+        if reason:
+            return self._rejected(
+                "start_rejected",
+                now,
+                safety_state=ready.safety_state,
+                message=reason,
             )
 
-        self.state.trial_index = 0
+        if self.state.status == ProtocolExecutionStatus.STOPPED:
+            self.state.trial_index = 0
+            self._sync_trial_mode(clear_override=True)
+        elif self.state.status != ProtocolExecutionStatus.READY:
+            return self._rejected(
+                "start_rejected",
+                now,
+                safety_state=ready.safety_state,
+                message=f"当前状态为 {_STATUS_TEXT[self.state.status]}，不能开始协议。",
+            )
         self.state.retry_count = 0
-        return self._enter_waiting(now, safety_state=safety_state)
+        return self._enter_trigger_waiting(now, readiness=ready)
+
+    def accept_trigger(
+        self,
+        source: TriggerMode | str,
+        *,
+        readiness: ProtocolExecutionReadiness,
+        timestamp: float | None = None,
+        captured_epoch: int | None = None,
+        sequence: int | None = None,
+    ) -> ProtocolExecutorResult:
+        now = self._now(timestamp)
+        try:
+            trigger_source = source if isinstance(source, TriggerMode) else TriggerMode(str(source).lower())
+        except ValueError:
+            return self._rejected(
+                "trigger_rejected",
+                now,
+                safety_state=readiness.safety_state,
+                message="触发来源无效，已拒绝该事件。",
+            )
+        reason = readiness.rejection_reason(
+            has_protocol=bool(self.state.document and self.state.document.trials),
+            require_ttl=trigger_source == TriggerMode.TTL,
+        )
+        if reason:
+            return self._rejected(
+                "trigger_rejected",
+                now,
+                safety_state=readiness.safety_state,
+                trigger_source=trigger_source.value,
+                message=reason,
+            )
+        if self.state.status != ProtocolExecutionStatus.WAITING_TRIGGER:
+            return self._rejected(
+                "trigger_ignored",
+                now,
+                safety_state=readiness.safety_state,
+                trigger_source=trigger_source.value,
+                result="ignored",
+                message="当前不在等待触发状态，已忽略重复或过期触发。",
+            )
+        if trigger_source != self.state.current_mode:
+            return self._rejected(
+                "trigger_ignored",
+                now,
+                safety_state=readiness.safety_state,
+                trigger_source=trigger_source.value,
+                result="ignored",
+                message="触发来源与当前运行模式不匹配，已忽略。",
+            )
+        if trigger_source == TriggerMode.TTL:
+            if captured_epoch != self.state.arm_epoch:
+                return self._rejected(
+                    "ttl_pulse_ignored",
+                    now,
+                    safety_state=readiness.safety_state,
+                    trigger_source=trigger_source.value,
+                    result="ignored",
+                    pulse_sequence=sequence,
+                    message="TTL pulse 属于陈旧布防代次，已忽略。",
+                )
+            if sequence is None or sequence <= self.state.last_pulse_sequence:
+                return self._rejected(
+                    "ttl_pulse_ignored",
+                    now,
+                    safety_state=readiness.safety_state,
+                    trigger_source=trigger_source.value,
+                    result="ignored",
+                    pulse_sequence=sequence,
+                    message="TTL pulse 序号重复或无效，已忽略。",
+                )
+            self.state.last_pulse_sequence = sequence
+            self.state.last_ttl_timestamp = now
+        self.state.trigger_source = trigger_source.value
+        self.state.ttl_armed = False
+        self.state.waiting_trigger_started_at = None
+        waiting = self._enter_waiting(now, safety_state=readiness.safety_state)
+        accepted = self._event(
+            "trigger_accepted",
+            now,
+            safety_state=readiness.safety_state,
+            result="success",
+            message="触发已接受，开始等待呼气阈值。",
+            trigger_source=trigger_source.value,
+            pulse_sequence=sequence,
+        )
+        return self._result_with_events([*waiting.events, accepted])
+
+    def set_trigger_mode(
+        self,
+        mode: TriggerMode | str,
+        *,
+        readiness: ProtocolExecutionReadiness,
+        timestamp: float | None = None,
+    ) -> ProtocolExecutorResult:
+        now = self._now(timestamp)
+        try:
+            target = mode if isinstance(mode, TriggerMode) else TriggerMode(str(mode).lower())
+        except ValueError:
+            return self._rejected(
+                "mode_rejected",
+                now,
+                safety_state=readiness.safety_state,
+                message="触发模式无效，只能选择 manual 或 ttl。",
+            )
+        if target == self.state.current_mode:
+            return self.empty_result()
+        reason = readiness.rejection_reason(
+            has_protocol=bool(self.state.document and self.state.document.trials),
+            require_ttl=target == TriggerMode.TTL,
+        )
+        if reason:
+            return self._rejected(
+                "mode_rejected",
+                now,
+                safety_state=readiness.safety_state,
+                message=reason,
+            )
+        allowed = {
+            ProtocolExecutionStatus.READY,
+            ProtocolExecutionStatus.WAITING_TRIGGER,
+            ProtocolExecutionStatus.WAITING_EXHALE,
+            ProtocolExecutionStatus.TRIGGERED,
+        }
+        if self.state.status not in allowed:
+            return self._rejected(
+                "mode_rejected",
+                now,
+                safety_state=readiness.safety_state,
+                message=f"当前状态为 {_STATUS_TEXT[self.state.status]}，不能切换触发模式。",
+            )
+        old_mode = self.state.current_mode
+        if self.state.active_valve is not None:
+            ok, close_message = self.valve_writer(self.state.active_valve, False)
+            if not ok:
+                self.state.status = ProtocolExecutionStatus.BLOCKED
+                return self._result_with_events(
+                    [
+                        self._event(
+                            "mode_switch_failed",
+                            now,
+                            safety_state=readiness.safety_state,
+                            result="close_failed",
+                            message=f"关闭活动阀门失败：{close_message}；触发模式未切换。",
+                        )
+                    ]
+                )
+            self.state.active_valve = None
+        self._invalidate_arm()
+        self.state.current_mode = target
+        self.state.mode_override = target
+        self.state.waiting_started_at = None
+        self.state.triggered_at = None
+        self.state.retry_count = 0
+        self.state.trigger_source = None
+        if self.state.status != ProtocolExecutionStatus.READY:
+            self.state.status = ProtocolExecutionStatus.WAITING_TRIGGER
+            self.state.waiting_trigger_started_at = now
+            self.state.ttl_armed = target == TriggerMode.TTL
+        return self._result_with_events(
+            [
+                self._event(
+                    "mode_changed",
+                    now,
+                    safety_state=readiness.safety_state,
+                    message=f"触发模式已从 {old_mode.value if old_mode else '-'} 切换为 {target.value}。",
+                )
+            ]
+        )
+
+    def rearm_current(
+        self,
+        *,
+        readiness: ProtocolExecutionReadiness,
+        timestamp: float | None = None,
+    ) -> ProtocolExecutorResult:
+        now = self._now(timestamp)
+        if self.state.status != ProtocolExecutionStatus.BLOCKED or self.state.active_valve is not None:
+            return self._rejected(
+                "rearm_rejected",
+                now,
+                safety_state=readiness.safety_state,
+                message="当前状态不能重新布防；如有活动阀门请先停止并重试安全关闭。",
+            )
+        reason = readiness.rejection_reason(
+            has_protocol=bool(self.state.document and self.state.document.trials),
+            require_ttl=self.state.current_mode == TriggerMode.TTL,
+        )
+        if reason:
+            return self._rejected(
+                "rearm_rejected",
+                now,
+                safety_state=readiness.safety_state,
+                message=reason,
+            )
+        self.state.retry_count = 0
+        return self._enter_trigger_waiting(now, readiness=readiness)
+
+    def handle_readiness_lost(
+        self,
+        readiness: ProtocolExecutionReadiness,
+        *,
+        timestamp: float | None = None,
+    ) -> ProtocolExecutorResult:
+        running = {
+            ProtocolExecutionStatus.WAITING_TRIGGER,
+            ProtocolExecutionStatus.WAITING_EXHALE,
+            ProtocolExecutionStatus.TRIGGERED,
+        }
+        if self.state.status not in running:
+            return self.empty_result()
+        reason = readiness.rejection_reason(
+            has_protocol=bool(self.state.document and self.state.document.trials),
+            require_ttl=self.state.current_mode == TriggerMode.TTL,
+        )
+        if not reason:
+            return self.empty_result()
+        return self._block(
+            self._now(timestamp),
+            safety_state=readiness.safety_state,
+            message=f"运行就绪条件丢失：{reason} 已安全阻断协议执行。",
+        )
+
+    def handle_input_error(
+        self,
+        message: str,
+        *,
+        safety_state: str,
+        timestamp: float | None = None,
+    ) -> ProtocolExecutorResult:
+        running = {
+            ProtocolExecutionStatus.WAITING_TRIGGER,
+            ProtocolExecutionStatus.WAITING_EXHALE,
+            ProtocolExecutionStatus.TRIGGERED,
+        }
+        if self.state.status not in running:
+            return self._rejected(
+                "ttl_input_error_ignored",
+                self._now(timestamp),
+                safety_state=safety_state,
+                result="ignored",
+                message=f"{message} 当前协议未运行，未改变执行状态。",
+            )
+        return self._block(
+            self._now(timestamp),
+            safety_state=safety_state,
+            message=f"{message} 已失效当前 TTL 布防并安全阻断协议执行。",
+        )
 
     def process_breath_samples(
         self,
@@ -235,6 +512,7 @@ class ProtocolExecutor:
         message: str = "门控流程已停止，危险输出已关闭或保持关闭。",
     ) -> ProtocolExecutorResult:
         now = self._now(timestamp)
+        self._invalidate_arm()
         events: list[ProtocolGateEvent] = []
         if self.state.active_valve is not None:
             ok, close_message = self.valve_writer(self.state.active_valve, False)
@@ -282,31 +560,61 @@ class ProtocolExecutor:
         self,
         timestamp: float | None = None,
         *,
-        safety_state: str = "SAFE",
+        readiness: ProtocolExecutionReadiness | None = None,
+        safety_state: str | None = None,
     ) -> ProtocolExecutionSnapshot:
         now = self._now(timestamp)
+        ready = self._readiness(readiness, safety_state)
         trial = self.state.current_trial
         total = len(self.state.document.trials) if self.state.document else 0
         wait_elapsed_ms = 0
         if self.state.status == ProtocolExecutionStatus.WAITING_EXHALE and self.state.waiting_started_at:
             wait_elapsed_ms = max(0, int((now - self.state.waiting_started_at) * 1000))
+        elif (
+            self.state.status == ProtocolExecutionStatus.WAITING_TRIGGER
+            and self.state.waiting_trigger_started_at is not None
+        ):
+            wait_elapsed_ms = max(
+                0,
+                int((now - self.state.waiting_trigger_started_at) * 1000),
+            )
         recent = self.state.recent_event.message if self.state.recent_event else "-"
-        is_safe = safety_state == "SAFE"
+        common_reason = ready.rejection_reason(
+            has_protocol=bool(self.state.document and self.state.document.trials)
+        )
+        ttl_reason = ready.rejection_reason(
+            has_protocol=bool(self.state.document and self.state.document.trials),
+            require_ttl=True,
+        )
+        common_ready = not common_reason
+        ttl_ready = not ttl_reason
+        execution_ready = ttl_ready if self.state.current_mode == TriggerMode.TTL else common_ready
+        can_select_state = self.state.status in {
+            ProtocolExecutionStatus.READY,
+            ProtocolExecutionStatus.WAITING_TRIGGER,
+            ProtocolExecutionStatus.WAITING_EXHALE,
+            ProtocolExecutionStatus.TRIGGERED,
+        }
         return ProtocolExecutionSnapshot(
             status=self.state.status,
             status_text=_STATUS_TEXT.get(self.state.status, self.state.status.value),
             has_protocol=bool(self.state.document and self.state.document.trials),
             can_start=bool(
-                is_safe
-                and
-                self.state.document
+                execution_ready
+                and self.state.document
                 and self.state.document.trials
-                and self.state.status in {ProtocolExecutionStatus.IDLE, ProtocolExecutionStatus.READY}
+                and self.state.status in {ProtocolExecutionStatus.READY, ProtocolExecutionStatus.STOPPED}
             ),
             can_stop=self.state.status
-            in {ProtocolExecutionStatus.WAITING_EXHALE, ProtocolExecutionStatus.TRIGGERED}
+            in {
+                ProtocolExecutionStatus.WAITING_TRIGGER,
+                ProtocolExecutionStatus.WAITING_EXHALE,
+                ProtocolExecutionStatus.TRIGGERED,
+            }
             or (self.state.status == ProtocolExecutionStatus.BLOCKED and self.state.active_valve is not None),
-            can_advance=is_safe and self.state.status == ProtocolExecutionStatus.WAITING_EXHALE,
+            can_advance=common_ready
+            and self.state.status
+            in {ProtocolExecutionStatus.WAITING_TRIGGER, ProtocolExecutionStatus.WAITING_EXHALE},
             trial_label=f"{self.state.trial_index + 1}/{total}" if trial else "-",
             trial_id=trial.trial_id if trial else "-",
             valve=trial.valve if trial else None,
@@ -314,6 +622,77 @@ class ProtocolExecutor:
             wait_elapsed_ms=wait_elapsed_ms,
             planned_duration_ms=float(trial.duration_ms) if trial else None,
             recent_event=recent,
+            protocol_mode=self.state.declared_mode.value if self.state.declared_mode else "-",
+            current_mode=self.state.current_mode.value if self.state.current_mode else "-",
+            can_select_mode=common_ready and can_select_state,
+            can_select_manual_mode=common_ready and can_select_state,
+            can_select_ttl_mode=ttl_ready and can_select_state,
+            can_manual_trigger=bool(
+                common_ready
+                and self.state.status == ProtocolExecutionStatus.WAITING_TRIGGER
+                and self.state.current_mode == TriggerMode.MANUAL
+            ),
+            can_rearm=bool(
+                execution_ready
+                and self.state.status == ProtocolExecutionStatus.BLOCKED
+                and self.state.active_valve is None
+            ),
+            ttl_armed=self.state.ttl_armed,
+            waiting_external_ttl=bool(
+                self.state.status == ProtocolExecutionStatus.WAITING_TRIGGER
+                and self.state.current_mode == TriggerMode.TTL
+                and self.state.ttl_armed
+            ),
+            readiness_reason=ttl_reason if self.state.current_mode == TriggerMode.TTL else common_reason,
+            trigger_source=self.state.trigger_source or "-",
+            last_ttl_timestamp=self.state.last_ttl_timestamp,
+            arm_epoch=self.state.arm_epoch,
+        )
+
+    def _enter_trigger_waiting(
+        self,
+        timestamp: float,
+        *,
+        readiness: ProtocolExecutionReadiness,
+    ) -> ProtocolExecutorResult:
+        trial = self.state.current_trial
+        invalid = self._validate_trial(trial)
+        if invalid:
+            return self._block(timestamp, safety_state=readiness.safety_state, message=invalid)
+        if self.state.current_mode is None:
+            self._sync_trial_mode(clear_override=False)
+        reason = readiness.rejection_reason(
+            has_protocol=True,
+            require_ttl=self.state.current_mode == TriggerMode.TTL,
+        )
+        if reason:
+            return self._rejected(
+                "arm_rejected",
+                timestamp,
+                safety_state=readiness.safety_state,
+                message=reason,
+            )
+        self._invalidate_arm()
+        self.state.status = ProtocolExecutionStatus.WAITING_TRIGGER
+        self.state.waiting_trigger_started_at = timestamp
+        self.state.waiting_started_at = None
+        self.state.triggered_at = None
+        self.state.retry_count = 0
+        self.state.trigger_source = None
+        self.state.ttl_armed = self.state.current_mode == TriggerMode.TTL
+        return self._result_with_events(
+            [
+                self._event(
+                    "trigger_wait_start",
+                    timestamp,
+                    safety_state=readiness.safety_state,
+                    message=(
+                        "已布防，等待外部 TTL 上升沿。"
+                        if self.state.ttl_armed
+                        else "开始等待手动触发。"
+                    ),
+                )
+            ]
         )
 
     def _enter_waiting(self, timestamp: float, *, safety_state: str) -> ProtocolExecutorResult:
@@ -328,6 +707,7 @@ class ProtocolExecutor:
         if invalid:
             return self._block(timestamp, safety_state=safety_state, message=invalid)
         self.state.status = ProtocolExecutionStatus.WAITING_EXHALE
+        self.state.waiting_trigger_started_at = None
         self.state.waiting_started_at = timestamp
         self.state.triggered_at = None
         self.state.active_valve = None
@@ -459,9 +839,14 @@ class ProtocolExecutor:
                     )
                 ]
             )
-        return self._enter_waiting(timestamp, safety_state=safety_state)
+        self._sync_trial_mode(clear_override=True)
+        return self._enter_trigger_waiting(
+            timestamp,
+            readiness=self._readiness(None, safety_state),
+        )
 
     def _block(self, timestamp: float, *, safety_state: str, message: str) -> ProtocolExecutorResult:
+        self._invalidate_arm()
         if self.state.active_valve is not None:
             ok, close_message = self.valve_writer(self.state.active_valve, False)
             if ok:
@@ -506,6 +891,7 @@ class ProtocolExecutor:
         safety_state: str,
         message: str,
     ) -> ProtocolExecutorResult:
+        self._invalidate_arm()
         result = "blocked"
         if self.state.active_valve is not None:
             ok, close_message = self.valve_writer(self.state.active_valve, False)
@@ -542,6 +928,8 @@ class ProtocolExecutor:
         message: str = "",
         planned_duration_ms: float | None = None,
         actual_duration_ms: float | None = None,
+        trigger_source: str | None = None,
+        pulse_sequence: int | None = None,
     ) -> ProtocolGateEvent:
         trial = self.state.current_trial
         return ProtocolGateEvent(
@@ -558,6 +946,65 @@ class ProtocolExecutor:
             message=message,
             planned_duration_ms=planned_duration_ms,
             actual_duration_ms=actual_duration_ms,
+            protocol_mode=self.state.declared_mode.value if self.state.declared_mode else None,
+            current_mode=self.state.current_mode.value if self.state.current_mode else None,
+            trigger_source=trigger_source or self.state.trigger_source,
+            arm_epoch=self.state.arm_epoch,
+            pulse_sequence=pulse_sequence,
+        )
+
+    def _rejected(
+        self,
+        event: str,
+        timestamp: float,
+        *,
+        safety_state: str | None,
+        message: str,
+        result: str = "rejected",
+        trigger_source: str | None = None,
+        pulse_sequence: int | None = None,
+    ) -> ProtocolExecutorResult:
+        return self._result_with_events(
+            [
+                self._event(
+                    event,
+                    timestamp,
+                    safety_state=safety_state,
+                    result=result,
+                    message=message,
+                    trigger_source=trigger_source,
+                    pulse_sequence=pulse_sequence,
+                )
+            ]
+        )
+
+    def _invalidate_arm(self) -> None:
+        self.state.arm_epoch += 1
+        self.state.ttl_armed = False
+        self.state.waiting_trigger_started_at = None
+
+    def _sync_trial_mode(self, *, clear_override: bool) -> None:
+        trial = self.state.current_trial
+        self.state.declared_mode = trial.trigger if trial else None
+        if clear_override:
+            self.state.mode_override = None
+        self.state.current_mode = self.state.mode_override or self.state.declared_mode
+        self.state.trigger_source = None
+        self.state.last_pulse_sequence = -1
+
+    @staticmethod
+    def _readiness(
+        readiness: ProtocolExecutionReadiness | None,
+        safety_state: str | None,
+    ) -> ProtocolExecutionReadiness:
+        if readiness is not None:
+            return readiness
+        return ProtocolExecutionReadiness(
+            connected=True,
+            hardware_ready=True,
+            flow_setpoints_ready=True,
+            safety_state=safety_state or "SAFE",
+            ttl_input_ready=True,
         )
 
     def _result_with_events(self, events: list[ProtocolGateEvent]) -> ProtocolExecutorResult:
@@ -595,6 +1042,7 @@ def _safe_int(value: Any, default: int) -> int:
 _STATUS_TEXT = {
     ProtocolExecutionStatus.IDLE: "空闲",
     ProtocolExecutionStatus.READY: "已就绪",
+    ProtocolExecutionStatus.WAITING_TRIGGER: "等待触发",
     ProtocolExecutionStatus.WAITING_EXHALE: "等待呼气",
     ProtocolExecutionStatus.TRIGGERED: "已触发",
     ProtocolExecutionStatus.SKIPPED: "已跳过",

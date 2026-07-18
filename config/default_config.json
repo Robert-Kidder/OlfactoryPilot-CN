@@ -60,6 +60,11 @@
   ],
   "hal_mode": "mock",
   "ai0_channel": "Dev1/ai0",
+  "ttl_input_channel": "Dev1/ai6",
+  "ttl_high_threshold_v": 2.0,
+  "ttl_low_threshold_v": 0.8,
+  "ttl_debounce_ms": 2,
+  "ttl_poll_hz": 1000,
   "alicat_unit_ids": {
     "A": "a",
     "B": "b",

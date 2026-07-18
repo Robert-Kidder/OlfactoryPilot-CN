@@ -4,7 +4,7 @@ import math
 import time
 
 from app.models import SelfCheckResult
-from app.services.hal import HalBase
+from app.services.hal import AnalogInputFrame, HalBase
 
 
 class MockHAL(HalBase):
@@ -26,6 +26,18 @@ class MockHAL(HalBase):
         self.flow_commands: list[tuple[str, float, bool]] = []
         self.fail_on: set[str] = set()
         self.master_events: list[tuple[str, bool]] = []
+        self._ttl_level = 0.0
+
+    @property
+    def ttl_input_ready(self) -> bool:
+        return True
+
+    def read_ai_frame(self, timestamp: float | None = None) -> AnalogInputFrame:
+        ts = float(timestamp if timestamp is not None else time.time())
+        return AnalogInputFrame(timestamp=ts, ai0=self.read_ai0(ts), ai6=float(self._ttl_level))
+
+    def set_ttl_level(self, value: float) -> None:
+        self._ttl_level = float(value)
 
     def read_ai0(self, timestamp: float | None = None) -> float:
         ts = timestamp if timestamp is not None else time.time()

@@ -76,6 +76,15 @@ class MainWindow(QMainWindow):
         self.protocol_view.start_requested.connect(self.controller.handle_protocol_start_requested)
         self.protocol_view.stop_requested.connect(self.controller.handle_protocol_stop_requested)
         self.protocol_view.next_trial_requested.connect(self.controller.handle_protocol_next_requested)
+        self.protocol_view.trigger_mode_requested.connect(
+            self.controller.handle_protocol_trigger_mode_requested
+        )
+        self.protocol_view.manual_trigger_requested.connect(
+            self.controller.handle_protocol_manual_trigger_requested
+        )
+        self.protocol_view.rearm_requested.connect(
+            self.controller.handle_protocol_rearm_requested
+        )
         self.tabs.addTab(self._build_tab("概览", "硬件连接、安全状态概览"), "概览")
         self.tabs.addTab(self.calibration_view, "校准")
         self.tabs.addTab(self.pretest_view, "预检")

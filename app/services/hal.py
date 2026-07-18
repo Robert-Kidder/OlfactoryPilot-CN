@@ -1,14 +1,29 @@
 from __future__ import annotations
 
 import abc
+from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
 from app.models import SelfCheckResult
 
 
+@dataclass(frozen=True)
+class AnalogInputFrame:
+    timestamp: float
+    ai0: float
+    ai6: float | None = None
+
+
 @runtime_checkable
 class HalInterface(Protocol):
     """HAL 接口抽象：统一模拟与真实硬件的读写能力。"""
+
+    @property
+    def ttl_input_ready(self) -> bool:
+        """共享 AI 采样链路是否包含可用 AI6。"""
+
+    def read_ai_frame(self, timestamp: float | None = None) -> AnalogInputFrame:
+        """从单一 AI task 读取 AI0/AI6 共享采样帧。"""
 
     def read_ai0(self, timestamp: float | None = None) -> float:
         """读取模拟输入（呼吸波形）。"""
@@ -71,4 +86,13 @@ class HalBase(abc.ABC):
 
     @abc.abstractmethod
     def self_check(self) -> tuple[list[SelfCheckResult], bool]:  # pragma: no cover - interface
+        raise NotImplementedError
+
+    @property
+    @abc.abstractmethod
+    def ttl_input_ready(self) -> bool:  # pragma: no cover - interface
+        raise NotImplementedError
+
+    @abc.abstractmethod
+    def read_ai_frame(self, timestamp: float | None = None) -> AnalogInputFrame:  # pragma: no cover
         raise NotImplementedError

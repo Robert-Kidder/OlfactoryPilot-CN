@@ -4,7 +4,7 @@ baseline_commit: fe9d1259a6115e58d14887a3b0948cebb06b0ddb
 
 # Story 3.3: 手动与 TTL 触发模式
 
-Status: ready-for-dev
+Status: in-progress
 Epic: 3 - 协议执行与数据记录
 Story Key: 3-3-manual-vs-ttl-trigger-modes
 Story ID: 3.3
@@ -106,78 +106,78 @@ Story ID: 3.3
 
 ## Tasks / Subtasks
 
-- [ ] 扩展协议执行模型，明确“等待触发”与模式态（AC: 1, 4, 5, 7, 8, 9, 10）
-  - [ ] 在 `app/models/protocol_execution.py` 为 `ProtocolExecutionStatus` 增加 `WAITING_TRIGGER`，保留 3.2 的 `IDLE/READY/WAITING_EXHALE/TRIGGERED/SKIPPED/COMPLETED/BLOCKED/STOPPED` 全部状态，不要用现有 `WAITING_EXHALE` 同时表示两种等待。
-  - [ ] 在 `ProtocolExecutionState` 增加当前运行模式、协议声明模式、触发布防代次/epoch（或等价旧事件失效标识）、触发来源与最近 TTL 时间戳；运行态不得写回 `ProtocolTrial`。
-  - [ ] 扩展 `ProtocolGateEvent` 和 `ProtocolExecutionSnapshot`：提供协议模式、当前模式、`can_select_mode`、`can_manual_trigger`、`ttl_armed`/等待外部 TTL、readiness 原因等 View 所需字段；capability 由 executor 的统一状态矩阵与 readiness 计算。
-  - [ ] 保持现有字段与 `as_dict()` 向后兼容；如重命名 snapshot 字段，必须同步修复所有调用和回归测试。
+- [x] 扩展协议执行模型，明确“等待触发”与模式态（AC: 1, 4, 5, 7, 8, 9, 10）
+  - [x] 在 `app/models/protocol_execution.py` 为 `ProtocolExecutionStatus` 增加 `WAITING_TRIGGER`，保留 3.2 的 `IDLE/READY/WAITING_EXHALE/TRIGGERED/SKIPPED/COMPLETED/BLOCKED/STOPPED` 全部状态，不要用现有 `WAITING_EXHALE` 同时表示两种等待。
+  - [x] 在 `ProtocolExecutionState` 增加当前运行模式、协议声明模式、触发布防代次/epoch（或等价旧事件失效标识）、触发来源与最近 TTL 时间戳；运行态不得写回 `ProtocolTrial`。
+  - [x] 扩展 `ProtocolGateEvent` 和 `ProtocolExecutionSnapshot`：提供协议模式、当前模式、`can_select_mode`、`can_manual_trigger`、`ttl_armed`/等待外部 TTL、readiness 原因等 View 所需字段；capability 由 executor 的统一状态矩阵与 readiness 计算。
+  - [x] 保持现有字段与 `as_dict()` 向后兼容；如重命名 snapshot 字段，必须同步修复所有调用和回归测试。
 
-- [ ] 扩展单一 `ProtocolExecutor` 的触发状态机（AC: 1, 2, 4, 5, 6, 8, 9, 10）
-  - [ ] 修改 `start()`：验证有效协议、统一 readiness 且不存在未关闭的 `active_valve`；`READY` 下保留用户已设置的当前 trial override（没有 override 才采用 `ProtocolTrial.trigger`），`STOPPED` 下从 trial 0 清空 retry/override 后采用首个 trial 声明模式，随后进入 `WAITING_TRIGGER`；其他状态拒绝且不得覆盖旧执行状态。
-  - [ ] 增加 `accept_trigger(source, readiness, timestamp, captured_epoch/sequence)` 或等价 API；只有来源匹配、事件身份有效、状态为 `WAITING_TRIGGER` 且全部 readiness 满足才进入既有 `_enter_waiting()` 呼吸门控路径。
-  - [ ] 增加 `set_trigger_mode(mode, ...)`：校验受控 `TriggerMode`，按 AC5 的允许状态矩阵实现原子清理、幂等、覆盖日志和关阀失败语义；`ready` 切换保持 `ready`，非 SAFE/非就绪/终态不得重布防。
-  - [ ] 修改 `_prepare_after_advance()`：下一 trial 先进入 `WAITING_TRIGGER`，并从该 trial 的 `trigger` 初始化运行模式；不要在刺激结束后直接进入 `WAITING_EXHALE`。
-  - [ ] `process_breath_samples()` 仅在 `WAITING_EXHALE` 消费呼气门控；`WAITING_TRIGGER` 期间仍允许 `GatingService` 更新公共呼吸状态，但不能开阀。
-  - [ ] `skip_current()` 保持“显式跳过当前 trial”的语义，与“手动触发”分开；非 `SAFE` 推进仍按 3.2 阻断。
-  - [ ] `stop()`、`handle_safety_update()` 与协议替换清理必须使旧 epoch 失效；关闭失败语义复用 3.2，不得先清空 `active_valve`。
-  - [ ] 收紧 `reset()`：它不是安全清理入口，只能在无活动阀且旧执行态已清理成功后替换 state/document；`blocked + active_valve` 下的 `start/reset/rearm` 必须拒绝并保留旧 document、trial、模式与活动阀，供既有停止路径重试关闭。
-  - [ ] 增加 `rearm_current()`（或等价恢复 API）：只允许 `BLOCKED + active_valve is None + readiness 全部恢复`，保留当前 trial 与运行模式，清空旧等待/重试并创建新 epoch 后进入 `WAITING_TRIGGER`；`BLOCKED + active_valve` 必须先重试安全关闭。
-  - [ ] 区分动作前拒绝与运行中 readiness 丢失：前者返回 rejected 且状态不变；后者以及 TTL/shared-AI read error 必须使 epoch 失效、进入 `BLOCKED` 并尝试安全关闭活动阀。
+- [x] 扩展单一 `ProtocolExecutor` 的触发状态机（AC: 1, 2, 4, 5, 6, 8, 9, 10）
+  - [x] 修改 `start()`：验证有效协议、统一 readiness 且不存在未关闭的 `active_valve`；`READY` 下保留用户已设置的当前 trial override（没有 override 才采用 `ProtocolTrial.trigger`），`STOPPED` 下从 trial 0 清空 retry/override 后采用首个 trial 声明模式，随后进入 `WAITING_TRIGGER`；其他状态拒绝且不得覆盖旧执行状态。
+  - [x] 增加 `accept_trigger(source, readiness, timestamp, captured_epoch/sequence)` 或等价 API；只有来源匹配、事件身份有效、状态为 `WAITING_TRIGGER` 且全部 readiness 满足才进入既有 `_enter_waiting()` 呼吸门控路径。
+  - [x] 增加 `set_trigger_mode(mode, ...)`：校验受控 `TriggerMode`，按 AC5 的允许状态矩阵实现原子清理、幂等、覆盖日志和关阀失败语义；`ready` 切换保持 `ready`，非 SAFE/非就绪/终态不得重布防。
+  - [x] 修改 `_prepare_after_advance()`：下一 trial 先进入 `WAITING_TRIGGER`，并从该 trial 的 `trigger` 初始化运行模式；不要在刺激结束后直接进入 `WAITING_EXHALE`。
+  - [x] `process_breath_samples()` 仅在 `WAITING_EXHALE` 消费呼气门控；`WAITING_TRIGGER` 期间仍允许 `GatingService` 更新公共呼吸状态，但不能开阀。
+  - [x] `skip_current()` 保持“显式跳过当前 trial”的语义，与“手动触发”分开；非 `SAFE` 推进仍按 3.2 阻断。
+  - [x] `stop()`、`handle_safety_update()` 与协议替换清理必须使旧 epoch 失效；关闭失败语义复用 3.2，不得先清空 `active_valve`。
+  - [x] 收紧 `reset()`：它不是安全清理入口，只能在无活动阀且旧执行态已清理成功后替换 state/document；`blocked + active_valve` 下的 `start/reset/rearm` 必须拒绝并保留旧 document、trial、模式与活动阀，供既有停止路径重试关闭。
+  - [x] 增加 `rearm_current()`（或等价恢复 API）：只允许 `BLOCKED + active_valve is None + readiness 全部恢复`，保留当前 trial 与运行模式，清空旧等待/重试并创建新 epoch 后进入 `WAITING_TRIGGER`；`BLOCKED + active_valve` 必须先重试安全关闭。
+  - [x] 区分动作前拒绝与运行中 readiness 丢失：前者返回 rejected 且状态不变；后者以及 TTL/shared-AI read error 必须使 epoch 失效、进入 `BLOCKED` 并尝试安全关闭活动阀。
 
-- [ ] 建立可测试的 TTL 输入边沿链路（AC: 3, 4, 6, 8, 10）
-  - [ ] 扩展 `app/services/hal.py` 的统一契约，提供 AI0/AI6 共享采样帧或等价多通道读取；同步实现 `RealHAL` 与 `MockHAL`，不得在 controller 或 View 直接 import `nidaqmx`。
-  - [ ] 重构 `RealHAL` 的现有 `_ai_task`：从配置读取 AI0 与 TTL/AI6 通道，在同一个 `Dev1` Analog Input task 中添加两个 channel 并统一创建、启动、读取、停止和释放；严禁创建两个并发 AI task，以避免 NI-DAQmx `resource reserved/-50103`。
-  - [ ] AI6 配置/自检失败不得破坏 manual 所需的 AI0 呼吸路径：关闭任何部分创建的 task 后原子降级为 AI0-only 单 task，并报告 `ttl_input_ready=False`；后续只在重连/重新自检时安全重建 AI0+AI6 task，不得热插入 channel 或与旧 task 并发。
-  - [ ] 共享 AI task 使用硬件定时缓冲采样或经真实 USB-6001 验证的等价单 task 方案，使 AI6 有效采样率达到 `ttl_poll_hz`；Worker 按 channel 顺序/名称解复用，AI0 继续以既有 100Hz 契约向上游发出，AI6 以采集时间戳进入 TTL detector。
-  - [ ] 新增 `app/services/ttl_trigger_service.py`（或等价纯服务）实现高/低阈值迟滞、上升沿单次发射、回落重新布防和去抖；clock/输入应可注入，并在布防时接收 executor/controller 提供的 opaque epoch，单元测试不得依赖真实等待。
-  - [ ] 定义不可变 TTL pulse payload，至少包含采集时间戳和采样/发射时捕获的 `arm_epoch` 或等价单调 sequence；Worker/TTL service 只原样携带身份，不解释协议模式。
-  - [ ] 扩展 `HardwareWorker`，消费共享 AI sample frame/batch，分别发布既有呼吸样本和已去重的 pulse payload；读取异常通过单独错误 signal 或结构化结果上报，不能默认为低电平，也不能由 controller 在 queued signal 到达时补写当前 epoch。
-  - [ ] 修改 worker 调度与缓冲读取，使 `ttl_poll_hz=1000` 不被现有 100Hz 呼吸/5Hz telemetry 循环降成 100Hz；不得用第二个 AI task 或 UI/QTimer 高频轮询规避共享采集设计，也不得阻塞既有两路信号。
-  - [ ] Mock HAL 提供确定性的 TTL 电平/脉冲注入能力，保证 CI 可验证低→高→持续高→低→高序列。
-  - [ ] 不把 Story 3.4 的阀门抖动 p95/20ms 质量门提前塞入本服务；本 story 只保留准确输入时间戳和边沿事件，供后续时序分析复用。
+- [x] 建立可测试的 TTL 输入边沿链路（AC: 3, 4, 6, 8, 10）
+  - [x] 扩展 `app/services/hal.py` 的统一契约，提供 AI0/AI6 共享采样帧或等价多通道读取；同步实现 `RealHAL` 与 `MockHAL`，不得在 controller 或 View 直接 import `nidaqmx`。
+  - [x] 重构 `RealHAL` 的现有 `_ai_task`：从配置读取 AI0 与 TTL/AI6 通道，在同一个 `Dev1` Analog Input task 中添加两个 channel 并统一创建、启动、读取、停止和释放；严禁创建两个并发 AI task，以避免 NI-DAQmx `resource reserved/-50103`。
+  - [x] AI6 配置/自检失败不得破坏 manual 所需的 AI0 呼吸路径：关闭任何部分创建的 task 后原子降级为 AI0-only 单 task，并报告 `ttl_input_ready=False`；后续只在重连/重新自检时安全重建 AI0+AI6 task，不得热插入 channel 或与旧 task 并发。
+  - [x] 共享 AI task 使用硬件定时缓冲采样或经真实 USB-6001 验证的等价单 task 方案，使 AI6 有效采样率达到 `ttl_poll_hz`；Worker 按 channel 顺序/名称解复用，AI0 继续以既有 100Hz 契约向上游发出，AI6 以采集时间戳进入 TTL detector。
+  - [x] 新增 `app/services/ttl_trigger_service.py`（或等价纯服务）实现高/低阈值迟滞、上升沿单次发射、回落重新布防和去抖；clock/输入应可注入，并在布防时接收 executor/controller 提供的 opaque epoch，单元测试不得依赖真实等待。
+  - [x] 定义不可变 TTL pulse payload，至少包含采集时间戳和采样/发射时捕获的 `arm_epoch` 或等价单调 sequence；Worker/TTL service 只原样携带身份，不解释协议模式。
+  - [x] 扩展 `HardwareWorker`，消费共享 AI sample frame/batch，分别发布既有呼吸样本和已去重的 pulse payload；读取异常通过单独错误 signal 或结构化结果上报，不能默认为低电平，也不能由 controller 在 queued signal 到达时补写当前 epoch。
+  - [x] 修改 worker 调度与缓冲读取，使 `ttl_poll_hz=1000` 不被现有 100Hz 呼吸/5Hz telemetry 循环降成 100Hz；不得用第二个 AI task 或 UI/QTimer 高频轮询规避共享采集设计，也不得阻塞既有两路信号。
+  - [x] Mock HAL 提供确定性的 TTL 电平/脉冲注入能力，保证 CI 可验证低→高→持续高→低→高序列。
+  - [x] 不把 Story 3.4 的阀门抖动 p95/20ms 质量门提前塞入本服务；本 story 只保留准确输入时间戳和边沿事件，供后续时序分析复用。
 
-- [ ] 接入 `MainController`，保持业务与硬件边界（AC: 2, 3, 4, 5, 6, 8, 9, 10）
-  - [ ] 在初始化时仅连接一次 worker TTL pulse/error signal；增加 `handle_protocol_trigger_mode_requested()`、`handle_protocol_manual_trigger_requested()`、`handle_ttl_pulse()` 等 slot。
-  - [ ] 建立单一 execution readiness 快照/值对象，汇总有效协议、`telemetry.connected`、`hardware_ready`、`flow_setpoints_ready`、当前 safety state 与 TTL input readiness，并交给 executor；不得把 `SAFE` 当作硬件就绪的替代品。
-  - [ ] 所有 handler 只构造来源、传入 readiness 与 pulse 原始不可变 payload、调用 executor、发布结果；不得自行改 trial index、给旧 pulse 补当前 epoch、直接开阀或复制模式校验。
-  - [ ] 保持 `_write_protocol_valve()` 为 executor 唯一阀门 writer，并继续让关闭使用 `safety_close=True`、打开使用正常安全守卫。
-  - [ ] 增加 TTL/shared-AI error 与 readiness-lost handler：已布防/运行时调用 executor 的统一安全阻断 API，失效 epoch、关闭活动阀并发布中文结果；动作提交前 readiness 不足仍走无副作用 rejected 路径。
-  - [ ] 调整 `handle_protocol_file_selected()`：先完整解析候选协议；解析成功后安全清理旧执行态，确认无残留 `active_valve` 后才原子替换 `state.loaded_protocol` 并 reset 新 document。清理失败时旧 document/trial/mode 不被候选协议覆盖，但 executor 必须进入 `BLOCKED`、保留 `active_valve` 并保持旧 epoch 失效。
-  - [ ] 全局停止、重置、断连与安全态变化继续调用 executor 的统一停止/阻断路径，同时使 TTL epoch 失效；不要在恢复 `SAFE` 时自动消费旧 pulse。
-  - [ ] 恢复 readiness 后不自动执行：`BLOCKED` 且无活动阀时只响应显式 rearm-current，`STOPPED` 时只响应显式 restart；controller 不得自行修改 trial/mode/epoch。
-  - [ ] `_publish_protocol_result()` 继续统一写 `protocol_execution` logger、中文状态栏和协议页 snapshot。
+- [x] 接入 `MainController`，保持业务与硬件边界（AC: 2, 3, 4, 5, 6, 8, 9, 10）
+  - [x] 在初始化时仅连接一次 worker TTL pulse/error signal；增加 `handle_protocol_trigger_mode_requested()`、`handle_protocol_manual_trigger_requested()`、`handle_ttl_pulse()` 等 slot。
+  - [x] 建立单一 execution readiness 快照/值对象，汇总有效协议、`telemetry.connected`、`hardware_ready`、`flow_setpoints_ready`、当前 safety state 与 TTL input readiness，并交给 executor；不得把 `SAFE` 当作硬件就绪的替代品。
+  - [x] 所有 handler 只构造来源、传入 readiness 与 pulse 原始不可变 payload、调用 executor、发布结果；不得自行改 trial index、给旧 pulse 补当前 epoch、直接开阀或复制模式校验。
+  - [x] 保持 `_write_protocol_valve()` 为 executor 唯一阀门 writer，并继续让关闭使用 `safety_close=True`、打开使用正常安全守卫。
+  - [x] 增加 TTL/shared-AI error 与 readiness-lost handler：已布防/运行时调用 executor 的统一安全阻断 API，失效 epoch、关闭活动阀并发布中文结果；动作提交前 readiness 不足仍走无副作用 rejected 路径。
+  - [x] 调整 `handle_protocol_file_selected()`：先完整解析候选协议；解析成功后安全清理旧执行态，确认无残留 `active_valve` 后才原子替换 `state.loaded_protocol` 并 reset 新 document。清理失败时旧 document/trial/mode 不被候选协议覆盖，但 executor 必须进入 `BLOCKED`、保留 `active_valve` 并保持旧 epoch 失效。
+  - [x] 全局停止、重置、断连与安全态变化继续调用 executor 的统一停止/阻断路径，同时使 TTL epoch 失效；不要在恢复 `SAFE` 时自动消费旧 pulse。
+  - [x] 恢复 readiness 后不自动执行：`BLOCKED` 且无活动阀时只响应显式 rearm-current，`STOPPED` 时只响应显式 restart；controller 不得自行修改 trial/mode/epoch。
+  - [x] `_publish_protocol_result()` 继续统一写 `protocol_execution` logger、中文状态栏和协议页 snapshot。
 
-- [ ] 扩展 `ProtocolView` / `MainWindow`（AC: 7, 9, 10）
-  - [ ] 将现有预留 `_manual_trigger_button` / `_ttl_trigger_button` 整理为互斥模式选择 + 独立手动触发动作；使用清晰中文，避免一个“TTL 触发”按钮伪造硬件脉冲。
-  - [ ] 新增 View signals 并在 `MainWindow` 连接到 controller；View 不持有 executor 引用。
-  - [ ] 由 snapshot 统一控制模式选择、手动触发、开始、停止、恢复和下一 trial 的 enablement；capability 按目标动作分别计算，至少区分 manual mode/manual trigger 与 TTL mode/armed，controller/service 仍须二次拒绝非法动作。
-  - [ ] 显示“协议模式”“当前模式”“等待外部 TTL/等待呼气”和最近事件；混合协议推进时 UI 必须切换到下一 trial 的声明模式。
+- [x] 扩展 `ProtocolView` / `MainWindow`（AC: 7, 9, 10）
+  - [x] 将现有预留 `_manual_trigger_button` / `_ttl_trigger_button` 整理为互斥模式选择 + 独立手动触发动作；使用清晰中文，避免一个“TTL 触发”按钮伪造硬件脉冲。
+  - [x] 新增 View signals 并在 `MainWindow` 连接到 controller；View 不持有 executor 引用。
+  - [x] 由 snapshot 统一控制模式选择、手动触发、开始、停止、恢复和下一 trial 的 enablement；capability 按目标动作分别计算，至少区分 manual mode/manual trigger 与 TTL mode/armed，controller/service 仍须二次拒绝非法动作。
+  - [x] 显示“协议模式”“当前模式”“等待外部 TTL/等待呼气”和最近事件；混合协议推进时 UI 必须切换到下一 trial 的声明模式。
 
-- [ ] 增加配置并保持单一配置来源（AC: 3, 9）
-  - [ ] 在 `config/default_config.json` 增加 `ttl_input_channel="Dev1/ai6"`、`ttl_high_threshold_v=2.0`、`ttl_low_threshold_v=0.8`、`ttl_debounce_ms=2`、`ttl_poll_hz=1000`；`ttl_poll_hz` 驱动共享 AI task 的采样/处理能力而非第二个软件轮询 task；高阈值必须大于低阈值，无效/非有限配置使用安全默认值并记录中文警告。
-  - [ ] 在 `config/local_config.example.json` 展示本机 NI 通道覆盖；真实机器差异仍写 `local_config.json`，不新增第二套配置文件。
-  - [ ] 保持 Python 3.11、PySide6 6.7.2、nidaqmx 0.9.0、pytest/pytest-qt 与现有 requirements；本 story 不增加外部依赖。
+- [x] 增加配置并保持单一配置来源（AC: 3, 9）
+  - [x] 在 `config/default_config.json` 增加 `ttl_input_channel="Dev1/ai6"`、`ttl_high_threshold_v=2.0`、`ttl_low_threshold_v=0.8`、`ttl_debounce_ms=2`、`ttl_poll_hz=1000`；`ttl_poll_hz` 驱动共享 AI task 的采样/处理能力而非第二个软件轮询 task；高阈值必须大于低阈值，无效/非有限配置使用安全默认值并记录中文警告。
+  - [x] 在 `config/local_config.example.json` 展示本机 NI 通道覆盖；真实机器差异仍写 `local_config.json`，不新增第二套配置文件。
+  - [x] 保持 Python 3.11、PySide6 6.7.2、nidaqmx 0.9.0、pytest/pytest-qt 与现有 requirements；本 story 不增加外部依赖。
 
-- [ ] 补充自动化测试（AC: 全部）
-  - [ ] 扩展 `tests/test_protocol_executor.py`：开始进入 `WAITING_TRIGGER`；manual/ttl 正确来源接受；错误来源、陈旧 epoch、重复事件、非 SAFE 与错误状态拒绝；接受后仍须呼气才开阀。
-  - [ ] 显式覆盖无协议时的 `start/manual/TTL` 三个入口，以及未连接、自检失败、流量未准备、TTL input 未就绪的对应入口；断言状态、trial、epoch、等待起点与阀门均不变且中文原因可操作。
-  - [ ] 覆盖模式切换完整矩阵：`ready` 保持 `ready`；合法等待态清理后回 `WAITING_TRIGGER`；幂等；非 SAFE/非就绪/终态拒绝；当前 trial override 不改 frozen 协议；下一 trial 恢复声明模式；活动阀关闭成功/失败两条路径。
-  - [ ] 覆盖 `close_failed -> start/reset/rearm` 全部拒绝，旧 document、trial、模式、epoch 与 `active_valve` 保持不变，随后停止路径仍可重试关闭。
-  - [ ] 覆盖恢复矩阵：安全阻断且无活动阀时，readiness 恢复不会自动推进，显式 `rearm_current` 保留当前 trial/mode、清空 retry 并创建新 epoch；`STOPPED -> restart` 从 trial 0 和首个声明模式开始；`COMPLETED/IDLE` 仍拒绝直接开始。
-  - [ ] 新增 `tests/test_ttl_trigger_service.py`：阈值边界、迟滞、持续高电平只发一次、低电平重新布防、bounce 去抖、无效数值/读取错误、可注入时间以及 pulse payload 捕获布防时 epoch/sequence。
-  - [ ] 增加 `ttl -> manual -> ttl` 且 AI6 始终高电平的竞态测试：切回 TTL 不得把旧高电平当作新上升沿，必须先观测有效回落再接收下一次 rise。
-  - [ ] 扩展 Real/Mock HAL 与 Worker 测试：Dev1 只创建一个 AI task 且包含 AI0/AI6；sample frame channel 映射正确；AI0 仍按 100Hz 上送；AI6 pulse 发出一次且携带原始时间戳和发射时事件身份；共享读取异常上报而不是触发或静默。
-  - [ ] 扩展 controller 集成测试：signal 只连接一次、manual/TTL handler 转发 readiness 与不可变 pulse payload、模式切换前入队而切换后送达的旧 pulse 被拒绝、错误模式不调用阀门、协议替换关闭失败后旧 document 保留但状态为 BLOCKED/epoch 失效、停止/断连使旧 pulse 失效。
-  - [ ] 覆盖 TTL/shared-AI read error：等待或刺激中发生错误时 executor 进入 BLOCKED、epoch 失效、活动阀走安全关闭；动作前 AI6 未就绪只拒绝 TTL，不改变执行状态。
-  - [ ] 扩展 `tests/test_protocol_view.py`：保留 `idle/skipped` 中文状态；AI6 未就绪时 manual mode/start/trigger 仍可用而 TTL mode/armed 不可用；覆盖互斥模式、恢复 capability、TTL 等待显示和 View signal；不要在 UI 测试中断言业务状态机内部细节。
-  - [ ] 保留并迁移 3.2 characterization tests：在 `start()` 后注入一次匹配触发再继续验证既有呼吸超时、开关阀、close_failed、非 SAFE 和 BLOCKED 无日志风暴行为，不得为适配 `WAITING_TRIGGER` 删除或弱化旧断言。
-  - [ ] 回归 `tests/test_protocol_parser.py`、`tests/test_protocol_executor.py`、`tests/test_integration_gating.py`、`tests/test_protocol_view.py`、`tests/test_valve_service.py`、安全与全局停止相关测试。
+- [x] 补充自动化测试（AC: 全部）
+  - [x] 扩展 `tests/test_protocol_executor.py`：开始进入 `WAITING_TRIGGER`；manual/ttl 正确来源接受；错误来源、陈旧 epoch、重复事件、非 SAFE 与错误状态拒绝；接受后仍须呼气才开阀。
+  - [x] 显式覆盖无协议时的 `start/manual/TTL` 三个入口，以及未连接、自检失败、流量未准备、TTL input 未就绪的对应入口；断言状态、trial、epoch、等待起点与阀门均不变且中文原因可操作。
+  - [x] 覆盖模式切换完整矩阵：`ready` 保持 `ready`；合法等待态清理后回 `WAITING_TRIGGER`；幂等；非 SAFE/非就绪/终态拒绝；当前 trial override 不改 frozen 协议；下一 trial 恢复声明模式；活动阀关闭成功/失败两条路径。
+  - [x] 覆盖 `close_failed -> start/reset/rearm` 全部拒绝，旧 document、trial、模式、epoch 与 `active_valve` 保持不变，随后停止路径仍可重试关闭。
+  - [x] 覆盖恢复矩阵：安全阻断且无活动阀时，readiness 恢复不会自动推进，显式 `rearm_current` 保留当前 trial/mode、清空 retry 并创建新 epoch；`STOPPED -> restart` 从 trial 0 和首个声明模式开始；`COMPLETED/IDLE` 仍拒绝直接开始。
+  - [x] 新增 `tests/test_ttl_trigger_service.py`：阈值边界、迟滞、持续高电平只发一次、低电平重新布防、bounce 去抖、无效数值/读取错误、可注入时间以及 pulse payload 捕获布防时 epoch/sequence。
+  - [x] 增加 `ttl -> manual -> ttl` 且 AI6 始终高电平的竞态测试：切回 TTL 不得把旧高电平当作新上升沿，必须先观测有效回落再接收下一次 rise。
+  - [x] 扩展 Real/Mock HAL 与 Worker 测试：Dev1 只创建一个 AI task 且包含 AI0/AI6；sample frame channel 映射正确；AI0 仍按 100Hz 上送；AI6 pulse 发出一次且携带原始时间戳和发射时事件身份；共享读取异常上报而不是触发或静默。
+  - [x] 扩展 controller 集成测试：signal 只连接一次、manual/TTL handler 转发 readiness 与不可变 pulse payload、模式切换前入队而切换后送达的旧 pulse 被拒绝、错误模式不调用阀门、协议替换关闭失败后旧 document 保留但状态为 BLOCKED/epoch 失效、停止/断连使旧 pulse 失效。
+  - [x] 覆盖 TTL/shared-AI read error：等待或刺激中发生错误时 executor 进入 BLOCKED、epoch 失效、活动阀走安全关闭；动作前 AI6 未就绪只拒绝 TTL，不改变执行状态。
+  - [x] 扩展 `tests/test_protocol_view.py`：保留 `idle/skipped` 中文状态；AI6 未就绪时 manual mode/start/trigger 仍可用而 TTL mode/armed 不可用；覆盖互斥模式、恢复 capability、TTL 等待显示和 View signal；不要在 UI 测试中断言业务状态机内部细节。
+  - [x] 保留并迁移 3.2 characterization tests：在 `start()` 后注入一次匹配触发再继续验证既有呼吸超时、开关阀、close_failed、非 SAFE 和 BLOCKED 无日志风暴行为，不得为适配 `WAITING_TRIGGER` 删除或弱化旧断言。
+  - [x] 回归 `tests/test_protocol_parser.py`、`tests/test_protocol_executor.py`、`tests/test_integration_gating.py`、`tests/test_protocol_view.py`、`tests/test_valve_service.py`、安全与全局停止相关测试。
 
 - [ ] 工程验证（AC: 全部）
-  - [ ] 运行 `python -m pytest tests/test_ttl_trigger_service.py tests/test_protocol_executor.py tests/test_integration_gating.py tests/test_protocol_view.py`。
-  - [ ] 运行 `python -m pytest tests/test_protocol_parser.py tests/test_valve_service.py`。
-  - [ ] 运行 `python -m pytest`。
-  - [ ] 运行 `python -m ruff check app tests`。
+  - [x] 运行 `python -m pytest tests/test_ttl_trigger_service.py tests/test_protocol_executor.py tests/test_integration_gating.py tests/test_protocol_view.py`。
+  - [x] 运行 `python -m pytest tests/test_protocol_parser.py tests/test_valve_service.py`。
+  - [x] 运行 `python -m pytest`。
+  - [x] 运行 `python -m ruff check app tests`。
   - [ ] 在真实或 NI MAX 模拟的 USB-6001 上验证 Dev1 单一 AI task 同时读取 AI0/AI6，不出现 `-50103/resource reserved`；记录 AI6 有效采样率、AI0 100Hz 输出连续性及读取错误安全降级结果到 sprint artifact。
 
 ## Dev Notes
@@ -355,18 +355,63 @@ Story ID: 3.3
 
 ### Agent Model Used
 
-待开发智能体填写
+OpenAI Codex（GPT-5）
+
+### Implementation Plan
+
+- 按 ATDD 推荐顺序执行 RED-GREEN-REFACTOR：先扩展 `ProtocolExecutor` 状态与统一 readiness，再实现纯 TTL detector，随后贯通 HAL/Worker、Controller 和 View。
+- 保持单一 `ProtocolExecutor`、单一 Dev1 AI task 和既有 `ProtocolExecutor -> MainController writer -> ValveService -> HAL` 危险动作链路。
+- 使用不可变 `TtlPulse(timestamp, arm_epoch, sequence)` 与单调 epoch 隔离 queued/stale pulse，并以确定性样本和可控时间测试迟滞/去抖。
+- 最后迁移 3.2 characterization、执行 3.1 parser/ValveService 回归、全量 pytest、ruff 与只读真实硬件检查。
 
 ### Debug Log References
+
+- `D:\miniconda3\envs\code\python.exe -m pytest tests/test_ttl_trigger_service.py tests/test_protocol_executor.py tests/test_integration_gating.py tests/test_protocol_view.py`：51 passed。
+- `D:\miniconda3\envs\code\python.exe -m pytest tests/test_protocol_parser.py tests/test_valve_service.py`：23 passed。
+- `D:\miniconda3\envs\code\python.exe -m pytest`：199 passed（Python 3.11.15）。
+- `D:\miniconda3\envs\code\python.exe -m ruff check app tests`：All checks passed。
+- NI 设备只读枚举：发现 `Dev1` / `Dev2` 为非模拟 USB-6001，另有 `SimDev1`。
+- Dev1 单 task AI0/AI6 真实读取：硬件定时 1000 Hz/通道、200 samples/通道在 30 秒外层超时；随后双通道单帧按需读取在 18 秒外层超时。DAQmx 未返回样本或明确 `-50103`，因此无法记录有效采样率和 AI0 100 Hz 连续性，真实硬件验证项保持未完成。
 
 ### Completion Notes List
 
 - Ultimate context engine analysis completed - comprehensive developer guide created.
+- 已新增 `WAITING_TRIGGER`、统一 readiness、manual/TTL trigger 接受与拒绝、模式 override/切换、epoch/sequence 去重、显式 rearm 和关阀失败恢复；frozen 协议模型保持不变。
+- 已新增 TTL 迟滞/去抖纯服务和不可变 pulse，RealHAL 以唯一 `_ai_task` 共享 AI0/AI6，AI6 初始化失败会关闭部分 task 后降级为 AI0-only；MockHAL 与 Worker 使用相同 frame 契约。
+- Controller 仅转发 readiness/原始 pulse 并统一发布结构化事件；协议替换先清理旧执行态，失败保留旧 document/mode/trial/active valve；View 只发 intent 并按 snapshot 渲染。
+- 已覆盖 WAITING_TRIGGER、manual/TTL、模式切换、readiness、陈旧/重复 pulse、持续高电平、TTL read error、close_failed 恢复、协议替换原子性及 3.1/3.2 回归；全量 199 tests 与 ruff 通过。
+- 未实现 Story 3.4 的低抖动质量门，也未实现 Story 3.5 的 `.raw/.log` 会话文件输出。
+- 软件实现和自动化验证完成；真实 Dev1 双通道只读 task 两次超时，工程验证最后一项受硬件/DAQmx 运行态阻塞，Story 保持 `in-progress`。
 
 ### File List
+
+- app/controllers/main_controller.py
+- app/main.py
+- app/models/__init__.py
+- app/models/protocol_execution.py
+- app/services/__init__.py
+- app/services/hal.py
+- app/services/mock_hal.py
+- app/services/protocol_executor.py
+- app/services/real_hal.py
+- app/services/ttl_trigger_service.py
+- app/views/main_window.py
+- app/views/protocol_view.py
+- app/workers/hardware_worker.py
+- config/default_config.json
+- config/local_config.example.json
+- docs/sprint-artifacts/3-3-manual-vs-ttl-trigger-modes.md
+- docs/sprint-artifacts/sprint-status.yaml
+- tests/test_integration_gating.py
+- tests/test_protocol_executor.py
+- tests/test_protocol_trigger_integration.py
+- tests/test_protocol_view.py
+- tests/test_ttl_input.py
+- tests/test_ttl_trigger_service.py
 
 ## Change Log
 
 - 2026-07-18：创建 Story 3.3 手动与 TTL 触发模式，状态设为 ready-for-dev。
 - 2026-07-18：补齐统一 readiness、模式切换状态矩阵、关阀失败恢复、TTL 事件身份与边界竞态测试要求。
 - 2026-07-18：收敛 AI0/AI6 单 task 采集、协议替换失败、显式恢复路径及运行中 readiness 丢失语义。
+- 2026-07-18：按 ATDD 红灯切片完成 manual/TTL 触发状态机、共享 AI HAL/Worker 链路、Controller/View 接入与 199 项自动化回归；真实 Dev1 读取超时，保留工程验证项和 Story 状态为 in-progress。

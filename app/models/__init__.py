@@ -1,6 +1,7 @@
 from .app_state import AppState, Telemetry
 from .protocol import ProtocolDocument, ProtocolMetadata, ProtocolTrial, TriggerMode
 from .protocol_execution import (
+    ProtocolExecutionReadiness,
     ProtocolExecutionSnapshot,
     ProtocolExecutionState,
     ProtocolExecutionStatus,
@@ -12,6 +13,7 @@ from .self_check import SelfCheckResult
 __all__ = [
     "AppState",
     "ProtocolDocument",
+    "ProtocolExecutionReadiness",
     "ProtocolExecutionSnapshot",
     "ProtocolExecutionState",
     "ProtocolExecutionStatus",

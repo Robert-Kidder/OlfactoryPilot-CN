@@ -2,7 +2,7 @@ from .breath_metrics import BreathSampleBuffer, FrameRateTracker, FrameStats  # 
 from .calibration_service import CalibrationResult, CalibrationSession  # noqa: F401
 from .flow_service import FlowApplyResult, FlowService  # noqa: F401
 from .gating_service import GatingService  # noqa: F401
-from .hal import HalBase, HalInterface  # noqa: F401
+from .hal import AnalogInputFrame, HalBase, HalInterface  # noqa: F401
 from .hardware_check_service import HardwareCheckService  # noqa: F401
 from .mock_hal import MockHAL  # noqa: F401
 from .protocol_executor import (  # noqa: F401
@@ -14,6 +14,12 @@ from .protocol_parser import ProtocolParseError, parse_protocol_file  # noqa: F4
 from .real_hal import RealHAL  # noqa: F401
 from .safety_manager import SafetyManager  # noqa: F401
 from .shutdown_service import ShutdownService  # noqa: F401
+from .ttl_trigger_service import (  # noqa: F401
+    TtlInputError,
+    TtlPulse,
+    TtlTriggerConfig,
+    TtlTriggerService,
+)
 from .valve_service import ValveService  # noqa: F401
 
 __all__ = [
@@ -27,6 +33,7 @@ __all__ = [
     "FlowApplyResult",
     "HalBase",
     "HalInterface",
+    "AnalogInputFrame",
     "HardwareCheckService",
     "MockHAL",
     "ProtocolParseError",
@@ -36,6 +43,10 @@ __all__ = [
     "RealHAL",
     "SafetyManager",
     "ShutdownService",
+    "TtlInputError",
+    "TtlPulse",
+    "TtlTriggerConfig",
+    "TtlTriggerService",
     "ValveService",
     "parse_protocol_file",
 ]

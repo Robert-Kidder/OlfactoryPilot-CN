@@ -3,18 +3,43 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import StrEnum
 
-from app.models.protocol import ProtocolDocument, ProtocolTrial
+from app.models.protocol import ProtocolDocument, ProtocolTrial, TriggerMode
 
 
 class ProtocolExecutionStatus(StrEnum):
     IDLE = "idle"
     READY = "ready"
+    WAITING_TRIGGER = "waiting_trigger"
     WAITING_EXHALE = "waiting_exhale"
     TRIGGERED = "triggered"
     SKIPPED = "skipped"
     COMPLETED = "completed"
     BLOCKED = "blocked"
     STOPPED = "stopped"
+
+
+@dataclass(frozen=True)
+class ProtocolExecutionReadiness:
+    connected: bool = False
+    hardware_ready: bool = False
+    flow_setpoints_ready: bool = False
+    safety_state: str = "UNKNOWN"
+    ttl_input_ready: bool = False
+
+    def rejection_reason(self, *, has_protocol: bool, require_ttl: bool = False) -> str:
+        if not has_protocol:
+            return "请先加载有效协议。"
+        if not self.connected:
+            return "硬件尚未连接，请先连接设备。"
+        if not self.hardware_ready:
+            return "基础硬件或 AI0 自检未通过，请先完成自检。"
+        if not self.flow_setpoints_ready:
+            return "MFC 流量设定尚未建立，请先设置并确认流量。"
+        if self.safety_state != "SAFE":
+            return f"安全状态为 {self.safety_state}，请恢复 SAFE 后再继续。"
+        if require_ttl and not self.ttl_input_ready:
+            return "TTL 输入 AI6 尚未就绪，请检查共享模拟输入采集链路。"
+        return ""
 
 
 @dataclass(frozen=True)
@@ -32,6 +57,11 @@ class ProtocolGateEvent:
     message: str = ""
     planned_duration_ms: float | None = None
     actual_duration_ms: float | None = None
+    protocol_mode: str | None = None
+    current_mode: str | None = None
+    trigger_source: str | None = None
+    arm_epoch: int | None = None
+    pulse_sequence: int | None = None
 
     def as_dict(self) -> dict:
         return {
@@ -48,6 +78,11 @@ class ProtocolGateEvent:
             "message": self.message,
             "planned_duration_ms": self.planned_duration_ms,
             "actual_duration_ms": self.actual_duration_ms,
+            "protocol_mode": self.protocol_mode,
+            "current_mode": self.current_mode,
+            "trigger_source": self.trigger_source,
+            "arm_epoch": self.arm_epoch,
+            "pulse_sequence": self.pulse_sequence,
         }
 
 
@@ -57,9 +92,18 @@ class ProtocolExecutionState:
     status: ProtocolExecutionStatus = ProtocolExecutionStatus.IDLE
     trial_index: int = 0
     retry_count: int = 0
+    declared_mode: TriggerMode | None = None
+    current_mode: TriggerMode | None = None
+    mode_override: TriggerMode | None = None
+    arm_epoch: int = 0
+    waiting_trigger_started_at: float | None = None
     waiting_started_at: float | None = None
     triggered_at: float | None = None
     active_valve: int | None = None
+    trigger_source: str | None = None
+    last_ttl_timestamp: float | None = None
+    last_pulse_sequence: int = -1
+    ttl_armed: bool = False
     recent_event: ProtocolGateEvent | None = None
     events: list[ProtocolGateEvent] = field(default_factory=list)
 
@@ -87,3 +131,16 @@ class ProtocolExecutionSnapshot:
     wait_elapsed_ms: int = 0
     planned_duration_ms: float | None = None
     recent_event: str = "-"
+    protocol_mode: str = "-"
+    current_mode: str = "-"
+    can_select_mode: bool = False
+    can_select_manual_mode: bool = False
+    can_select_ttl_mode: bool = False
+    can_manual_trigger: bool = False
+    can_rearm: bool = False
+    ttl_armed: bool = False
+    waiting_external_ttl: bool = False
+    readiness_reason: str = ""
+    trigger_source: str = "-"
+    last_ttl_timestamp: float | None = None
+    arm_epoch: int = 0

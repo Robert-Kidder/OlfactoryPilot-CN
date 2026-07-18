@@ -8,6 +8,7 @@
     "Dev3"
   ],
   "ai0_channel": "Dev1/ai0",
+  "ttl_input_channel": "Dev1/ai6",
   "signal_offset": 3.0472976569884125e-07,
   "signal_gain": 10.000009535533744
 }

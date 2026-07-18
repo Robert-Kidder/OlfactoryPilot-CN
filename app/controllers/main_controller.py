@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 
 from PySide6.QtCore import QObject, QTimer, Signal, Slot
 
-from app.models import AppState, SafetyState
+from app.models import AppState, ProtocolExecutionReadiness, SafetyState, TriggerMode
 from app.services import (
     CalibrationSession,
     FlowApplyResult,
@@ -24,6 +24,7 @@ from app.services import (
     ProtocolParseError,
     SafetyManager,
     ShutdownService,
+    TtlPulse,
     ValveService,
     parse_protocol_file,
 )
@@ -100,6 +101,10 @@ class MainController(QObject):
         self.worker.self_check_completed.connect(self.handle_self_check)
         if hasattr(self.worker, "breath_samples"):
             self.worker.breath_samples.connect(self.handle_breath_samples)
+        if hasattr(self.worker, "ttl_pulse"):
+            self.worker.ttl_pulse.connect(self.handle_ttl_pulse)
+        if hasattr(self.worker, "ttl_input_error"):
+            self.worker.ttl_input_error.connect(self.handle_ttl_input_error)
         self._pretest_sequence_completed.connect(self._handle_pretest_sequence_completed)
         self._startup_zero_completed.connect(self._handle_startup_zero_completed)
         self._breath_logger = logging.getLogger("breath_viz")
@@ -192,6 +197,13 @@ class MainController(QObject):
             self._publish_protocol_result(
                 self.protocol_executor.handle_safety_update(
                     self.state.telemetry.safety_state,
+                    timestamp=self.state.telemetry.timestamp or time.time(),
+                )
+            )
+        else:
+            self._publish_protocol_result(
+                self.protocol_executor.handle_readiness_lost(
+                    self._execution_readiness(),
                     timestamp=self.state.telemetry.timestamp or time.time(),
                 )
             )
@@ -653,6 +665,13 @@ class MainController(QObject):
             self.view.render_self_check(self.state.self_check_results, hardware_ready)
         if hardware_ready:
             self._reset_startup_flows_to_zero_async()
+        else:
+            self._publish_protocol_result(
+                self.protocol_executor.handle_readiness_lost(
+                    self._execution_readiness(),
+                    timestamp=time.time(),
+                )
+            )
         self._refresh_toolbar_state()
 
     def request_self_check(self) -> None:
@@ -689,8 +708,28 @@ class MainController(QObject):
             LOG.warning("Protocol parse failed | path=%s | error=%s", path, exc)
             return False
 
+        if self.protocol_executor.state.document is not None:
+            cleanup = self.protocol_executor.stop(
+                safety_state=self.state.telemetry.safety_state,
+                timestamp=time.time(),
+                message="加载新协议前已清理旧执行状态。",
+            )
+            self._publish_protocol_result(cleanup)
+            if cleanup.state.active_valve is not None or any(
+                event.result == "close_failed" for event in cleanup.events
+            ):
+                message = "旧协议安全清理失败，新协议未加载；请检查硬件并再次停止。"
+                self.state.update_status(message)
+                if self.view:
+                    self.view.update_status(message)
+                return False
+
+        reset_result = self.protocol_executor.reset(document)
+        if reset_result.events:
+            self._publish_protocol_result(reset_result)
+            return False
         self.state.loaded_protocol = document
-        self._publish_protocol_result(self.protocol_executor.reset(document))
+        self._sync_worker_ttl_arm()
         message = f"协议加载成功：{document.source_name}，共 {len(document.trials)} 个 trial"
         self.state.update_status(message)
         if self.view:
@@ -703,10 +742,69 @@ class MainController(QObject):
 
     @Slot()
     def handle_protocol_start_requested(self) -> None:
+        document = (
+            self.state.loaded_protocol
+            if self.protocol_executor.state.document is None
+            else None
+        )
         self._publish_protocol_result(
             self.protocol_executor.start(
-                self.state.loaded_protocol,
+                document,
+                readiness=self._execution_readiness(),
+                timestamp=time.time(),
+            )
+        )
+
+    @Slot()
+    def handle_protocol_manual_trigger_requested(self) -> None:
+        self._publish_protocol_result(
+            self.protocol_executor.accept_trigger(
+                TriggerMode.MANUAL,
+                readiness=self._execution_readiness(),
+                timestamp=time.time(),
+            )
+        )
+
+    @Slot(str)
+    def handle_protocol_trigger_mode_requested(self, mode: str) -> None:
+        self._publish_protocol_result(
+            self.protocol_executor.set_trigger_mode(
+                mode,
+                readiness=self._execution_readiness(),
+                timestamp=time.time(),
+            )
+        )
+
+    @Slot(object)
+    def handle_ttl_pulse(self, pulse: object) -> None:
+        if not isinstance(pulse, TtlPulse):
+            LOG.warning("忽略无效 TTL pulse payload：%r", pulse)
+            return
+        self._publish_protocol_result(
+            self.protocol_executor.accept_trigger(
+                TriggerMode.TTL,
+                readiness=self._execution_readiness(),
+                timestamp=pulse.timestamp,
+                captured_epoch=pulse.arm_epoch,
+                sequence=pulse.sequence,
+            )
+        )
+
+    @Slot(str)
+    def handle_ttl_input_error(self, message: str) -> None:
+        self._publish_protocol_result(
+            self.protocol_executor.handle_input_error(
+                message,
                 safety_state=self.state.telemetry.safety_state,
+                timestamp=time.time(),
+            )
+        )
+
+    @Slot()
+    def handle_protocol_rearm_requested(self) -> None:
+        self._publish_protocol_result(
+            self.protocol_executor.rearm_current(
+                readiness=self._execution_readiness(),
                 timestamp=time.time(),
             )
         )
@@ -732,6 +830,13 @@ class MainController(QObject):
 
     @Slot()
     def handle_protocol_executor_tick(self) -> None:
+        readiness_result = self.protocol_executor.handle_readiness_lost(
+            self._execution_readiness(),
+            timestamp=time.time(),
+        )
+        if readiness_result.events:
+            self._publish_protocol_result(readiness_result)
+            return
         self._publish_protocol_result(
             self.protocol_executor.tick(
                 safety_state=self.state.telemetry.safety_state,
@@ -911,13 +1016,30 @@ class MainController(QObject):
                     self.view.update_status(self.state.status_message)
         if result.events or render_even_without_events:
             self._render_protocol_execution_state()
+        self._sync_worker_ttl_arm()
+
+    def _execution_readiness(self) -> ProtocolExecutionReadiness:
+        return ProtocolExecutionReadiness(
+            connected=bool(self.state.telemetry.connected),
+            hardware_ready=bool(self.state.hardware_ready),
+            flow_setpoints_ready=bool(self.state.flow_setpoints_ready),
+            safety_state=self.state.telemetry.safety_state,
+            ttl_input_ready=bool(getattr(self.worker, "ttl_input_ready", False)),
+        )
+
+    def _sync_worker_ttl_arm(self) -> None:
+        state = self.protocol_executor.state
+        if state.ttl_armed:
+            self.worker.arm_ttl(arm_epoch=state.arm_epoch)
+        else:
+            self.worker.disarm_ttl()
 
     def _render_protocol_execution_state(self) -> None:
         if self.view and hasattr(self.view, "protocol_view"):
             self.view.protocol_view.render_execution_state(
                 self.protocol_executor.snapshot(
                     time.time(),
-                    safety_state=self.state.telemetry.safety_state,
+                    readiness=self._execution_readiness(),
                 )
             )
 

@@ -9,6 +9,7 @@ from app.models import SelfCheckResult
 from app.services.hal import HalInterface
 from app.services.hardware_check_service import HardwareCheckService
 from app.services.mock_hal import MockHAL
+from app.services.ttl_trigger_service import TtlTriggerConfig, TtlTriggerService
 
 LOG = logging.getLogger(__name__)
 
@@ -18,12 +19,17 @@ class HardwareWorker(QThread):
     status_message = Signal(str)
     self_check_completed = Signal(list, bool)
     breath_samples = Signal(list, float)
+    ttl_pulse = Signal(object)
+    ttl_input_error = Signal(str)
+    ttl_readiness_changed = Signal(bool)
 
     def __init__(
         self,
         telemetry_hz: int = 5,
         check_service: HardwareCheckService | None = None,
         breath_hz: int = 100,
+        ttl_poll_hz: int = 1000,
+        ttl_config: dict | TtlTriggerConfig | None = None,
         hal: HalInterface | None = None,
         simulation: bool = False,
     ) -> None:
@@ -31,6 +37,17 @@ class HardwareWorker(QThread):
         self._running = False
         self.telemetry_interval_ms = self._compute_interval_ms(telemetry_hz)
         self.breath_interval_ms = self._compute_interval_ms(breath_hz)
+        config = (
+            ttl_config
+            if isinstance(ttl_config, TtlTriggerConfig)
+            else TtlTriggerConfig.from_mapping(ttl_config)
+        )
+        if ttl_config is None:
+            config = TtlTriggerConfig.from_mapping({"ttl_poll_hz": ttl_poll_hz})
+        self.ttl_service = TtlTriggerService(config)
+        self.ttl_interval_ms = self._compute_interval_ms(config.poll_hz)
+        self._breath_emit_every = max(1, round(config.poll_hz / max(1, breath_hz)))
+        self._ai_sample_count = 0
         self.check_service = check_service
         self.hal: HalInterface = hal or MockHAL()
         self.simulation_mode = simulation
@@ -48,16 +65,16 @@ class HardwareWorker(QThread):
         self.status_message.emit(f"硬件线程已启动{mode_label}")
         self._run_self_check()
         next_telemetry = time.time()
-        next_breath = time.time()
+        next_ai = time.time()
         while self._running:
             now = time.time()
             if self._self_check_requested:
                 self._self_check_requested = False
                 self._run_self_check()
 
-            if now >= next_breath:
-                self._emit_breath_sample(now)
-                next_breath += max(self.breath_interval_ms, 1) / 1000.0
+            if now >= next_ai:
+                self._emit_ai_frame(now)
+                next_ai += max(self.ttl_interval_ms, 1) / 1000.0
 
             if now >= next_telemetry:
                 payload: dict[str, object] = {
@@ -69,7 +86,7 @@ class HardwareWorker(QThread):
                 self.telemetry_ready.emit(payload)
                 next_telemetry += max(self.telemetry_interval_ms, 1) / 1000.0
 
-            sleep_ms = min(self.telemetry_interval_ms, self.breath_interval_ms)
+            sleep_ms = min(self.telemetry_interval_ms, self.ttl_interval_ms)
             self.msleep(max(1, sleep_ms))
         self.status_message.emit("硬件线程已停止")
 
@@ -109,6 +126,17 @@ class HardwareWorker(QThread):
         """Explicitly mark hardware as disconnected for telemetry loop."""
         self._self_check_requested = False
         self._connected = False
+        self.disarm_ttl()
+
+    @property
+    def ttl_input_ready(self) -> bool:
+        return bool(getattr(self.hal, "ttl_input_ready", False))
+
+    def arm_ttl(self, *, arm_epoch: int) -> None:
+        self.ttl_service.arm(arm_epoch=arm_epoch)
+
+    def disarm_ttl(self) -> None:
+        self.ttl_service.disarm()
 
     # Shutdown helpers for safe-stop scenarios.
     def close_all_channels(self) -> bool:
@@ -205,6 +233,21 @@ class HardwareWorker(QThread):
             LOG.exception("HAL read_ai0 failed")
             value = 0.0
         self.breath_samples.emit([value], timestamp)
+
+    def _emit_ai_frame(self, timestamp: float) -> None:
+        try:
+            frame = self.hal.read_ai_frame(timestamp)
+            if self._ai_sample_count % self._breath_emit_every == 0:
+                self.breath_samples.emit([float(frame.ai0)], float(frame.timestamp))
+            self._ai_sample_count += 1
+            if frame.ai6 is not None:
+                pulse = self.ttl_service.process_sample(float(frame.ai6), timestamp=float(frame.timestamp))
+                if pulse is not None:
+                    self.ttl_pulse.emit(pulse)
+        except Exception as exc:  # pragma: no cover - hardware boundary
+            message = f"TTL/共享 AI 读取失败：{exc}；协议执行已请求安全阻断。"
+            LOG.exception(message)
+            self.ttl_input_error.emit(message)
 
     def _read_flow(self) -> float:
         if not self.hal:

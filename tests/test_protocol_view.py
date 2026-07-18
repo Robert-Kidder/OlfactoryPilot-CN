@@ -41,7 +41,9 @@ def test_protocol_view_renders_summary_and_keeps_actions_disabled(qt_app, qtbot)
     assert view._preview_table.rowCount() == 1
     assert view._start_button.isEnabled() is False
     assert view._manual_trigger_button.isEnabled() is False
-    assert view._ttl_trigger_button.isEnabled() is False
+    assert view._manual_mode_button.isEnabled() is False
+    assert view._ttl_mode_button.isEnabled() is False
+    assert not hasattr(view, "_ttl_trigger_button")
 
 
 def test_protocol_view_renders_chinese_parse_error(qt_app, qtbot) -> None:
@@ -75,6 +77,12 @@ def test_protocol_view_renders_execution_state_and_action_enablement(qt_app, qtb
             wait_elapsed_ms=1200,
             planned_duration_ms=100,
             recent_event="开始等待呼气",
+            protocol_mode="manual",
+            current_mode="manual",
+            can_select_mode=True,
+            can_select_manual_mode=True,
+            can_select_ttl_mode=True,
+            can_manual_trigger=False,
         )
     )
 
@@ -85,6 +93,71 @@ def test_protocol_view_renders_execution_state_and_action_enablement(qt_app, qtb
     assert view._start_button.isEnabled() is False
     assert view._stop_button.isEnabled() is True
     assert view._next_trial_button.isEnabled() is True
+    assert view._manual_mode_button.isChecked() is True
+
+
+def test_protocol_view_emits_mutually_exclusive_mode_and_manual_intents(qt_app, qtbot) -> None:
+    view = ProtocolView()
+    qtbot.addWidget(view)
+    modes: list[str] = []
+    manual_requests: list[bool] = []
+    view.trigger_mode_requested.connect(modes.append)
+    view.manual_trigger_requested.connect(lambda: manual_requests.append(True))
+    view.render_execution_state(
+        ProtocolExecutionSnapshot(
+            status=ProtocolExecutionStatus.WAITING_TRIGGER,
+            status_text="等待触发",
+            has_protocol=True,
+            can_start=False,
+            can_stop=True,
+            can_advance=True,
+            protocol_mode="manual",
+            current_mode="manual",
+            can_select_mode=True,
+            can_select_manual_mode=True,
+            can_select_ttl_mode=True,
+            can_manual_trigger=True,
+        )
+    )
+
+    view._ttl_mode_button.click()
+    view._manual_trigger_button.click()
+
+    assert modes == ["ttl"]
+    assert manual_requests == [True]
+    assert view._ttl_mode_button.isChecked() is True
+    assert view._manual_mode_button.isChecked() is False
+
+
+def test_ai6_not_ready_keeps_manual_actions_but_disables_ttl_mode(qt_app, qtbot) -> None:
+    view = ProtocolView()
+    qtbot.addWidget(view)
+
+    view.render_execution_state(
+        ProtocolExecutionSnapshot(
+            status=ProtocolExecutionStatus.WAITING_TRIGGER,
+            status_text="等待触发",
+            has_protocol=True,
+            can_start=False,
+            can_stop=True,
+            can_advance=True,
+            protocol_mode="manual",
+            current_mode="manual",
+            can_select_mode=True,
+            can_select_manual_mode=True,
+            can_select_ttl_mode=False,
+            can_manual_trigger=True,
+            ttl_armed=False,
+            readiness_reason="TTL 输入 AI6 尚未就绪",
+        )
+    )
+
+    assert view._manual_mode_button.isEnabled() is True
+    assert view._manual_trigger_button.isEnabled() is True
+    assert view._ttl_mode_button.isEnabled() is False
+    assert "协议模式：manual" in view._execution_trigger_label.text()
+    assert "当前模式：manual" in view._execution_trigger_label.text()
+    assert "AI6" in view._execution_arm_label.text()
 
 
 def test_protocol_view_disables_start_and_next_when_not_safe(qt_app, qtbot) -> None:

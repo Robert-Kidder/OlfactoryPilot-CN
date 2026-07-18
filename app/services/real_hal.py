@@ -7,7 +7,8 @@ import time
 from collections.abc import Iterable
 
 from app.models import SelfCheckResult
-from app.services.hal import HalBase
+from app.services.hal import AnalogInputFrame, HalBase
+from app.services.ttl_trigger_service import TtlTriggerConfig
 
 try:  # Local hardware drivers; keep import errors explicit for clear startup failures.
     import nidaqmx
@@ -45,6 +46,8 @@ class RealHAL(HalBase):
         self,
         *,
         ai0_channel: str = "Dev1/ai0",
+        ttl_input_channel: str = "Dev1/ai6",
+        ttl_poll_hz: int = 1000,
         serial_port: str | None = None,
         baud_rate: int = 19200,
         serial_timeout_s: float = 0.2,
@@ -66,6 +69,9 @@ class RealHAL(HalBase):
             raise ValueError("serial_port is required for RealHAL")
 
         self.ai0_channel = ai0_channel
+        self.ttl_input_channel = ttl_input_channel
+        self.ttl_poll_hz = max(1, int(ttl_poll_hz))
+        self._ttl_input_ready = False
         self.serial_port = serial_port
         self.baud_rate = int(baud_rate)
         self.serial_timeout_s = float(serial_timeout_s)
@@ -87,8 +93,11 @@ class RealHAL(HalBase):
     @classmethod
     def from_config(cls, config: dict) -> RealHAL:
         valve_lines = _collect_valve_lines(config.get("valve_mapping") or {})
+        ttl_config = TtlTriggerConfig.from_mapping(config)
         return cls(
             ai0_channel=str(config.get("ai0_channel", "Dev1/ai0")),
+            ttl_input_channel=str(config.get("ttl_input_channel", "Dev1/ai6")),
+            ttl_poll_hz=ttl_config.poll_hz,
             serial_port=config.get("serial_port"),
             baud_rate=int(config.get("baud_rate", 19200)),
             serial_timeout_s=float(config.get("alicat_timeout_s", 0.2)),
@@ -104,8 +113,22 @@ class RealHAL(HalBase):
         )
 
     def read_ai0(self, timestamp: float | None = None) -> float:
+        return self.read_ai_frame(timestamp).ai0
+
+    @property
+    def ttl_input_ready(self) -> bool:
+        return self._ttl_input_ready
+
+    def read_ai_frame(self, timestamp: float | None = None) -> AnalogInputFrame:
         task = self._ensure_ai_task()
-        return float(task.read())
+        captured_at = float(timestamp if timestamp is not None else time.time())
+        values = task.read()
+        if self._ttl_input_ready:
+            if not isinstance(values, list | tuple) or len(values) < 2:
+                raise RuntimeError("共享 AI task 未返回 AI0/AI6 两通道样本")
+            return AnalogInputFrame(timestamp=captured_at, ai0=float(values[0]), ai6=float(values[1]))
+        value = values[0] if isinstance(values, list | tuple) else values
+        return AnalogInputFrame(timestamp=captured_at, ai0=float(value), ai6=None)
 
     def read_flow(self) -> float:
         unit_id = self._flow_unit_id
@@ -267,8 +290,26 @@ class RealHAL(HalBase):
 
     def _ensure_ai_task(self):
         if self._ai_task is None:
-            self._ai_task = nidaqmx.Task()
-            self._ai_task.ai_channels.add_ai_voltage_chan(self.ai0_channel)
+            task = nidaqmx.Task()
+            try:
+                task.ai_channels.add_ai_voltage_chan(self.ai0_channel)
+                task.ai_channels.add_ai_voltage_chan(self.ttl_input_channel)
+                if hasattr(task, "timing"):
+                    task.timing.cfg_samp_clk_timing(rate=self.ttl_poll_hz)
+                self._ai_task = task
+                self._ttl_input_ready = True
+            except Exception as exc:
+                LOG.warning("AI6 初始化失败，已安全降级为 AI0-only：%s", exc)
+                try:
+                    task.close()
+                except Exception:  # pragma: no cover - defensive
+                    LOG.exception("关闭部分创建的共享 AI task 失败")
+                fallback = nidaqmx.Task()
+                fallback.ai_channels.add_ai_voltage_chan(self.ai0_channel)
+                if hasattr(fallback, "timing"):
+                    fallback.timing.cfg_samp_clk_timing(rate=self.ttl_poll_hz)
+                self._ai_task = fallback
+                self._ttl_input_ready = False
         return self._ai_task
 
     def _close_resources(self) -> None:
@@ -278,6 +319,7 @@ class RealHAL(HalBase):
         except Exception:  # pragma: no cover - defensive
             LOG.exception("Failed to close NI-DAQmx task")
         self._ai_task = None
+        self._ttl_input_ready = False
         try:
             if self._serial is not None:
                 self._serial.close()

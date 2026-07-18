@@ -2,13 +2,15 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import QSignalBlocker, Signal
 from PySide6.QtWidgets import (
+    QButtonGroup,
     QFileDialog,
     QGroupBox,
     QHBoxLayout,
     QLabel,
     QPushButton,
+    QRadioButton,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -24,6 +26,9 @@ class ProtocolView(QWidget):
     start_requested = Signal()
     stop_requested = Signal()
     next_trial_requested = Signal()
+    trigger_mode_requested = Signal(str)
+    manual_trigger_requested = Signal()
+    rearm_requested = Signal()
 
     def __init__(self) -> None:
         super().__init__()
@@ -36,12 +41,19 @@ class ProtocolView(QWidget):
         self._start_button = QPushButton("开始门控")
         self._stop_button = QPushButton("停止门控")
         self._next_trial_button = QPushButton("下一 trial")
+        self._manual_mode_button = QRadioButton("手动模式")
+        self._ttl_mode_button = QRadioButton("TTL 模式")
+        self._mode_group = QButtonGroup(self)
+        self._mode_group.setExclusive(True)
+        self._mode_group.addButton(self._manual_mode_button)
+        self._mode_group.addButton(self._ttl_mode_button)
         self._manual_trigger_button = QPushButton("手动触发")
-        self._ttl_trigger_button = QPushButton("TTL 触发")
+        self._rearm_button = QPushButton("重新布防")
         self._execution_status_label = QLabel("状态：空闲")
         self._execution_trial_label = QLabel("trial：-")
         self._execution_valve_label = QLabel("阀门：-")
         self._execution_trigger_label = QLabel("触发模式：-")
+        self._execution_arm_label = QLabel("触发布防：-")
         self._execution_wait_label = QLabel("等待：0 ms")
         self._execution_event_label = QLabel("最近事件：-")
         self._preview_table = QTableWidget(0, 5)
@@ -56,6 +68,7 @@ class ProtocolView(QWidget):
             self._execution_trial_label,
             self._execution_valve_label,
             self._execution_trigger_label,
+            self._execution_arm_label,
             self._execution_wait_label,
             self._execution_event_label,
         ):
@@ -67,7 +80,9 @@ class ProtocolView(QWidget):
             self._stop_button,
             self._next_trial_button,
             self._manual_trigger_button,
-            self._ttl_trigger_button,
+            self._rearm_button,
+            self._manual_mode_button,
+            self._ttl_mode_button,
         ):
             button.setEnabled(False)
 
@@ -75,6 +90,14 @@ class ProtocolView(QWidget):
         self._start_button.clicked.connect(self.start_requested.emit)
         self._stop_button.clicked.connect(self.stop_requested.emit)
         self._next_trial_button.clicked.connect(self.next_trial_requested.emit)
+        self._manual_mode_button.clicked.connect(
+            lambda checked: checked and self.trigger_mode_requested.emit("manual")
+        )
+        self._ttl_mode_button.clicked.connect(
+            lambda checked: checked and self.trigger_mode_requested.emit("ttl")
+        )
+        self._manual_trigger_button.clicked.connect(self.manual_trigger_requested.emit)
+        self._rearm_button.clicked.connect(self.rearm_requested.emit)
         self._build_layout()
 
     def _build_layout(self) -> None:
@@ -99,8 +122,10 @@ class ProtocolView(QWidget):
         action_row.addWidget(self._start_button)
         action_row.addWidget(self._stop_button)
         action_row.addWidget(self._next_trial_button)
+        action_row.addWidget(self._manual_mode_button)
+        action_row.addWidget(self._ttl_mode_button)
         action_row.addWidget(self._manual_trigger_button)
-        action_row.addWidget(self._ttl_trigger_button)
+        action_row.addWidget(self._rearm_button)
         action_row.addStretch()
         layout.addLayout(action_row)
 
@@ -110,6 +135,7 @@ class ProtocolView(QWidget):
         execution_layout.addWidget(self._execution_trial_label)
         execution_layout.addWidget(self._execution_valve_label)
         execution_layout.addWidget(self._execution_trigger_label)
+        execution_layout.addWidget(self._execution_arm_label)
         execution_layout.addWidget(self._execution_wait_label)
         execution_layout.addWidget(self._execution_event_label)
         execution.setLayout(execution_layout)
@@ -163,12 +189,30 @@ class ProtocolView(QWidget):
             f"trial：{snapshot.trial_label}（{snapshot.trial_id}）"
         )
         self._execution_valve_label.setText(f"阀门：{valve_text}；计划时长：{duration}")
-        self._execution_trigger_label.setText(f"触发模式：{snapshot.trigger}")
+        self._execution_trigger_label.setText(
+            f"协议模式：{snapshot.protocol_mode}；当前模式：{snapshot.current_mode}"
+        )
+        if snapshot.waiting_external_ttl:
+            arm_text = "已布防，等待外部 TTL"
+        elif snapshot.status.value == "waiting_exhale":
+            arm_text = "触发已接受，等待呼气"
+        else:
+            arm_text = snapshot.readiness_reason or "未等待外部 TTL"
+        self._execution_arm_label.setText(f"触发布防：{arm_text}")
         self._execution_wait_label.setText(f"等待：{snapshot.wait_elapsed_ms} ms")
         self._execution_event_label.setText(f"最近事件：{snapshot.recent_event}")
         self._start_button.setEnabled(snapshot.can_start)
         self._stop_button.setEnabled(snapshot.can_stop)
         self._next_trial_button.setEnabled(snapshot.can_advance)
+        self._manual_mode_button.setEnabled(snapshot.can_select_manual_mode)
+        self._ttl_mode_button.setEnabled(snapshot.can_select_ttl_mode)
+        self._manual_trigger_button.setEnabled(snapshot.can_manual_trigger)
+        self._rearm_button.setEnabled(snapshot.can_rearm)
+        manual_blocker = QSignalBlocker(self._manual_mode_button)
+        ttl_blocker = QSignalBlocker(self._ttl_mode_button)
+        self._manual_mode_button.setChecked(snapshot.current_mode == "manual")
+        self._ttl_mode_button.setChecked(snapshot.current_mode == "ttl")
+        del manual_blocker, ttl_blocker
 
     def _render_preview(self, document: ProtocolDocument) -> None:
         rows = min(len(document.trials), 8)

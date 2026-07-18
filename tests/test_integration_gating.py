@@ -137,6 +137,7 @@ def test_controller_protocol_executor_trigger_uses_valve_service(controller):
     controller.valve_service.set_valve = MagicMock(return_value=(True, "ok"))
 
     controller.handle_protocol_start_requested()
+    controller.handle_protocol_manual_trigger_requested()
     controller.handle_breath_samples([-0.6], 10.0)
 
     controller.valve_service.set_valve.assert_called_with(
@@ -172,6 +173,7 @@ def test_controller_protocol_close_uses_safety_close_path(controller):
     controller.valve_service.set_valve = MagicMock(return_value=(True, "ok"))
 
     controller.handle_protocol_start_requested()
+    controller.handle_protocol_manual_trigger_requested()
     controller.handle_breath_samples([-0.6], 10.0)
     controller.state.telemetry.safety_state = "LOW_FLOW"
     controller.protocol_executor.handle_safety_update("LOW_FLOW", timestamp=10.2)

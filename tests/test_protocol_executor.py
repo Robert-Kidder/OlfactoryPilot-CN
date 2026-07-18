@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from app.models import ProtocolDocument, ProtocolTrial, TriggerMode
-from app.models.protocol_execution import ProtocolExecutionStatus
+from app.models.protocol_execution import ProtocolExecutionReadiness, ProtocolExecutionStatus
 from app.services.gating_service import GatingService, GatingState
 from app.services.protocol_executor import ProtocolExecutionConfig, ProtocolExecutor
 
@@ -52,6 +54,32 @@ def _executor(*, clock_value: float = 10.0, actions: list | None = None) -> Prot
     )
 
 
+def _readiness(**overrides) -> ProtocolExecutionReadiness:
+    values = {
+        "connected": True,
+        "hardware_ready": True,
+        "flow_setpoints_ready": True,
+        "safety_state": "SAFE",
+        "ttl_input_ready": True,
+    }
+    values.update(overrides)
+    return ProtocolExecutionReadiness(**values)
+
+
+def _start_manual(
+    executor: ProtocolExecutor,
+    document: ProtocolDocument | None = None,
+    *,
+    timestamp: float = 10.0,
+) -> None:
+    executor.start(document or _document(), readiness=_readiness(), timestamp=timestamp)
+    executor.accept_trigger(
+        TriggerMode.MANUAL,
+        readiness=_readiness(ttl_input_ready=False),
+        timestamp=timestamp,
+    )
+
+
 def test_start_without_protocol_stays_idle_and_prompts_user() -> None:
     executor = _executor()
 
@@ -66,13 +94,264 @@ def test_start_prepares_first_trial_without_opening_valve() -> None:
     actions: list[tuple[int, bool]] = []
     executor = _executor(actions=actions)
 
-    result = executor.start(_document(), safety_state="SAFE", timestamp=10.0)
+    result = executor.start(_document(), readiness=_readiness(), timestamp=10.0)
 
-    assert result.state.status == ProtocolExecutionStatus.WAITING_EXHALE
+    assert result.state.status == ProtocolExecutionStatus.WAITING_TRIGGER
     assert result.state.trial_index == 0
     assert result.state.current_trial.trial_id == "trial-1"
-    assert result.events[-1].event == "wait_start"
+    assert result.state.declared_mode == TriggerMode.MANUAL
+    assert result.state.current_mode == TriggerMode.MANUAL
+    assert result.state.waiting_trigger_started_at == 10.0
+    assert result.state.waiting_started_at is None
+    assert result.events[-1].event == "trigger_wait_start"
     assert actions == []
+
+
+def test_manual_trigger_advances_once_then_requires_exhale() -> None:
+    actions: list[tuple[int, bool]] = []
+    executor = _executor(actions=actions)
+    executor.start(_document(), readiness=_readiness(), timestamp=10.0)
+
+    accepted = executor.accept_trigger(
+        TriggerMode.MANUAL,
+        readiness=_readiness(ttl_input_ready=False),
+        timestamp=10.1,
+    )
+    duplicate = executor.accept_trigger(
+        TriggerMode.MANUAL,
+        readiness=_readiness(ttl_input_ready=False),
+        timestamp=10.2,
+    )
+
+    assert accepted.state.status == ProtocolExecutionStatus.WAITING_EXHALE
+    assert accepted.events[-1].event == "trigger_accepted"
+    assert duplicate.events[-1].result == "ignored"
+    assert duplicate.state.trial_index == 0
+    assert duplicate.state.waiting_started_at == 10.1
+    assert actions == []
+
+    executor.process_breath_samples([-0.6], safety_state="SAFE", timestamp_start=10.3)
+    assert actions == [(3, True)]
+
+
+def test_ttl_trigger_rejects_stale_epoch_without_mutating_wait_state() -> None:
+    actions: list[tuple[int, bool]] = []
+    executor = _executor(actions=actions)
+    executor.reset(_document())
+    executor.set_trigger_mode(TriggerMode.TTL, readiness=_readiness(), timestamp=9.9)
+    executor.start(readiness=_readiness(), timestamp=10.0)
+    before = executor.snapshot(timestamp=10.0, readiness=_readiness())
+
+    result = executor.accept_trigger(
+        TriggerMode.TTL,
+        readiness=_readiness(),
+        timestamp=10.1,
+        captured_epoch=executor.state.arm_epoch - 1,
+        sequence=1,
+    )
+    after = executor.snapshot(timestamp=10.1, readiness=_readiness())
+
+    assert result.events[-1].result == "ignored"
+    assert "陈旧" in result.events[-1].message
+    assert after.status == before.status == ProtocolExecutionStatus.WAITING_TRIGGER
+    assert after.arm_epoch == before.arm_epoch
+    assert result.state.waiting_started_at is None
+    assert result.state.retry_count == 0
+    assert actions == []
+
+
+@pytest.mark.parametrize(
+    ("overrides", "reason"),
+    [
+        ({"connected": False}, "连接"),
+        ({"hardware_ready": False}, "自检"),
+        ({"flow_setpoints_ready": False}, "流量"),
+        ({"safety_state": "LOW_FLOW"}, "SAFE"),
+    ],
+)
+def test_start_rejects_each_common_readiness_failure_without_state_change(
+    overrides: dict,
+    reason: str,
+) -> None:
+    executor = _executor()
+    executor.reset(_document())
+    before = (
+        executor.state.status,
+        executor.state.trial_index,
+        executor.state.current_mode,
+        executor.state.arm_epoch,
+        executor.state.waiting_trigger_started_at,
+        executor.state.waiting_started_at,
+        executor.state.active_valve,
+    )
+
+    result = executor.start(readiness=_readiness(**overrides), timestamp=10.0)
+
+    assert result.events[-1].result == "rejected"
+    assert reason in result.events[-1].message
+    assert before == (
+        executor.state.status,
+        executor.state.trial_index,
+        executor.state.current_mode,
+        executor.state.arm_epoch,
+        executor.state.waiting_trigger_started_at,
+        executor.state.waiting_started_at,
+        executor.state.active_valve,
+    )
+
+
+def test_ready_mode_override_does_not_mutate_frozen_trial_and_start_preserves_it() -> None:
+    document = _document()
+    executor = _executor()
+    executor.reset(document)
+
+    changed = executor.set_trigger_mode(TriggerMode.TTL, readiness=_readiness(), timestamp=9.0)
+    started = executor.start(readiness=_readiness(), timestamp=10.0)
+
+    assert changed.state.status == ProtocolExecutionStatus.WAITING_TRIGGER
+    assert started.state.current_mode == TriggerMode.TTL
+    assert started.state.mode_override == TriggerMode.TTL
+    assert document.trials[0].trigger == TriggerMode.MANUAL
+    assert started.state.ttl_armed is True
+
+
+def test_running_mode_switch_clears_waits_retry_and_invalidates_epoch() -> None:
+    executor = _executor()
+    _start_manual(executor)
+    executor.state.retry_count = 1
+    old_epoch = executor.state.arm_epoch
+
+    result = executor.set_trigger_mode(TriggerMode.TTL, readiness=_readiness(), timestamp=10.2)
+
+    assert result.state.status == ProtocolExecutionStatus.WAITING_TRIGGER
+    assert result.state.current_mode == TriggerMode.TTL
+    assert result.state.arm_epoch > old_epoch
+    assert result.state.waiting_trigger_started_at == 10.2
+    assert result.state.waiting_started_at is None
+    assert result.state.retry_count == 0
+    assert result.state.ttl_armed is True
+
+
+def test_triggered_mode_switch_close_failure_preserves_mode_epoch_and_valve() -> None:
+    actions: list[tuple[int, bool]] = []
+
+    def writer(channel: int, open_state: bool) -> tuple[bool, str]:
+        actions.append((channel, open_state))
+        return (True, "ok") if open_state else (False, "关闭失败")
+
+    executor = ProtocolExecutor(
+        gating_service=GatingService(inhale_threshold=0.5, exhale_threshold=-0.5),
+        valve_writer=writer,
+        clock=lambda: 10.0,
+    )
+    _start_manual(executor)
+    executor.process_breath_samples([-0.6], safety_state="SAFE", timestamp_start=10.1)
+    old_epoch = executor.state.arm_epoch
+
+    result = executor.set_trigger_mode(TriggerMode.TTL, readiness=_readiness(), timestamp=10.2)
+
+    assert result.state.status == ProtocolExecutionStatus.BLOCKED
+    assert result.state.current_mode == TriggerMode.MANUAL
+    assert result.state.arm_epoch == old_epoch
+    assert result.state.active_valve == 3
+    assert result.events[-1].result == "close_failed"
+    assert actions == [(3, True), (3, False)]
+
+
+def test_safety_block_requires_explicit_rearm_and_rejects_stale_pulse() -> None:
+    executor = _executor()
+    executor.reset(_document())
+    executor.set_trigger_mode(TriggerMode.TTL, readiness=_readiness(), timestamp=9.0)
+    executor.start(readiness=_readiness(), timestamp=10.0)
+    stale_epoch = executor.state.arm_epoch
+    executor.handle_safety_update("DATA_STALE", timestamp=10.1)
+
+    assert executor.handle_safety_update("SAFE", timestamp=10.2).events == []
+    assert executor.state.status == ProtocolExecutionStatus.BLOCKED
+
+    rearmed = executor.rearm_current(readiness=_readiness(), timestamp=10.3)
+    stale = executor.accept_trigger(
+        TriggerMode.TTL,
+        readiness=_readiness(),
+        timestamp=10.4,
+        captured_epoch=stale_epoch,
+        sequence=1,
+    )
+
+    assert rearmed.state.status == ProtocolExecutionStatus.WAITING_TRIGGER
+    assert rearmed.state.arm_epoch > stale_epoch
+    assert stale.events[-1].result == "ignored"
+    assert stale.state.status == ProtocolExecutionStatus.WAITING_TRIGGER
+
+
+def test_valid_ttl_pulse_preserves_capture_timestamp_and_identity() -> None:
+    executor = _executor()
+    executor.reset(_document())
+    executor.set_trigger_mode(TriggerMode.TTL, readiness=_readiness(), timestamp=9.0)
+    executor.start(readiness=_readiness(), timestamp=10.0)
+
+    result = executor.accept_trigger(
+        TriggerMode.TTL,
+        readiness=_readiness(),
+        timestamp=10.125,
+        captured_epoch=executor.state.arm_epoch,
+        sequence=42,
+    )
+
+    assert result.state.status == ProtocolExecutionStatus.WAITING_EXHALE
+    assert result.state.last_ttl_timestamp == 10.125
+    event = result.events[-1]
+    assert event.timestamp == 10.125
+    assert event.arm_epoch == result.state.arm_epoch
+    assert event.pulse_sequence == 42
+    assert event.trigger_source == "ttl"
+
+
+def test_close_failed_blocks_start_reset_and_rearm_until_stop_recovers() -> None:
+    outcomes = [False, True]
+
+    def writer(channel: int, open_state: bool) -> tuple[bool, str]:
+        if open_state:
+            return True, "ok"
+        ok = outcomes.pop(0)
+        return ok, "ok" if ok else "关闭失败"
+
+    executor = ProtocolExecutor(
+        gating_service=GatingService(inhale_threshold=0.5, exhale_threshold=-0.5),
+        valve_writer=writer,
+    )
+    document = _document()
+    _start_manual(executor, document)
+    executor.process_breath_samples([-0.6], safety_state="SAFE", timestamp_start=10.1)
+    executor.handle_safety_update("LOW_FLOW", timestamp=10.2)
+    before = (executor.state.document, executor.state.current_mode, executor.state.arm_epoch)
+
+    started = executor.start(readiness=_readiness(), timestamp=10.3)
+    reset = executor.reset(_document(), timestamp=10.4)
+    rearm = executor.rearm_current(readiness=_readiness(), timestamp=10.5)
+
+    assert all(result.events[-1].result == "rejected" for result in (started, reset, rearm))
+    assert executor.state.active_valve == 3
+    assert before == (executor.state.document, executor.state.current_mode, executor.state.arm_epoch)
+
+    stopped = executor.stop(safety_state="LOW_FLOW", timestamp=10.6)
+    assert stopped.state.status == ProtocolExecutionStatus.STOPPED
+    assert stopped.state.active_valve is None
+
+
+def test_stopped_restart_returns_to_trial_zero_declared_mode() -> None:
+    executor = _executor()
+    executor.reset(_document())
+    executor.set_trigger_mode(TriggerMode.TTL, readiness=_readiness(), timestamp=9.0)
+    executor.start(readiness=_readiness(), timestamp=10.0)
+    executor.stop(safety_state="SAFE", timestamp=10.1)
+
+    restarted = executor.start(readiness=_readiness(), timestamp=10.2)
+
+    assert restarted.state.status == ProtocolExecutionStatus.WAITING_TRIGGER
+    assert restarted.state.trial_index == 0
+    assert restarted.state.mode_override is None
+    assert restarted.state.current_mode == TriggerMode.MANUAL
 
 
 def test_exhale_transition_opens_current_valve_and_tick_closes_then_advances() -> None:
@@ -88,7 +367,7 @@ def test_exhale_transition_opens_current_valve_and_tick_closes_then_advances() -
         config=ProtocolExecutionConfig(breath_gate_timeout_ms=5000),
         clock=clock,
     )
-    executor.start(_document(), safety_state="SAFE", timestamp=10.0)
+    _start_manual(executor)
 
     trigger_result = executor.process_breath_samples(
         [-0.6],
@@ -113,8 +392,9 @@ def test_exhale_transition_opens_current_valve_and_tick_closes_then_advances() -
 
     assert actions == [(3, True), (3, False)]
     assert closed.events[0].event == "stimulus_end"
-    assert closed.state.status == ProtocolExecutionStatus.WAITING_EXHALE
+    assert closed.state.status == ProtocolExecutionStatus.WAITING_TRIGGER
     assert closed.state.current_trial.trial_id == "trial-2"
+    assert closed.state.current_mode == TriggerMode.TTL
 
 
 def test_wait_timeout_skips_without_new_breath_samples() -> None:
@@ -129,14 +409,14 @@ def test_wait_timeout_skips_without_new_breath_samples() -> None:
         ),
         clock=lambda: now["value"],
     )
-    executor.start(_document(), safety_state="SAFE", timestamp=10.0)
+    _start_manual(executor)
 
     now["value"] = 10.6
     result = executor.tick(safety_state="SAFE", timestamp=now["value"])
 
-    assert [event.event for event in result.events] == ["timeout", "skip", "wait_start"]
+    assert [event.event for event in result.events] == ["timeout", "skip", "trigger_wait_start"]
     assert result.state.trial_index == 1
-    assert result.state.status == ProtocolExecutionStatus.WAITING_EXHALE
+    assert result.state.status == ProtocolExecutionStatus.WAITING_TRIGGER
 
 
 def test_retry_timeout_is_bounded_by_max_retries() -> None:
@@ -151,7 +431,7 @@ def test_retry_timeout_is_bounded_by_max_retries() -> None:
         ),
         clock=lambda: now["value"],
     )
-    executor.start(_document(), safety_state="SAFE", timestamp=10.0)
+    _start_manual(executor)
 
     now["value"] = 10.6
     first = executor.tick(safety_state="SAFE", timestamp=now["value"])
@@ -161,7 +441,7 @@ def test_retry_timeout_is_bounded_by_max_retries() -> None:
 
     now["value"] = 11.2
     second = executor.tick(safety_state="SAFE", timestamp=now["value"])
-    assert [event.event for event in second.events] == ["timeout", "skip", "wait_start"]
+    assert [event.event for event in second.events] == ["timeout", "skip", "trigger_wait_start"]
     assert second.state.trial_index == 1
     assert "已超过最大重试次数" in second.events[1].message
 
@@ -169,7 +449,7 @@ def test_retry_timeout_is_bounded_by_max_retries() -> None:
 def test_non_safe_state_blocks_and_closes_open_valve() -> None:
     actions: list[tuple[int, bool]] = []
     executor = _executor(actions=actions)
-    executor.start(_document(), safety_state="SAFE", timestamp=10.0)
+    _start_manual(executor)
     executor.process_breath_samples([-0.6], safety_state="SAFE", timestamp_start=10.1, dt=0.01)
 
     result = executor.handle_safety_update("LOW_FLOW", timestamp=10.2)
@@ -196,7 +476,7 @@ def test_non_safe_close_failure_keeps_active_valve_for_recovery() -> None:
         valve_writer=valve_writer,
         clock=lambda: 10.0,
     )
-    executor.start(_document(), safety_state="SAFE", timestamp=10.0)
+    _start_manual(executor)
     executor.process_breath_samples([-0.6], safety_state="SAFE", timestamp_start=10.1, dt=0.01)
 
     result = executor.handle_safety_update("DATA_STALE", timestamp=10.2)
@@ -225,7 +505,7 @@ def test_blocked_state_with_active_valve_can_retry_safe_close() -> None:
         valve_writer=valve_writer,
         clock=lambda: 10.0,
     )
-    executor.start(_document(), safety_state="SAFE", timestamp=10.0)
+    _start_manual(executor)
     executor.process_breath_samples([-0.6], safety_state="SAFE", timestamp_start=10.1, dt=0.01)
     first = executor.handle_safety_update("LOW_FLOW", timestamp=10.2)
     assert first.state.active_valve == 3
@@ -242,7 +522,8 @@ def test_blocked_state_with_active_valve_can_retry_safe_close() -> None:
 
 def test_blocked_state_without_active_valve_does_not_repeat_safety_block() -> None:
     executor = _executor()
-    blocked = executor.start(_document(), safety_state="LOW_FLOW", timestamp=10.0)
+    executor.start(_document(), readiness=_readiness(), timestamp=10.0)
+    blocked = executor.handle_safety_update("LOW_FLOW", timestamp=10.0)
     assert blocked.state.status == ProtocolExecutionStatus.BLOCKED
     assert blocked.state.active_valve is None
     assert blocked.events[-1].event == "safety_block"
@@ -270,7 +551,7 @@ def test_stop_after_close_failure_retries_active_valve() -> None:
         valve_writer=valve_writer,
         clock=lambda: 10.0,
     )
-    executor.start(_document(), safety_state="SAFE", timestamp=10.0)
+    _start_manual(executor)
     executor.process_breath_samples([-0.6], safety_state="SAFE", timestamp_start=10.1, dt=0.01)
     failed_stop = executor.stop(safety_state="LOW_FLOW", timestamp=10.2)
     assert failed_stop.state.status == ProtocolExecutionStatus.BLOCKED
@@ -293,7 +574,7 @@ def test_open_or_close_failure_blocks_successful_trial_progression() -> None:
         valve_writer=failing_open,
         clock=lambda: 10.0,
     )
-    executor.start(_document(), safety_state="SAFE", timestamp=10.0)
+    _start_manual(executor)
 
     result = executor.process_breath_samples(
         [-0.6],
@@ -325,7 +606,7 @@ def test_close_failure_does_not_advance_and_allows_stop_recovery() -> None:
         valve_writer=valve_writer,
         clock=lambda: now["value"],
     )
-    executor.start(_document(), safety_state="SAFE", timestamp=10.0)
+    _start_manual(executor)
     executor.process_breath_samples([-0.6], safety_state="SAFE", timestamp_start=10.1, dt=0.01)
 
     now["value"] = 10.2
@@ -389,7 +670,7 @@ def test_finished_last_trial_marks_completed() -> None:
         config=ProtocolExecutionConfig(breath_gate_timeout_ms=5000),
         clock=lambda: now["value"],
     )
-    executor.start(document, safety_state="SAFE", timestamp=10.0)
+    _start_manual(executor, document)
     executor.process_breath_samples([-0.6], safety_state="SAFE", timestamp_start=10.1, dt=0.01)
 
     now["value"] = 10.2

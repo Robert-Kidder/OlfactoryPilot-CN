@@ -159,6 +159,7 @@ def build_application(
     qt_app = QApplication.instance() or QApplication(sys.argv)
     worker = HardwareWorker(
         telemetry_hz=int(config.get("telemetry_hz", 5)),
+        ttl_config=config,
         check_service=check_service,
         hal=hal_instance,
         simulation=state.simulation_mode,
