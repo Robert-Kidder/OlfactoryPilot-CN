@@ -4,7 +4,7 @@ baseline_commit: fe9d1259a6115e58d14887a3b0948cebb06b0ddb
 
 # Story 3.3: 手动与 TTL 触发模式
 
-Status: in-progress
+Status: review
 Epic: 3 - 协议执行与数据记录
 Story Key: 3-3-manual-vs-ttl-trigger-modes
 Story ID: 3.3
@@ -173,12 +173,12 @@ Story ID: 3.3
   - [x] 保留并迁移 3.2 characterization tests：在 `start()` 后注入一次匹配触发再继续验证既有呼吸超时、开关阀、close_failed、非 SAFE 和 BLOCKED 无日志风暴行为，不得为适配 `WAITING_TRIGGER` 删除或弱化旧断言。
   - [x] 回归 `tests/test_protocol_parser.py`、`tests/test_protocol_executor.py`、`tests/test_integration_gating.py`、`tests/test_protocol_view.py`、`tests/test_valve_service.py`、安全与全局停止相关测试。
 
-- [ ] 工程验证（AC: 全部）
+- [x] 工程验证（AC: 全部）
   - [x] 运行 `python -m pytest tests/test_ttl_trigger_service.py tests/test_protocol_executor.py tests/test_integration_gating.py tests/test_protocol_view.py`。
   - [x] 运行 `python -m pytest tests/test_protocol_parser.py tests/test_valve_service.py`。
   - [x] 运行 `python -m pytest`。
   - [x] 运行 `python -m ruff check app tests`。
-  - [ ] 在真实或 NI MAX 模拟的 USB-6001 上验证 Dev1 单一 AI task 同时读取 AI0/AI6，不出现 `-50103/resource reserved`；记录 AI6 有效采样率、AI0 100Hz 输出连续性及读取错误安全降级结果到 sprint artifact。
+  - [x] 在真实或 NI MAX 模拟的 USB-6001 上验证 Dev1 单一 AI task 同时读取 AI0/AI6，不出现 `-50103/resource reserved`；记录 AI6 有效采样率、AI0 100Hz 输出连续性及读取错误安全降级结果到 sprint artifact。
 
 ## Dev Notes
 
@@ -366,22 +366,39 @@ OpenAI Codex（GPT-5）
 
 ### Debug Log References
 
+- 2026-07-19 现场 NI MAX 复核：`Dev1` 为 NI USB-6001（序列号 `0214581E`），设备自检成功；机内现有“启动（手）”按钮通过 `+5V -> 按钮 -> AI6` 接线产生测试边沿，释放时 AI6 稳定为 `0.27-0.29V`，按下时稳定在约 `5V`，释放后恢复为 `0.27-0.29V`。该信号分别明确低于 `ttl_low_threshold_v=0.8V`、高于 `ttl_high_threshold_v=2.0V`，无需改动现有 TTL 物理接线。
+- 2026-07-19 现场机外接口盘点：标签包括“启动（手）”按钮，以及已由双凸点旋转锁定结构确认为 BNC 的“启动（入）”“启动（出）”“呼吸（出）”接口；“呼吸（入）”为三孔接口，内部观察到上孔接 `AI0`、左下接 `+V`、右下接 `-V`，`+V/-V` 来自带 `Vadj/IN/OUT` 标识的未知电源模块。机器所需物理线缆已经完整接好，Story 3.3 验证不改线、不新增接线、不调整 `Vadj`；除已确认的“启动（手）”链路外，其余 BNC 接口方向/电气定义仍待原理图或既有设备资料确认。
+- 2026-07-19 Python 3.11 只读串口枚举：当前仅发现 `COM1`、`COM2`、蓝牙 `COM7/COM8`，历史真实配置使用的 ATEN USB-to-Serial `COM6` 当前未出现；因此未启动会执行 Alicat 清零的真实应用，也未完成 Dev1 单 task AI0/AI6 联合采集验证。
+- 2026-07-19 在 NI MAX 测试面板关闭状态尚未由现场确认时，Python 3.11 的 NI 设备属性只读枚举超过 10 秒仍未返回并由外层超时终止；未创建写任务、未重置设备。该结果只提示下次验证前必须彻底关闭 NI MAX 测试面板/其他 DAQ 客户端，不能据此判定 Dev1 或 AI6 故障。
+- 2026-07-19 现场确认 NI MAX 测试面板完全关闭后执行 20 秒只读联合采集仍在 45 秒外层超时，无样本返回；随后用逐步即时输出探针精确定位：仅完成 Python/`nidaqmx` import，阻塞发生在 `nidaqmx.Task()`，尚未添加 AI0/AI6、配置采样时钟或启动任务。诊断进程已由外层终止且无残留 `python.exe`；环境为 Python `3.11.15`、`nidaqmx 0.9.0`、NI-DAQmx `20.0.0f0`，NI Configuration Manager 与 NI Device Loader 均在运行。该证据排除 TTL 按钮、电平阈值和双通道映射为当前阻塞点，指向 Python/NI-DAQmx 任务创建边界。
+- 2026-07-19 Windows 重启后 ATEN `COM6` 已重新出现，但重启后具名 Dev1 AI0/AI6 只读探针仍超时；进一步执行不引用任何设备/通道的未命名空 `nidaqmx.Task()`，只完成 `nidaqmx` import，仍阻塞于任务创建。由此确认 COM6/Alicat 恢复与 Python DAQmx Create Task 故障相互独立，下一步需用 NI MAX“创建任务”区分 MAX/驱动配置故障与 Python API 路径故障。
+- 2026-07-19 设备管理器确认串口完整名称为 `ATEN USB to Serial Bridge (COM6)`；NI MAX 成功创建并保存同时包含 AI0/AI6 的 `Story33_AI0_AI6_Test`，随后完全退出 MAX。Python `PersistedTask.load()` 仍阻塞；64 位 `nicaiu.dll` 可正常加载并立即返回驱动版本 `20.0.0`，但直接调用原生 C API `DAQmxCreateTask` 仍阻塞。由此排除 Python wrapper、MAX 数据库、Dev1 通道和 64 位 DLL 缺失，故障收敛到 NI-DAQmx 20.0 的 64 位原生任务管理层。
+- 2026-07-19 Windows 卸载注册表显示 NI-DAQmx 20.0 的 32/64 位 MIO、MAX、Timing、DAQ Assistant 与 C 支持组件均有安装条目；NI Package Manager 已为 25.5.1，系统另有 25.5 共享文档组件。`nipkg list-installed` 返回插件事务错误 `-125090/-125410`，需先通过 NI Package Manager 对现有 NI-DAQmx 安装做原位修复，再复测空任务与 AI0/AI6 单 task；修复前不改生产 HAL 绕过该系统故障。
+- 2026-07-19 现场完成 NI-DAQmx 原位修复并重启、未打开 NI MAX；修复后 64 位原生 `DAQmxCreateTask` 仍阻塞，驱动仍为 `20.0.0f0`，`nipkg list-installed` 仍返回 `-125090/-125410`。随后以 Windows 自带 32 位 PowerShell 直接调用 32 位 `nicaiu.dll` 的 `DAQmxCreateTask`，同样在空任务创建处阻塞；临时探针已删除且无残留 Python 进程。由此排除 Python 包、进程位数、Dev1/AI 通道和单独 64 位组件，需修复/升级 NI-DAQmx 原生任务管理安装后才能继续单 task 实机验收。
+- 2026-07-19 为保护必须保留的旧版 ProgOlfacto，现场只读检查桌面部署：`ProgOlfacto/ProgOlfacto.exe` 与 `ProgOlfactoTao/Application.exe` 均内嵌 LabVIEW `2021` 运行时要求，系统同时保留 LabVIEW 2021 的 32/64 位 Run-Time Engine。后续不得在无恢复介质时先卸载 NI-DAQmx；驱动候选必须以 NI 官方明确支持 LabVIEW 2021 为前提，并在变更前备份旧程序及建立 ProgOlfacto 基线。
+- 2026-07-19 现场已备份两个 ProgOlfacto 部署目录、导出 NI MAX `.nce` 配置并建立系统还原点，随后使用 `ni-daqmx_22.5.0_offline.iso` 将 NI-DAQmx 升级到 `22.5.0` 并重启。未打开 NI MAX 的情况下，原生版本查询立即返回 `22.5.0`，但空 `DAQmxCreateTask` 在受控等待约 193 秒后仍未返回并由外层超时终止；无残留 Python 进程，且 `nipkg list-installed` 仍在事务开始阶段返回 `-125090/-125410`。因此问题并非 20.0 特有或普通 1–2 分钟首次初始化延迟，升级未恢复原生任务管理层，尚不能继续 AI0/AI6 单 task 实机验收。
+- 2026-07-19 后续用已验证 Microsoft 签名的 Process Monitor 定位并在普通用户环境复测，确认上述 `DAQmxCreateTask` 超时均发生于受限的 `codexsandboxoffline` 诊断账户：沙箱阻断 DAQmx 与 NI Configuration Manager 所需的本机 TCP/共享内存 IPC。实际 Windows 用户 `shark-yang-pc\\sesnorymanip`（Medium integrity、非提权）调用空 `DAQmxCreateTask` 在 `0.043104s` 返回 `0`。因此此前超时是诊断隔离造成的假象，不是 Python 3.11、NI-DAQmx 22.5、设备或管理员权限故障；临时 Process Monitor 工具和约 400 MB 追踪文件已删除。
+- 2026-07-19 MAX 数据库重置后按物理序列号恢复并复核别名：`Dev1=NI USB-6001/0214581E`、`Dev2=NI USB-6001/02145875`；MAX 随后完全退出。`Dev1` 单一硬件定时 AI task 以 `1000 Hz/通道` 同时读取 AI0/AI6，先取得 `200 samples/通道`，未出现 `-50103/resource reserved`。
+- 2026-07-19 真实采集发现 DAQmx 默认端子配置在 AI0/AI6 共享扫描时使 AI6 松开读数约为 `-0.55V`；设备能力查询确认 AI6 仅支持 RSE，显式设置 AI0/AI6 为 RSE 后松开约 `0.06-0.17V`、按下最高 `5.027V`，稳定跨越 `0.8V/2.0V` 迟滞阈值。按 RED-GREEN-REFACTOR 为共享 task 与 AI0-only fallback 增加 RSE 契约测试并修正 `RealHAL`，没有新增第二个 task。
+- 2026-07-19 真实 `RealHAL -> HardwareWorker` 连续性探针在唯一且对象身份不变的 AI0/AI6 RSE task 上读取 `2000` 个共享帧，用时 `2.079267s`，Worker 精确发出 `200` 个 AI0 样本（既有 100 Hz 契约），读取错误 `0`。随后 20 秒探针读取 `20000` 帧、发出 `2000` 个 AI0 样本，物理“启动（手）”按键经真实 `TtlTriggerService` 仅发出一个 `TtlPulse(arm_epoch=33, sequence=1)`，错误 `0`；探针未连接 executor/ValveService，未执行阀门或串口写入。AI0 未接外部呼吸源时会受 AI6 扫描串扰而浮动，后续接入真实呼吸传感器时需复核波形质量，但本次 100 Hz 连续性无中断。
+- 2026-07-19 读取错误与安全降级由自动化故障注入验证：AI6 初始化失败会先关闭部分 task，再创建唯一 AI0-only RSE fallback 并置 `ttl_input_ready=False`；运行中 shared-AI read error 不伪造 pulse，Controller/Executor 进入 BLOCKED、epoch 失效并走既有安全关阀链路。未通过拔除真实 USB 或短接输入制造破坏性故障。
 - `D:\miniconda3\envs\code\python.exe -m pytest tests/test_ttl_trigger_service.py tests/test_protocol_executor.py tests/test_integration_gating.py tests/test_protocol_view.py`：51 passed。
 - `D:\miniconda3\envs\code\python.exe -m pytest tests/test_protocol_parser.py tests/test_valve_service.py`：23 passed。
 - `D:\miniconda3\envs\code\python.exe -m pytest`：199 passed（Python 3.11.15）。
 - `D:\miniconda3\envs\code\python.exe -m ruff check app tests`：All checks passed。
 - NI 设备只读枚举：发现 `Dev1` / `Dev2` 为非模拟 USB-6001，另有 `SimDev1`。
-- Dev1 单 task AI0/AI6 真实读取：硬件定时 1000 Hz/通道、200 samples/通道在 30 秒外层超时；随后双通道单帧按需读取在 18 秒外层超时。DAQmx 未返回样本或明确 `-50103`，因此无法记录有效采样率和 AI0 100 Hz 连续性，真实硬件验证项保持未完成。
+- 早期 Dev1 探针在受限 Codex 沙箱内出现的 task 创建/读取超时已由普通用户环境成功复测推翻；最终实机证据以上述单 task `1000 Hz/通道`、AI0 `100 Hz` 连续输出与真实按钮单 pulse 结果为准。
 
 ### Completion Notes List
 
 - Ultimate context engine analysis completed - comprehensive developer guide created.
+- 现场已确认现有“启动（手）”按钮可直接提供满足默认迟滞阈值的 AI6 低—高—低测试信号，后续联合采集和协议验收不需要改动 TTL 物理接线；真实应用启动仍需先恢复/确认 Alicat 的 ATEN `COM6` 并获得流量清零许可。
 - 已新增 `WAITING_TRIGGER`、统一 readiness、manual/TTL trigger 接受与拒绝、模式 override/切换、epoch/sequence 去重、显式 rearm 和关阀失败恢复；frozen 协议模型保持不变。
-- 已新增 TTL 迟滞/去抖纯服务和不可变 pulse，RealHAL 以唯一 `_ai_task` 共享 AI0/AI6，AI6 初始化失败会关闭部分 task 后降级为 AI0-only；MockHAL 与 Worker 使用相同 frame 契约。
+- 已新增 TTL 迟滞/去抖纯服务和不可变 pulse，RealHAL 以唯一 `_ai_task`、显式 RSE 共享 AI0/AI6，AI6 初始化失败会关闭部分 task 后降级为显式 RSE 的 AI0-only；MockHAL 与 Worker 使用相同 frame 契约。
 - Controller 仅转发 readiness/原始 pulse 并统一发布结构化事件；协议替换先清理旧执行态，失败保留旧 document/mode/trial/active valve；View 只发 intent 并按 snapshot 渲染。
 - 已覆盖 WAITING_TRIGGER、manual/TTL、模式切换、readiness、陈旧/重复 pulse、持续高电平、TTL read error、close_failed 恢复、协议替换原子性及 3.1/3.2 回归；全量 199 tests 与 ruff 通过。
 - 未实现 Story 3.4 的低抖动质量门，也未实现 Story 3.5 的 `.raw/.log` 会话文件输出。
-- 软件实现和自动化验证完成；真实 Dev1 双通道只读 task 两次超时，工程验证最后一项受硬件/DAQmx 运行态阻塞，Story 保持 `in-progress`。
+- 真实 Dev1 工程验证完成：单 task AI0/AI6 共享采集无 `-50103`，AI6 1000 Hz 物理按键产生一次有效 pulse，AI0 100 Hz 连续输出，故障注入安全降级通过；Story 状态更新为 `review`。
 
 ### File List
 
@@ -403,6 +420,7 @@ OpenAI Codex（GPT-5）
 - docs/sprint-artifacts/3-3-manual-vs-ttl-trigger-modes.md
 - docs/sprint-artifacts/sprint-status.yaml
 - tests/test_integration_gating.py
+- tests/test_app.py
 - tests/test_protocol_executor.py
 - tests/test_protocol_trigger_integration.py
 - tests/test_protocol_view.py
@@ -411,6 +429,8 @@ OpenAI Codex（GPT-5）
 
 ## Change Log
 
+- 2026-07-19：纠正 Codex 沙箱 IPC 导致的 DAQmx 假超时；在真实 Dev1 上完成单 task AI0/AI6、AI6 1000 Hz、AI0 100 Hz 和物理按钮单 pulse 验证；按红灯测试为共享/fallback task 固定 RSE，199 项 pytest 与 ruff 全绿，Story 更新为 review。
+- 2026-07-19：记录 Dev1 型号/序列号/NI MAX 自检、内置手动 TTL 电平、机外接口盘点及当前 COM6 缺失情况；Story 仍为 in-progress，等待单一 AI task 的 AI0/AI6 联合采集与协议实机验收。
 - 2026-07-18：创建 Story 3.3 手动与 TTL 触发模式，状态设为 ready-for-dev。
 - 2026-07-18：补齐统一 readiness、模式切换状态矩阵、关阀失败恢复、TTL 事件身份与边界竞态测试要求。
 - 2026-07-18：收敛 AI0/AI6 单 task 采集、协议替换失败、显式恢复路径及运行中 readiness 丢失语义。

@@ -12,10 +12,11 @@ from app.services.ttl_trigger_service import TtlTriggerConfig
 
 try:  # Local hardware drivers; keep import errors explicit for clear startup failures.
     import nidaqmx
-    from nidaqmx.constants import LineGrouping
+    from nidaqmx.constants import LineGrouping, TerminalConfiguration
 except Exception as exc:  # pragma: no cover - runtime-only dependency
     nidaqmx = None
     LineGrouping = None
+    TerminalConfiguration = None
     _NIDAQMX_IMPORT_ERROR = exc
 else:  # pragma: no cover - runtime-only dependency
     _NIDAQMX_IMPORT_ERROR = None
@@ -292,8 +293,14 @@ class RealHAL(HalBase):
         if self._ai_task is None:
             task = nidaqmx.Task()
             try:
-                task.ai_channels.add_ai_voltage_chan(self.ai0_channel)
-                task.ai_channels.add_ai_voltage_chan(self.ttl_input_channel)
+                task.ai_channels.add_ai_voltage_chan(
+                    self.ai0_channel,
+                    terminal_config=TerminalConfiguration.RSE,
+                )
+                task.ai_channels.add_ai_voltage_chan(
+                    self.ttl_input_channel,
+                    terminal_config=TerminalConfiguration.RSE,
+                )
                 if hasattr(task, "timing"):
                     task.timing.cfg_samp_clk_timing(rate=self.ttl_poll_hz)
                 self._ai_task = task
@@ -305,7 +312,10 @@ class RealHAL(HalBase):
                 except Exception:  # pragma: no cover - defensive
                     LOG.exception("关闭部分创建的共享 AI task 失败")
                 fallback = nidaqmx.Task()
-                fallback.ai_channels.add_ai_voltage_chan(self.ai0_channel)
+                fallback.ai_channels.add_ai_voltage_chan(
+                    self.ai0_channel,
+                    terminal_config=TerminalConfiguration.RSE,
+                )
                 if hasattr(fallback, "timing"):
                     fallback.timing.cfg_samp_clk_timing(rate=self.ttl_poll_hz)
                 self._ai_task = fallback

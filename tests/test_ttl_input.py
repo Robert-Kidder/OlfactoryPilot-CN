@@ -80,9 +80,11 @@ def test_real_hal_creates_one_ai_task_with_ai0_and_ai6(monkeypatch) -> None:
     class FakeChannels:
         def __init__(self) -> None:
             self.names: list[str] = []
+            self.terminal_configs: list[str | None] = []
 
-        def add_ai_voltage_chan(self, name: str) -> None:
+        def add_ai_voltage_chan(self, name: str, *, terminal_config=None) -> None:
             self.names.append(name)
+            self.terminal_configs.append(terminal_config)
 
     class FakeTask:
         def __init__(self) -> None:
@@ -98,6 +100,7 @@ def test_real_hal_creates_one_ai_task_with_ai0_and_ai6(monkeypatch) -> None:
             self.closed = True
 
     monkeypatch.setattr(real_hal_module, "nidaqmx", SimpleNamespace(Task=FakeTask))
+    monkeypatch.setattr(real_hal_module, "TerminalConfiguration", SimpleNamespace(RSE="RSE"))
     monkeypatch.setattr(real_hal_module, "_NIDAQMX_IMPORT_ERROR", None)
     hal = real_hal_module.RealHAL(
         ai0_channel="Dev1/ai0",
@@ -110,6 +113,7 @@ def test_real_hal_creates_one_ai_task_with_ai0_and_ai6(monkeypatch) -> None:
 
     assert len(tasks) == 1
     assert tasks[0].ai_channels.names == ["Dev1/ai0", "Dev1/ai6"]
+    assert tasks[0].ai_channels.terminal_configs == ["RSE", "RSE"]
     assert frame == AnalogInputFrame(timestamp=2.0, ai0=0.25, ai6=3.3)
     assert hal.ttl_input_ready is True
 
@@ -123,8 +127,10 @@ def test_real_hal_ai6_failure_closes_partial_task_then_degrades_to_ai0_only(monk
         def __init__(self, fail_ai6: bool) -> None:
             self.fail_ai6 = fail_ai6
             self.names: list[str] = []
+            self.terminal_configs: list[str | None] = []
 
-        def add_ai_voltage_chan(self, name: str) -> None:
+        def add_ai_voltage_chan(self, name: str, *, terminal_config=None) -> None:
+            self.terminal_configs.append(terminal_config)
             if self.fail_ai6 and name.endswith("ai6"):
                 raise RuntimeError("AI6 unavailable")
             self.names.append(name)
@@ -143,6 +149,7 @@ def test_real_hal_ai6_failure_closes_partial_task_then_degrades_to_ai0_only(monk
             self.closed = True
 
     monkeypatch.setattr(real_hal_module, "nidaqmx", SimpleNamespace(Task=FakeTask))
+    monkeypatch.setattr(real_hal_module, "TerminalConfiguration", SimpleNamespace(RSE="RSE"))
     monkeypatch.setattr(real_hal_module, "_NIDAQMX_IMPORT_ERROR", None)
 
     hal = real_hal_module.RealHAL(serial_port="COM1")
@@ -152,5 +159,7 @@ def test_real_hal_ai6_failure_closes_partial_task_then_degrades_to_ai0_only(monk
     assert tasks[0].closed is True
     assert tasks[1].closed is False
     assert tasks[1].ai_channels.names == ["Dev1/ai0"]
+    assert tasks[0].ai_channels.terminal_configs == ["RSE", "RSE"]
+    assert tasks[1].ai_channels.terminal_configs == ["RSE"]
     assert frame == AnalogInputFrame(timestamp=2.0, ai0=0.25, ai6=None)
     assert hal.ttl_input_ready is False

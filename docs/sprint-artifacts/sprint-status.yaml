@@ -1,7 +1,7 @@
 # Sprint 状态文件
 # 生成时间: 2026-07-09 16:54
 generated: 2026-07-09 16:54
-last_updated: 2026-07-18
+last_updated: 2026-07-19
 project: OlfactoryPilot-CN
 project_key: OLFACTORY
 tracking_system: file-system
@@ -30,7 +30,7 @@ development_status:
   epic-3: in-progress
   3-1-protocol-file-parsing-txtcsv: done
   3-2-breath-gated-stimulation: done
-  3-3-manual-vs-ttl-trigger-modes: in-progress
+  3-3-manual-vs-ttl-trigger-modes: review
   3-4-low-jitter-actuation-20ms: backlog
   3-5-session-file-naming-and-logging: backlog
   epic-3-retrospective: optional

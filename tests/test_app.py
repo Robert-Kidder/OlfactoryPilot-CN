@@ -375,7 +375,9 @@ def test_hardware_check_service_retries_serial_permission_error(monkeypatch):
 def test_real_hal_does_not_open_serial_during_init(monkeypatch):
     class DummyTask:
         def __init__(self) -> None:
-            self.ai_channels = SimpleNamespace(add_ai_voltage_chan=lambda _channel: None)
+            self.ai_channels = SimpleNamespace(
+                add_ai_voltage_chan=lambda _channel, **_kwargs: None
+            )
 
         def read(self) -> float:
             return 0.0
@@ -408,7 +410,9 @@ def test_real_hal_does_not_open_serial_during_init(monkeypatch):
 def test_real_hal_set_flow_verifies_setpoint_readback(monkeypatch):
     class DummyTask:
         def __init__(self) -> None:
-            self.ai_channels = SimpleNamespace(add_ai_voltage_chan=lambda _channel: None)
+            self.ai_channels = SimpleNamespace(
+                add_ai_voltage_chan=lambda _channel, **_kwargs: None
+            )
 
         def read(self) -> float:
             return 0.0
@@ -458,7 +462,9 @@ def test_real_hal_set_flow_verifies_setpoint_readback(monkeypatch):
 def test_real_hal_set_flow_fails_on_setpoint_mismatch(monkeypatch):
     class DummyTask:
         def __init__(self) -> None:
-            self.ai_channels = SimpleNamespace(add_ai_voltage_chan=lambda _channel: None)
+            self.ai_channels = SimpleNamespace(
+                add_ai_voltage_chan=lambda _channel, **_kwargs: None
+            )
 
         def read(self) -> float:
             return 0.0
@@ -506,7 +512,9 @@ def test_real_hal_normalizes_ni_digital_line(monkeypatch):
 
     class DummyTask:
         def __init__(self) -> None:
-            self.ai_channels = SimpleNamespace(add_ai_voltage_chan=lambda _channel: None)
+            self.ai_channels = SimpleNamespace(
+                add_ai_voltage_chan=lambda _channel, **_kwargs: None
+            )
             self.do_channels = DummyDoChannels()
 
         def __enter__(self):
