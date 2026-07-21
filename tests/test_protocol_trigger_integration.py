@@ -95,6 +95,47 @@ def test_queued_ttl_pulse_is_rejected_after_mode_switch() -> None:
     assert controller.protocol_executor.state.recent_event.result == "ignored"
 
 
+def test_queued_ttl_pulse_is_rejected_after_stop() -> None:
+    controller = _controller(TriggerMode.TTL)
+    controller.handle_protocol_start_requested()
+    queued = TtlPulse(
+        timestamp=10.0,
+        arm_epoch=controller.protocol_executor.state.arm_epoch,
+        sequence=1,
+    )
+    old_epoch = queued.arm_epoch
+
+    controller.handle_protocol_stop_requested()
+    controller.handle_ttl_pulse(queued)
+
+    assert controller.protocol_executor.state.status == ProtocolExecutionStatus.STOPPED
+    assert controller.protocol_executor.state.trial_index == 0
+    assert controller.protocol_executor.state.arm_epoch > old_epoch
+    assert controller.protocol_executor.state.recent_event.result == "ignored"
+
+
+def test_queued_ttl_pulse_cannot_advance_after_disconnect() -> None:
+    controller = _controller(TriggerMode.TTL)
+    controller.handle_protocol_start_requested()
+    queued = TtlPulse(
+        timestamp=10.0,
+        arm_epoch=controller.protocol_executor.state.arm_epoch,
+        sequence=1,
+    )
+    old_epoch = queued.arm_epoch
+
+    controller.state.telemetry.connected = False
+    controller.handle_protocol_executor_tick()
+    controller.handle_ttl_pulse(queued)
+
+    assert controller.protocol_executor.state.status == ProtocolExecutionStatus.BLOCKED
+    assert controller.protocol_executor.state.trial_index == 0
+    assert controller.protocol_executor.state.waiting_started_at is None
+    assert controller.protocol_executor.state.active_valve is None
+    assert controller.protocol_executor.state.arm_epoch > old_epoch
+    assert controller.protocol_executor.state.recent_event.result == "rejected"
+
+
 def test_ttl_read_error_blocks_running_executor_and_invalidates_epoch() -> None:
     controller = _controller(TriggerMode.TTL)
     controller.handle_protocol_start_requested()
@@ -105,6 +146,39 @@ def test_ttl_read_error_blocks_running_executor_and_invalidates_epoch() -> None:
     assert controller.protocol_executor.state.status == ProtocolExecutionStatus.BLOCKED
     assert controller.protocol_executor.state.arm_epoch > old_epoch
     assert "读取失败" in controller.protocol_executor.state.recent_event.message
+
+
+def test_runtime_read_error_keeps_ttl_rearm_rejected_until_a_frame_recovers() -> None:
+    class FailingHAL(MockHAL):
+        def read_ai_frame(self, timestamp: float | None = None):
+            raise RuntimeError("USB disconnected")
+
+    controller = _controller(TriggerMode.TTL)
+    controller.worker.hal = FailingHAL()
+    controller.handle_protocol_start_requested()
+
+    controller.worker._emit_ai_frame(10.0)
+    controller.handle_protocol_rearm_requested()
+
+    assert controller.worker.ttl_input_ready is False
+    assert controller.protocol_executor.state.status == ProtocolExecutionStatus.BLOCKED
+    assert controller.protocol_executor.state.recent_event.event == "rearm_rejected"
+    assert "AI6" in controller.protocol_executor.state.recent_event.message
+
+
+def test_breath_sample_blocks_on_fresh_readiness_loss_before_opening_valve() -> None:
+    controller = _controller()
+    controller.valve_service.set_valve = MagicMock(return_value=(True, "ok"))
+    controller.handle_protocol_start_requested()
+    controller.handle_protocol_manual_trigger_requested()
+    controller.state.telemetry.connected = False
+
+    controller.handle_breath_samples([-0.6], 10.0)
+
+    assert controller.protocol_executor.state.status == ProtocolExecutionStatus.BLOCKED
+    assert controller.protocol_executor.state.active_valve is None
+    controller.valve_service.set_valve.assert_not_called()
+    assert "连接" in controller.protocol_executor.state.recent_event.message
 
 
 def test_protocol_replacement_close_failure_keeps_old_document_and_active_valve() -> None:

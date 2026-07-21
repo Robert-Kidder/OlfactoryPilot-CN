@@ -594,6 +594,7 @@ class MainController(QObject):
         executor_result = self.protocol_executor.process_breath_samples(
             samples=calibrated_samples,
             safety_state=self.state.telemetry.safety_state,
+            readiness=self._execution_readiness(),
             timestamp_start=start_ts,
             dt=dt,
         )
@@ -823,6 +824,7 @@ class MainController(QObject):
         self._publish_protocol_result(
             self.protocol_executor.skip_current(
                 safety_state=self.state.telemetry.safety_state,
+                readiness=self._execution_readiness(),
                 timestamp=time.time(),
                 message="用户请求跳过当前 trial，准备下一 trial。",
             )
@@ -840,6 +842,7 @@ class MainController(QObject):
         self._publish_protocol_result(
             self.protocol_executor.tick(
                 safety_state=self.state.telemetry.safety_state,
+                readiness=self._execution_readiness(),
                 timestamp=time.time(),
             ),
             render_even_without_events=True,

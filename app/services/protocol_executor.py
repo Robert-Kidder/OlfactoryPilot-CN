@@ -89,7 +89,12 @@ class ProtocolExecutor:
                 message="仍有活动阀门未关闭，不能重置；请先停止并重试安全关闭。",
             )
         status = ProtocolExecutionStatus.READY if document and document.trials else ProtocolExecutionStatus.IDLE
-        self.state = ProtocolExecutionState(document=document, status=status)
+        invalidated_epoch = self.state.arm_epoch + 1
+        self.state = ProtocolExecutionState(
+            document=document,
+            status=status,
+            arm_epoch=invalidated_epoch,
+        )
         self._sync_trial_mode(clear_override=True)
         return self.empty_result()
 
@@ -110,16 +115,8 @@ class ProtocolExecutor:
                 safety_state=ready.safety_state,
                 message="仍有活动阀门未关闭，不能开始；请先停止并重试安全关闭。",
             )
-        if document is not None:
-            if not document.trials:
-                document = None
-            self.state = ProtocolExecutionState(
-                document=document,
-                status=ProtocolExecutionStatus.READY if document else ProtocolExecutionStatus.IDLE,
-            )
-            self._sync_trial_mode(clear_override=True)
-
-        if not self.state.document or not self.state.document.trials:
+        candidate_document = document if document is not None else self.state.document
+        if not candidate_document or not candidate_document.trials:
             return self._rejected(
                 "invalid_protocol",
                 now,
@@ -127,9 +124,25 @@ class ProtocolExecutor:
                 message="请先加载有效协议，然后再开始协议执行。",
             )
 
+        allowed_start_states = (
+            {ProtocolExecutionStatus.IDLE, ProtocolExecutionStatus.READY}
+            if document is not None
+            else {ProtocolExecutionStatus.READY, ProtocolExecutionStatus.STOPPED}
+        )
+        if self.state.status not in allowed_start_states:
+            return self._rejected(
+                "start_rejected",
+                now,
+                safety_state=ready.safety_state,
+                message=f"当前状态为 {_STATUS_TEXT[self.state.status]}，不能开始协议。",
+            )
+        if document is not None or self.state.status == ProtocolExecutionStatus.STOPPED:
+            prospective_mode = candidate_document.trials[0].trigger
+        else:
+            prospective_mode = self.state.current_mode
         reason = ready.rejection_reason(
             has_protocol=True,
-            require_ttl=self.state.current_mode == TriggerMode.TTL,
+            require_ttl=prospective_mode == TriggerMode.TTL,
         )
         if reason:
             return self._rejected(
@@ -139,16 +152,17 @@ class ProtocolExecutor:
                 message=reason,
             )
 
-        if self.state.status == ProtocolExecutionStatus.STOPPED:
+        if document is not None:
+            invalidated_epoch = self.state.arm_epoch + 1
+            self.state = ProtocolExecutionState(
+                document=candidate_document,
+                status=ProtocolExecutionStatus.READY,
+                arm_epoch=invalidated_epoch,
+            )
+            self._sync_trial_mode(clear_override=True)
+        elif self.state.status == ProtocolExecutionStatus.STOPPED:
             self.state.trial_index = 0
             self._sync_trial_mode(clear_override=True)
-        elif self.state.status != ProtocolExecutionStatus.READY:
-            return self._rejected(
-                "start_rejected",
-                now,
-                safety_state=ready.safety_state,
-                message=f"当前状态为 {_STATUS_TEXT[self.state.status]}，不能开始协议。",
-            )
         self.state.retry_count = 0
         return self._enter_trigger_waiting(now, readiness=ready)
 
@@ -405,11 +419,16 @@ class ProtocolExecutor:
         samples: list[float],
         *,
         safety_state: str,
+        readiness: ProtocolExecutionReadiness | None = None,
         timestamp_start: float,
         dt: float = 0.01,
     ) -> ProtocolExecutorResult:
         if not samples:
             return self.empty_result()
+        ready = self._readiness(readiness, safety_state)
+        readiness_result = self.handle_readiness_lost(ready, timestamp=timestamp_start)
+        if readiness_result.events:
+            return readiness_result
         if not all(math.isfinite(float(sample)) for sample in samples):
             return self._block(
                 timestamp_start,
@@ -461,23 +480,28 @@ class ProtocolExecutor:
         self,
         *,
         safety_state: str,
+        readiness: ProtocolExecutionReadiness | None = None,
         timestamp: float | None = None,
     ) -> ProtocolExecutorResult:
         now = self._now(timestamp)
-        if safety_state != "SAFE":
-            return self.handle_safety_update(safety_state, timestamp=now)
+        ready = self._readiness(readiness, safety_state)
+        readiness_result = self.handle_readiness_lost(ready, timestamp=now)
+        if readiness_result.events:
+            return readiness_result
+        if ready.safety_state != "SAFE":
+            return self.handle_safety_update(ready.safety_state, timestamp=now)
 
         if self.state.status == ProtocolExecutionStatus.WAITING_EXHALE:
             started = self.state.waiting_started_at
             if started is not None and (now - started) * 1000 >= self.config.breath_gate_timeout_ms:
-                return self._handle_timeout(now, safety_state=safety_state)
+                return self._handle_timeout(now, readiness=ready)
 
         if self.state.status == ProtocolExecutionStatus.TRIGGERED:
             trial = self.state.current_trial
             started = self.state.triggered_at
             elapsed_ms = (now - started) * 1000 if started is not None else 0.0
             if trial and started is not None and elapsed_ms + 1e-9 >= float(trial.duration_ms):
-                return self._finish_triggered_trial(now, safety_state=safety_state)
+                return self._finish_triggered_trial(now, readiness=ready)
 
         return self.empty_result()
 
@@ -485,23 +509,50 @@ class ProtocolExecutor:
         self,
         *,
         safety_state: str,
+        readiness: ProtocolExecutionReadiness | None = None,
         timestamp: float | None = None,
         message: str = "当前 trial 已跳过，准备下一 trial。",
     ) -> ProtocolExecutorResult:
         now = self._now(timestamp)
-        if safety_state != "SAFE":
+        ready = self._readiness(readiness, safety_state)
+        if ready.safety_state != "SAFE":
             return self._safety_block(
                 now,
-                safety_state=safety_state,
-                message=f"安全状态为 {safety_state}，不能推进 trial；请恢复 SAFE 后再继续。",
+                safety_state=ready.safety_state,
+                message=f"安全状态为 {ready.safety_state}，不能推进 trial；请恢复 SAFE 后再继续。",
+            )
+        readiness_result = self.handle_readiness_lost(ready, timestamp=now)
+        if readiness_result.events:
+            return readiness_result
+        allowed = {
+            ProtocolExecutionStatus.WAITING_TRIGGER,
+            ProtocolExecutionStatus.WAITING_EXHALE,
+        }
+        if self.state.active_valve is not None or self.state.status not in allowed:
+            return self._rejected(
+                "skip_rejected",
+                now,
+                safety_state=ready.safety_state,
+                message=(
+                    "当前 trial 正在刺激或存在未关闭阀门，不能跳过；请先停止并确认安全关闭。"
+                    if self.state.active_valve is not None
+                    else f"当前状态为 {_STATUS_TEXT[self.state.status]}，不能跳过 trial。"
+                ),
             )
         if not self.state.document:
-            return self.start(None, safety_state=safety_state, timestamp=now)
-        events = [self._event("skip", now, safety_state=safety_state, message=message)]
+            return self.start(None, readiness=ready, timestamp=now)
+        common_reason = ready.rejection_reason(has_protocol=True)
+        if common_reason:
+            return self._block(
+                now,
+                safety_state=ready.safety_state,
+                message=f"运行就绪条件丢失：{common_reason} 已阻断 trial 推进。",
+            )
+        events = [self._event("skip", now, safety_state=ready.safety_state, message=message)]
         self.state.status = ProtocolExecutionStatus.SKIPPED
         self.state.trial_index += 1
         self.state.retry_count = 0
-        events.extend(self._prepare_after_advance(now, safety_state=safety_state).events)
+        events.extend(self._prepare_after_advance(now, readiness=ready).events)
         return self._result_with_events(events)
 
     def stop(
@@ -757,7 +808,13 @@ class ProtocolExecutor:
             ]
         )
 
-    def _finish_triggered_trial(self, timestamp: float, *, safety_state: str) -> ProtocolExecutorResult:
+    def _finish_triggered_trial(
+        self,
+        timestamp: float,
+        *,
+        readiness: ProtocolExecutionReadiness,
+    ) -> ProtocolExecutorResult:
+        safety_state = readiness.safety_state
         trial = self.state.current_trial
         if trial is None or self.state.active_valve is None:
             return self._block(timestamp, safety_state=safety_state, message="当前 trial 状态无效，已阻断。")
@@ -793,10 +850,16 @@ class ProtocolExecutor:
         ]
         self.state.trial_index += 1
         self.state.retry_count = 0
-        events.extend(self._prepare_after_advance(timestamp, safety_state=safety_state).events)
+        events.extend(self._prepare_after_advance(timestamp, readiness=readiness).events)
         return self._result_with_events(events)
 
-    def _handle_timeout(self, timestamp: float, *, safety_state: str) -> ProtocolExecutorResult:
+    def _handle_timeout(
+        self,
+        timestamp: float,
+        *,
+        readiness: ProtocolExecutionReadiness,
+    ) -> ProtocolExecutorResult:
+        safety_state = readiness.safety_state
         events = [
             self._event(
                 "timeout",
@@ -823,26 +886,51 @@ class ProtocolExecutor:
             )
             return self._result_with_events(events)
         reason = "已超过最大重试次数，跳过当前 trial。" if self.config.breath_gate_timeout_action == "retry" else "等待呼气超时，跳过当前 trial。"
-        events.extend(self.skip_current(safety_state=safety_state, timestamp=timestamp, message=reason).events)
+        events.extend(
+            self.skip_current(
+                safety_state=safety_state,
+                readiness=readiness,
+                timestamp=timestamp,
+                message=reason,
+            ).events
+        )
         return self._result_with_events(events)
 
-    def _prepare_after_advance(self, timestamp: float, *, safety_state: str) -> ProtocolExecutorResult:
+    def _prepare_after_advance(
+        self,
+        timestamp: float,
+        *,
+        readiness: ProtocolExecutionReadiness,
+    ) -> ProtocolExecutorResult:
         if not self.state.document or self.state.trial_index >= len(self.state.document.trials):
+            self._invalidate_arm()
             self.state.status = ProtocolExecutionStatus.COMPLETED
+            self.state.waiting_started_at = None
+            self.state.triggered_at = None
             return self._result_with_events(
                 [
                     self._event(
                         "completed",
                         timestamp,
-                        safety_state=safety_state,
+                        safety_state=readiness.safety_state,
                         message="协议门控流程已完成。",
                     )
                 ]
             )
         self._sync_trial_mode(clear_override=True)
+        reason = readiness.rejection_reason(
+            has_protocol=True,
+            require_ttl=self.state.current_mode == TriggerMode.TTL,
+        )
+        if reason:
+            return self._block(
+                timestamp,
+                safety_state=readiness.safety_state,
+                message=f"下一 trial 无法布防：{reason}",
+            )
         return self._enter_trigger_waiting(
             timestamp,
-            readiness=self._readiness(None, safety_state),
+            readiness=readiness,
         )
 
     def _block(self, timestamp: float, *, safety_state: str, message: str) -> ProtocolExecutorResult:

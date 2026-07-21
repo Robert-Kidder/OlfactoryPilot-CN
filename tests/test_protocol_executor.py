@@ -160,6 +160,42 @@ def test_ttl_trigger_rejects_stale_epoch_without_mutating_wait_state() -> None:
     assert actions == []
 
 
+def test_reset_keeps_trigger_epoch_monotonic_across_protocol_replacement() -> None:
+    executor = _executor()
+    second = ProtocolDocument(
+        source_path=Path("replacement.csv"),
+        source_name="replacement.csv",
+        trials=[
+            ProtocolTrial(
+                trial_id="replacement-1",
+                timing_ms=0,
+                duration_ms=100,
+                valve=5,
+                trigger=TriggerMode.TTL,
+            )
+        ],
+    )
+    executor.reset(_document())
+    executor.set_trigger_mode(TriggerMode.TTL, readiness=_readiness(), timestamp=9.0)
+    executor.start(readiness=_readiness(), timestamp=10.0)
+    queued_epoch = executor.state.arm_epoch
+
+    executor.reset(second, timestamp=10.1)
+    executor.start(readiness=_readiness(), timestamp=10.2)
+    result = executor.accept_trigger(
+        TriggerMode.TTL,
+        readiness=_readiness(),
+        timestamp=10.3,
+        captured_epoch=queued_epoch,
+        sequence=1,
+    )
+
+    assert executor.state.arm_epoch > queued_epoch
+    assert result.state.status == ProtocolExecutionStatus.WAITING_TRIGGER
+    assert result.events[-1].event == "ttl_pulse_ignored"
+    assert result.events[-1].result == "ignored"
+
+
 @pytest.mark.parametrize(
     ("overrides", "reason"),
     [
@@ -200,6 +236,85 @@ def test_start_rejects_each_common_readiness_failure_without_state_change(
     )
 
 
+def test_start_with_candidate_document_rejects_readiness_without_replacing_state() -> None:
+    executor = _executor()
+    original = _document()
+    candidate = ProtocolDocument(
+        source_path=Path("candidate.csv"),
+        source_name="candidate.csv",
+        trials=[ProtocolTrial("candidate-ttl", 0, 100, 9, TriggerMode.TTL)],
+    )
+    executor.reset(original)
+    before = (
+        executor.state.document,
+        executor.state.status,
+        executor.state.trial_index,
+        executor.state.current_mode,
+        executor.state.arm_epoch,
+    )
+
+    result = executor.start(
+        candidate,
+        readiness=_readiness(ttl_input_ready=False),
+        timestamp=10.0,
+    )
+
+    assert result.events[-1].result == "rejected"
+    assert "AI6" in result.events[-1].message
+    assert before == (
+        executor.state.document,
+        executor.state.status,
+        executor.state.trial_index,
+        executor.state.current_mode,
+        executor.state.arm_epoch,
+    )
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        ProtocolExecutionStatus.WAITING_TRIGGER,
+        ProtocolExecutionStatus.WAITING_EXHALE,
+        ProtocolExecutionStatus.TRIGGERED,
+        ProtocolExecutionStatus.BLOCKED,
+        ProtocolExecutionStatus.STOPPED,
+        ProtocolExecutionStatus.COMPLETED,
+    ],
+)
+def test_start_with_candidate_document_rejects_illegal_existing_state_atomically(
+    status: ProtocolExecutionStatus,
+) -> None:
+    executor = _executor()
+    original = _document()
+    candidate = ProtocolDocument(
+        source_path=Path("candidate.csv"),
+        source_name="candidate.csv",
+        trials=[ProtocolTrial("candidate", 0, 100, 9, TriggerMode.MANUAL)],
+    )
+    executor.reset(original)
+    executor.state.status = status
+    before = (
+        executor.state.document,
+        executor.state.status,
+        executor.state.trial_index,
+        executor.state.current_mode,
+        executor.state.arm_epoch,
+        executor.state.active_valve,
+    )
+
+    result = executor.start(candidate, readiness=_readiness(), timestamp=10.0)
+
+    assert result.events[-1].event == "start_rejected"
+    assert result.events[-1].result == "rejected"
+    assert before == (
+        executor.state.document,
+        executor.state.status,
+        executor.state.trial_index,
+        executor.state.current_mode,
+        executor.state.arm_epoch,
+        executor.state.active_valve,
+    )
+
 def test_ready_mode_override_does_not_mutate_frozen_trial_and_start_preserves_it() -> None:
     document = _document()
     executor = _executor()
@@ -230,6 +345,80 @@ def test_running_mode_switch_clears_waits_retry_and_invalidates_epoch() -> None:
     assert result.state.waiting_started_at is None
     assert result.state.retry_count == 0
     assert result.state.ttl_armed is True
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        ProtocolExecutionStatus.IDLE,
+        ProtocolExecutionStatus.BLOCKED,
+        ProtocolExecutionStatus.STOPPED,
+        ProtocolExecutionStatus.COMPLETED,
+    ],
+)
+def test_mode_switch_rejects_every_illegal_status_without_mutation(
+    status: ProtocolExecutionStatus,
+) -> None:
+    executor = _executor()
+    executor.reset(_document())
+    executor.state.status = status
+    before = (
+        executor.state.status,
+        executor.state.current_mode,
+        executor.state.mode_override,
+        executor.state.arm_epoch,
+        executor.state.trial_index,
+        executor.state.active_valve,
+    )
+
+    result = executor.set_trigger_mode(TriggerMode.TTL, readiness=_readiness(), timestamp=10.0)
+
+    assert result.events[-1].result == "rejected"
+    assert before == (
+        executor.state.status,
+        executor.state.current_mode,
+        executor.state.mode_override,
+        executor.state.arm_epoch,
+        executor.state.trial_index,
+        executor.state.active_valve,
+    )
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        ProtocolExecutionStatus.READY,
+        ProtocolExecutionStatus.WAITING_TRIGGER,
+        ProtocolExecutionStatus.WAITING_EXHALE,
+        ProtocolExecutionStatus.TRIGGERED,
+    ],
+)
+def test_mode_switch_accepts_complete_legal_status_matrix(status: ProtocolExecutionStatus) -> None:
+    actions: list[tuple[int, bool]] = []
+    executor = _executor(actions=actions)
+    executor.reset(_document())
+    if status != ProtocolExecutionStatus.READY:
+        executor.start(readiness=_readiness(), timestamp=10.0)
+    if status in {ProtocolExecutionStatus.WAITING_EXHALE, ProtocolExecutionStatus.TRIGGERED}:
+        executor.accept_trigger(
+            TriggerMode.MANUAL,
+            readiness=_readiness(ttl_input_ready=False),
+            timestamp=10.1,
+        )
+    if status == ProtocolExecutionStatus.TRIGGERED:
+        executor.process_breath_samples([-0.6], safety_state="SAFE", timestamp_start=10.2)
+
+    result = executor.set_trigger_mode(TriggerMode.TTL, readiness=_readiness(), timestamp=10.3)
+
+    assert result.events[-1].event == "mode_changed"
+    assert result.state.current_mode == TriggerMode.TTL
+    assert result.state.mode_override == TriggerMode.TTL
+    assert result.state.status == (
+        ProtocolExecutionStatus.READY
+        if status == ProtocolExecutionStatus.READY
+        else ProtocolExecutionStatus.WAITING_TRIGGER
+    )
+    assert result.state.active_valve is None
 
 
 def test_triggered_mode_switch_close_failure_preserves_mode_epoch_and_valve() -> None:
@@ -352,6 +541,52 @@ def test_stopped_restart_returns_to_trial_zero_declared_mode() -> None:
     assert restarted.state.trial_index == 0
     assert restarted.state.mode_override is None
     assert restarted.state.current_mode == TriggerMode.MANUAL
+
+
+def test_stopped_restart_checks_first_trial_mode_not_stopped_trial_mode() -> None:
+    executor = _executor()
+    executor.start(_document(), readiness=_readiness(), timestamp=10.0)
+    executor.skip_current(safety_state="SAFE", readiness=_readiness(), timestamp=10.1)
+    assert executor.state.current_mode == TriggerMode.TTL
+    executor.stop(safety_state="SAFE", timestamp=10.2)
+
+    restarted = executor.start(readiness=_readiness(ttl_input_ready=False), timestamp=10.3)
+
+    assert restarted.state.status == ProtocolExecutionStatus.WAITING_TRIGGER
+    assert restarted.state.trial_index == 0
+    assert restarted.state.current_mode == TriggerMode.MANUAL
+
+
+def test_stopped_restart_rejection_for_first_ttl_trial_is_atomic() -> None:
+    document = ProtocolDocument(
+        source_path=Path("ttl-first.csv"),
+        source_name="ttl-first.csv",
+        trials=[
+            ProtocolTrial("ttl-first", 0, 100, 1, TriggerMode.TTL),
+            ProtocolTrial("manual-second", 100, 100, 2, TriggerMode.MANUAL),
+        ],
+    )
+    executor = _executor()
+    executor.start(document, readiness=_readiness(), timestamp=10.0)
+    executor.skip_current(safety_state="SAFE", readiness=_readiness(), timestamp=10.1)
+    executor.stop(safety_state="SAFE", timestamp=10.2)
+    before = (
+        executor.state.status,
+        executor.state.trial_index,
+        executor.state.current_mode,
+        executor.state.arm_epoch,
+    )
+
+    rejected = executor.start(readiness=_readiness(ttl_input_ready=False), timestamp=10.3)
+
+    assert rejected.events[-1].result == "rejected"
+    assert "AI6" in rejected.events[-1].message
+    assert before == (
+        executor.state.status,
+        executor.state.trial_index,
+        executor.state.current_mode,
+        executor.state.arm_epoch,
+    )
 
 
 def test_exhale_transition_opens_current_valve_and_tick_closes_then_advances() -> None:
@@ -637,6 +872,73 @@ def test_non_safe_skip_current_blocks_without_advancing() -> None:
     assert "不能推进" in result.events[-1].message
 
 
+def test_skip_current_rejects_triggered_trial_without_losing_active_valve() -> None:
+    actions: list[tuple[int, bool]] = []
+    executor = _executor(actions=actions)
+    _start_manual(executor)
+    executor.process_breath_samples([-0.6], safety_state="SAFE", timestamp_start=10.1)
+    before = (
+        executor.state.status,
+        executor.state.trial_index,
+        executor.state.active_valve,
+        executor.state.arm_epoch,
+    )
+
+    result = executor.skip_current(safety_state="SAFE", timestamp=10.2)
+
+    assert result.events[-1].event == "skip_rejected"
+    assert result.events[-1].result == "rejected"
+    assert before == (
+        executor.state.status,
+        executor.state.trial_index,
+        executor.state.active_valve,
+        executor.state.arm_epoch,
+    )
+    assert actions == [(3, True)]
+
+
+def test_skip_current_safety_blocks_triggered_trial_on_fresh_readiness_loss() -> None:
+    actions: list[tuple[int, bool]] = []
+    executor = _executor(actions=actions)
+    _start_manual(executor)
+    executor.process_breath_samples(
+        [-0.6],
+        safety_state="SAFE",
+        readiness=_readiness(),
+        timestamp_start=10.1,
+    )
+    old_epoch = executor.state.arm_epoch
+
+    result = executor.skip_current(
+        safety_state="SAFE",
+        readiness=_readiness(connected=False),
+        timestamp=10.2,
+    )
+
+    assert result.state.status == ProtocolExecutionStatus.BLOCKED
+    assert result.state.trial_index == 0
+    assert result.state.active_valve is None
+    assert result.state.arm_epoch > old_epoch
+    assert result.events[-1].event == "blocked"
+    assert "连接" in result.events[-1].message
+    assert actions == [(3, True), (3, False)]
+
+
+def test_skip_current_rejects_blocked_trial_without_discarding_close_failure() -> None:
+    executor = _executor()
+    executor.reset(_document())
+    executor.state.status = ProtocolExecutionStatus.BLOCKED
+    executor.state.active_valve = 3
+    before = (executor.state.trial_index, executor.state.active_valve, executor.state.arm_epoch)
+
+    result = executor.skip_current(safety_state="SAFE", timestamp=10.0)
+
+    assert result.events[-1].event == "skip_rejected"
+    assert result.events[-1].result == "rejected"
+    assert executor.state.status == ProtocolExecutionStatus.BLOCKED
+    assert before == (executor.state.trial_index, executor.state.active_valve, executor.state.arm_epoch)
+
+
 def test_enter_waiting_requires_safe_state_after_advance() -> None:
     executor = _executor()
     executor.reset(_document())
@@ -647,6 +949,33 @@ def test_enter_waiting_requires_safe_state_after_advance() -> None:
     assert result.state.status == ProtocolExecutionStatus.BLOCKED
     assert result.state.trial_index == 1
     assert result.events[-1].event == "safety_block"
+
+
+@pytest.mark.parametrize(
+    "readiness",
+    [
+        _readiness(connected=False),
+        _readiness(hardware_ready=False),
+        _readiness(flow_setpoints_ready=False),
+        _readiness(ttl_input_ready=False),
+    ],
+)
+def test_skip_never_arms_next_ttl_trial_when_required_readiness_is_missing(
+    readiness: ProtocolExecutionReadiness,
+) -> None:
+    executor = _executor()
+    executor.start(_document(), readiness=_readiness(), timestamp=10.0)
+
+    result = executor.skip_current(
+        safety_state=readiness.safety_state,
+        readiness=readiness,
+        timestamp=10.1,
+    )
+
+    assert result.state.status == ProtocolExecutionStatus.BLOCKED
+    assert result.state.ttl_armed is False
+    assert result.state.waiting_trigger_started_at is None
+    assert result.events[-1].result == "blocked"
 
 
 def test_finished_last_trial_marks_completed() -> None:
@@ -679,6 +1008,36 @@ def test_finished_last_trial_marks_completed() -> None:
     assert result.state.status == ProtocolExecutionStatus.COMPLETED
     assert result.events[-1].event == "completed"
     assert result.state.current_trial is None
+
+
+def test_skipping_last_ttl_trial_completes_with_epoch_invalidated_and_disarmed() -> None:
+    document = ProtocolDocument(
+        source_path=Path("single-ttl.csv"),
+        source_name="single-ttl.csv",
+        trials=[
+            ProtocolTrial(
+                trial_id="only-ttl",
+                timing_ms=0,
+                duration_ms=10,
+                valve=7,
+                trigger=TriggerMode.TTL,
+            )
+        ],
+    )
+    executor = _executor()
+    executor.start(document, readiness=_readiness(), timestamp=10.0)
+    armed_epoch = executor.state.arm_epoch
+
+    result = executor.skip_current(
+        safety_state="SAFE",
+        readiness=_readiness(),
+        timestamp=10.1,
+    )
+
+    assert result.state.status == ProtocolExecutionStatus.COMPLETED
+    assert result.state.ttl_armed is False
+    assert result.state.waiting_trigger_started_at is None
+    assert result.state.arm_epoch > armed_epoch
 
 
 def test_executor_uses_existing_gating_service_for_exhale_detection() -> None:
