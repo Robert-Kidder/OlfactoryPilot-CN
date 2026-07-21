@@ -4,7 +4,7 @@ baseline_commit: fe9d1259a6115e58d14887a3b0948cebb06b0ddb
 
 # Story 3.3: 手动与 TTL 触发模式
 
-Status: review
+Status: done
 Epic: 3 - 协议执行与数据记录
 Story Key: 3-3-manual-vs-ttl-trigger-modes
 Story ID: 3.3
@@ -179,6 +179,27 @@ Story ID: 3.3
   - [x] 运行 `python -m pytest`。
   - [x] 运行 `python -m ruff check app tests`。
   - [x] 在真实或 NI MAX 模拟的 USB-6001 上验证 Dev1 单一 AI task 同时读取 AI0/AI6，不出现 `-50103/resource reserved`；记录 AI6 有效采样率、AI0 100Hz 输出连续性及读取错误安全降级结果到 sprint artifact。
+
+### Review Findings
+
+- [x] [Review][Patch] `skip_current()` 缺少状态与活动阀守卫，排队的 next 事件可越过 `TRIGGERED/BLOCKED` 并遗失对已开阀的跟踪 [app/services/protocol_executor.py:484]
+- [x] [Review][Patch] `reset()` 重置 `arm_epoch/sequence` 身份，旧协议排队 pulse 可在新协议首次布防后被接受 [app/services/protocol_executor.py:91]
+- [x] [Review][Patch] TTL 去抖候选和 epoch 修改未原子化，旧边沿可被重新标记为新 epoch [app/services/ttl_trigger_service.py:78]
+- [x] [Review][Patch] 共享 AI task 未显式配置连续采样，`nidaqmx 0.9.0` 默认为 `FINITE/1000 samples` [app/services/real_hal.py:304]
+- [x] [Review][Patch] trial 推进使用伪造的全就绪快照，AI6/连接/自检/MFC 未就绪仍可进入 `waiting_trigger` [app/services/protocol_executor.py:829]
+- [x] [Review][Patch] 呼吸样本入口仅检查 safety state，在统一 readiness 丢失到 50 ms tick 之间仍可尝试开阀 [app/controllers/main_controller.py:594]
+- [x] [Review][Patch] 持续共享 AI 读取故障没有 latch/退避，会以约 1 kHz 产生 Qt signal、协议日志和 UI 更新风暴 [app/workers/hardware_worker.py:237]
+- [x] [Review][Patch] 运行时读取故障后 `ttl_input_ready` 仍为 true，故障未恢复也可执行 `rearm_current()` [app/workers/hardware_worker.py:132]
+- [x] [Review][Patch] 跳过最后一个 TTL trial 后 `COMPLETED` 仍保留 `ttl_armed` 与旧 epoch [app/services/protocol_executor.py:829]
+- [x] [Review][Patch] `STOPPED` 重启先用停止时的旧 trial 模式检查 readiness，再切回 trial 0 模式，导致误拒绝或拒绝后变更状态 [app/services/protocol_executor.py:130]
+- [x] [Review][Patch] `start(document=...)` 在 readiness 守卫前替换 document/state，违反动作前纯拒绝的原子性 [app/services/protocol_executor.py:113]
+- [x] [Review][Patch] 补齐模式切换状态矩阵、跨协议旧 pulse、去抖期 epoch 切换、长时采集和持续读错风暴的自动化回归 [tests/test_protocol_executor.py:203]
+- [x] [Review][Patch] TTL detector 的 `arm()/disarm()` 与 worker `process_sample()` 跨线程访问仍未原子化，旧边沿可在真实线程交错下被标记为新 epoch [app/services/ttl_trigger_service.py:78]
+- [x] [Review][Patch] `TRIGGERED` 且 readiness 刚丢失时，`skip_current()` 先按活动阀拒绝而未进入安全阻断，活动阀会保持开启直到后续 tick [app/services/protocol_executor.py:526]
+- [x] [Review][Patch] 连续 1 kHz AI task 仍每轮只读取一个样本并额外休眠，1000-sample 缓冲会在调度滞后/退避时积压溢出，同时使 TTL 采集时间戳漂移 [app/services/real_hal.py:127]
+- [x] [Review][Patch] 共享 AI 故障恢复时在校验 frame 数值前即发布 readiness=true，无效恢复帧可造成短暂的虚假可用窗口 [app/workers/hardware_worker.py:247]
+- [x] [Review][Patch] `start(document=...)` 只在 document 为空时检查状态，传入候选协议可绕过 `BLOCKED/COMPLETED/运行态` 的 start 状态矩阵 [app/services/protocol_executor.py:131]
+- [x] [Review][Patch] 已勾选的 queued-pulse 竞态测试仍缺少 stop 后与 disconnect 后投递旧 pulse 的覆盖 [tests/test_protocol_trigger_integration.py:81]
 
 ## Dev Notes
 
@@ -386,6 +407,9 @@ OpenAI Codex（GPT-5）
 - `D:\miniconda3\envs\code\python.exe -m pytest tests/test_protocol_parser.py tests/test_valve_service.py`：23 passed。
 - `D:\miniconda3\envs\code\python.exe -m pytest`：199 passed（Python 3.11.15）。
 - `D:\miniconda3\envs\code\python.exe -m ruff check app tests`：All checks passed。
+- 2026-07-21 Review Patch 定向回归：`tests/test_protocol_executor.py tests/test_ttl_trigger_service.py tests/test_ttl_input.py tests/test_protocol_trigger_integration.py` 共 76 passed；3.1/3.2/UI/应用相关回归共 90 passed。
+- 2026-07-21 Review Patch 全量验证：`D:\miniconda3\envs\code\python.exe -m pytest` 为 224 passed；`D:\miniconda3\envs\code\python.exe -m ruff check app tests` 为 All checks passed。
+- 2026-07-21 复审追加修复验证：TTL/Executor/HAL/Controller 相关 150 passed；全量 `python -m pytest` 为 237 passed，`python -m ruff check app tests` 与 `git diff --check` 均通过。
 - NI 设备只读枚举：发现 `Dev1` / `Dev2` 为非模拟 USB-6001，另有 `SimDev1`。
 - 早期 Dev1 探针在受限 Codex 沙箱内出现的 task 创建/读取超时已由普通用户环境成功复测推翻；最终实机证据以上述单 task `1000 Hz/通道`、AI0 `100 Hz` 连续输出与真实按钮单 pulse 结果为准。
 
@@ -396,9 +420,12 @@ OpenAI Codex（GPT-5）
 - 已新增 `WAITING_TRIGGER`、统一 readiness、manual/TTL trigger 接受与拒绝、模式 override/切换、epoch/sequence 去重、显式 rearm 和关阀失败恢复；frozen 协议模型保持不变。
 - 已新增 TTL 迟滞/去抖纯服务和不可变 pulse，RealHAL 以唯一 `_ai_task`、显式 RSE 共享 AI0/AI6，AI6 初始化失败会关闭部分 task 后降级为显式 RSE 的 AI0-only；MockHAL 与 Worker 使用相同 frame 契约。
 - Controller 仅转发 readiness/原始 pulse 并统一发布结构化事件；协议替换先清理旧执行态，失败保留旧 document/mode/trial/active valve；View 只发 intent 并按 snapshot 渲染。
-- 已覆盖 WAITING_TRIGGER、manual/TTL、模式切换、readiness、陈旧/重复 pulse、持续高电平、TTL read error、close_failed 恢复、协议替换原子性及 3.1/3.2 回归；全量 199 tests 与 ruff 通过。
+- 已覆盖 WAITING_TRIGGER、manual/TTL、模式切换、readiness、陈旧/重复 pulse、持续高电平、TTL read error、close_failed 恢复、协议替换原子性及 3.1/3.2 回归；全量 237 tests 与 ruff 通过。
 - 未实现 Story 3.4 的低抖动质量门，也未实现 Story 3.5 的 `.raw/.log` 会话文件输出。
-- 真实 Dev1 工程验证完成：单 task AI0/AI6 共享采集无 `-50103`，AI6 1000 Hz 物理按键产生一次有效 pulse，AI0 100 Hz 连续输出，故障注入安全降级通过；Story 状态更新为 `review`。
+- 真实 Dev1 工程验证完成：单 task AI0/AI6 共享采集无 `-50103`，AI6 1000 Hz 物理按键产生一次有效 pulse，AI0 100 Hz 连续输出，故障注入安全降级通过；复审问题清零后 Story 状态更新为 `done`。
+- 已完成 12 项 Review Patch：收紧 skip/start/reset/advance 原子性与 readiness，修复 debounce epoch、连续采样和完成态布防清理，并为每项补充自动化回归。
+- 已完成追加 6 项 Review Patch：TTL detector 使用跨线程状态锁，活动阀 readiness 丢失立即安全阻断，candidate document 遵守 start 状态矩阵，并覆盖 stop/disconnect 陈旧 pulse。
+- 共享 AI worker 现批量排空 DAQ 缓冲、按采样率重建帧时间戳；读错时释放失效 task，恢复帧完整校验后才恢复 readiness，故障未恢复时 TTL rearm 被服务层拒绝。
 
 ### File List
 
@@ -429,6 +456,8 @@ OpenAI Codex（GPT-5）
 
 ## Change Log
 
+- 2026-07-21：完成复审追加 6 项修复与 13 项回归，全量 237 项 pytest、ruff 和 diff 检查全绿，Story 更新为 done。
+- 2026-07-21：完成 12 项 Review Patch 与逐项回归；全量 224 项 pytest、ruff 全绿，Story 更新为 review（未标记 done）。
 - 2026-07-19：纠正 Codex 沙箱 IPC 导致的 DAQmx 假超时；在真实 Dev1 上完成单 task AI0/AI6、AI6 1000 Hz、AI0 100 Hz 和物理按钮单 pulse 验证；按红灯测试为共享/fallback task 固定 RSE，199 项 pytest 与 ruff 全绿，Story 更新为 review。
 - 2026-07-19：记录 Dev1 型号/序列号/NI MAX 自检、内置手动 TTL 电平、机外接口盘点及当前 COM6 缺失情况；Story 仍为 in-progress，等待单一 AI task 的 AI0/AI6 联合采集与协议实机验收。
 - 2026-07-18：创建 Story 3.3 手动与 TTL 触发模式，状态设为 ready-for-dev。
