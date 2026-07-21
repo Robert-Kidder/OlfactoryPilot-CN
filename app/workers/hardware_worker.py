@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import time
 
 from PySide6.QtCore import QThread, Signal
@@ -50,6 +51,10 @@ class HardwareWorker(QThread):
         self._ai_sample_count = 0
         self.check_service = check_service
         self.hal: HalInterface = hal or MockHAL()
+        self._ttl_runtime_ready = bool(getattr(self.hal, "ttl_input_ready", False))
+        self._ai_error_latched = False
+        self._ai_retry_not_before = 0.0
+        self._ai_error_backoff_s = 1.0
         self.simulation_mode = simulation
         self._self_check_requested = False
         self._connected = False
@@ -130,7 +135,7 @@ class HardwareWorker(QThread):
 
     @property
     def ttl_input_ready(self) -> bool:
-        return bool(getattr(self.hal, "ttl_input_ready", False))
+        return bool(self._ttl_runtime_ready and getattr(self.hal, "ttl_input_ready", False))
 
     def arm_ttl(self, *, arm_epoch: int) -> None:
         self.ttl_service.arm(arm_epoch=arm_epoch)
@@ -235,16 +240,62 @@ class HardwareWorker(QThread):
         self.breath_samples.emit([value], timestamp)
 
     def _emit_ai_frame(self, timestamp: float) -> None:
+        attempt_started = time.monotonic()
+        if self._ai_error_latched and attempt_started < self._ai_retry_not_before:
+            return
         try:
-            frame = self.hal.read_ai_frame(timestamp)
-            if self._ai_sample_count % self._breath_emit_every == 0:
-                self.breath_samples.emit([float(frame.ai0)], float(frame.timestamp))
-            self._ai_sample_count += 1
-            if frame.ai6 is not None:
-                pulse = self.ttl_service.process_sample(float(frame.ai6), timestamp=float(frame.timestamp))
-                if pulse is not None:
-                    self.ttl_pulse.emit(pulse)
+            frames = self.hal.read_ai_frames(timestamp)
+            if not frames:
+                return
+            normalized_frames: list[tuple[float, float, float | None]] = []
+            for frame in frames:
+                frame_timestamp = float(frame.timestamp)
+                ai0 = float(frame.ai0)
+                ai6 = None if frame.ai6 is None else float(frame.ai6)
+                if not math.isfinite(frame_timestamp) or not math.isfinite(ai0):
+                    raise ValueError("共享 AI 帧包含非有限的时间戳或 AI0 样本")
+                if ai6 is not None and not math.isfinite(ai6):
+                    raise ValueError("共享 AI 帧包含非有限的 AI6 样本")
+                normalized_frames.append((frame_timestamp, ai0, ai6))
+
+            pulses = []
+            breath_values: list[float] = []
+            breath_timestamp: float | None = None
+            for frame_timestamp, ai0, ai6 in normalized_frames:
+                if self._ai_sample_count % self._breath_emit_every == 0:
+                    breath_values.append(ai0)
+                    breath_timestamp = frame_timestamp
+                self._ai_sample_count += 1
+                if ai6 is not None:
+                    pulse = self.ttl_service.process_sample(ai6, timestamp=frame_timestamp)
+                    if pulse is not None:
+                        pulses.append(pulse)
+
+            if self._ai_error_latched:
+                self._ai_error_latched = False
+                restored = bool(getattr(self.hal, "ttl_input_ready", False))
+                if restored != self._ttl_runtime_ready:
+                    self._ttl_runtime_ready = restored
+                    self.ttl_readiness_changed.emit(restored)
+            if breath_values and breath_timestamp is not None:
+                self.breath_samples.emit(breath_values, breath_timestamp)
+            for pulse in pulses:
+                self.ttl_pulse.emit(pulse)
         except Exception as exc:  # pragma: no cover - hardware boundary
+            first_failure = not self._ai_error_latched
+            self._ai_error_latched = True
+            self._ai_retry_not_before = attempt_started + self._ai_error_backoff_s
+            try:
+                self.hal.reset_ai_input()
+            except Exception:  # pragma: no cover - defensive
+                LOG.exception("释放失效的共享 AI task 失败")
+            if self._ttl_runtime_ready:
+                self._ttl_runtime_ready = False
+                self.ttl_readiness_changed.emit(False)
+            self.disarm_ttl()
+            if not first_failure:
+                LOG.debug("共享 AI 读取仍未恢复，保持故障锁存并延后重试：%s", exc)
+                return
             message = f"TTL/共享 AI 读取失败：{exc}；协议执行已请求安全阻断。"
             LOG.exception(message)
             self.ttl_input_error.emit(message)

@@ -12,9 +12,11 @@ from app.services.ttl_trigger_service import TtlTriggerConfig
 
 try:  # Local hardware drivers; keep import errors explicit for clear startup failures.
     import nidaqmx
-    from nidaqmx.constants import LineGrouping, TerminalConfiguration
+    from nidaqmx.constants import READ_ALL_AVAILABLE, AcquisitionType, LineGrouping, TerminalConfiguration
 except Exception as exc:  # pragma: no cover - runtime-only dependency
     nidaqmx = None
+    READ_ALL_AVAILABLE = None
+    AcquisitionType = None
     LineGrouping = None
     TerminalConfiguration = None
     _NIDAQMX_IMPORT_ERROR = exc
@@ -130,6 +132,53 @@ class RealHAL(HalBase):
             return AnalogInputFrame(timestamp=captured_at, ai0=float(values[0]), ai6=float(values[1]))
         value = values[0] if isinstance(values, list | tuple) else values
         return AnalogInputFrame(timestamp=captured_at, ai0=float(value), ai6=None)
+
+    def read_ai_frames(self, timestamp: float | None = None) -> list[AnalogInputFrame]:
+        """Drain every currently buffered sample so the 1 kHz producer cannot outrun the worker."""
+        task = self._ensure_ai_task()
+        captured_at = float(timestamp if timestamp is not None else time.time())
+        values = task.read(number_of_samples_per_channel=READ_ALL_AVAILABLE)
+        if self._ttl_input_ready:
+            if not isinstance(values, list | tuple) or len(values) < 2:
+                raise RuntimeError("共享 AI task 未返回 AI0/AI6 两通道样本")
+            ai0_values = list(values[0])
+            ai6_values = list(values[1])
+            if len(ai0_values) != len(ai6_values):
+                raise RuntimeError("共享 AI task 返回的 AI0/AI6 样本数不一致")
+            return self._build_ai_frames(captured_at, ai0_values, ai6_values)
+        ai0_values = list(values) if isinstance(values, list | tuple) else [values]
+        return self._build_ai_frames(captured_at, ai0_values, None)
+
+    def reset_ai_input(self) -> None:
+        task = self._ai_task
+        self._ai_task = None
+        self._ttl_input_ready = False
+        if task is None:
+            return
+        try:
+            task.close()
+        except Exception:  # pragma: no cover - defensive
+            LOG.exception("Failed to reset NI-DAQmx AI task")
+
+    def _build_ai_frames(
+        self,
+        captured_at: float,
+        ai0_values: list,
+        ai6_values: list | None,
+    ) -> list[AnalogInputFrame]:
+        count = len(ai0_values)
+        if count == 0:
+            return []
+        interval = 1.0 / self.ttl_poll_hz
+        first_timestamp = captured_at - ((count - 1) * interval)
+        return [
+            AnalogInputFrame(
+                timestamp=first_timestamp + (index * interval),
+                ai0=float(ai0),
+                ai6=float(ai6_values[index]) if ai6_values is not None else None,
+            )
+            for index, ai0 in enumerate(ai0_values)
+        ]
 
     def read_flow(self) -> float:
         unit_id = self._flow_unit_id
@@ -302,7 +351,11 @@ class RealHAL(HalBase):
                     terminal_config=TerminalConfiguration.RSE,
                 )
                 if hasattr(task, "timing"):
-                    task.timing.cfg_samp_clk_timing(rate=self.ttl_poll_hz)
+                    task.timing.cfg_samp_clk_timing(
+                        rate=self.ttl_poll_hz,
+                        sample_mode=AcquisitionType.CONTINUOUS,
+                        samps_per_chan=self.ttl_poll_hz,
+                    )
                 self._ai_task = task
                 self._ttl_input_ready = True
             except Exception as exc:
@@ -317,19 +370,17 @@ class RealHAL(HalBase):
                     terminal_config=TerminalConfiguration.RSE,
                 )
                 if hasattr(fallback, "timing"):
-                    fallback.timing.cfg_samp_clk_timing(rate=self.ttl_poll_hz)
+                    fallback.timing.cfg_samp_clk_timing(
+                        rate=self.ttl_poll_hz,
+                        sample_mode=AcquisitionType.CONTINUOUS,
+                        samps_per_chan=self.ttl_poll_hz,
+                    )
                 self._ai_task = fallback
                 self._ttl_input_ready = False
         return self._ai_task
 
     def _close_resources(self) -> None:
-        try:
-            if self._ai_task is not None:
-                self._ai_task.close()
-        except Exception:  # pragma: no cover - defensive
-            LOG.exception("Failed to close NI-DAQmx task")
-        self._ai_task = None
-        self._ttl_input_ready = False
+        self.reset_ai_input()
         try:
             if self._serial is not None:
                 self._serial.close()

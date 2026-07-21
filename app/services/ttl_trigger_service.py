@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import math
+import threading
 from dataclasses import dataclass
 from typing import Any
 
@@ -66,22 +67,40 @@ class TtlTriggerService:
         self._seen_low = False
         self._candidate_high: bool | None = None
         self._candidate_since: float | None = None
+        self._state_lock = threading.RLock()
 
     @property
     def is_armed(self) -> bool:
-        return self._arm_epoch is not None
+        with self._state_lock:
+            return self._arm_epoch is not None
 
     @property
     def arm_epoch(self) -> int | None:
-        return self._arm_epoch
+        with self._state_lock:
+            return self._arm_epoch
 
     def arm(self, *, arm_epoch: int) -> None:
-        self._arm_epoch = int(arm_epoch)
+        with self._state_lock:
+            new_epoch = int(arm_epoch)
+            if new_epoch == self._arm_epoch:
+                return
+            if self._candidate_high is True:
+                self._seen_low = False
+            self._clear_candidate()
+            self._arm_epoch = new_epoch
 
     def disarm(self) -> None:
-        self._arm_epoch = None
+        with self._state_lock:
+            if self._candidate_high is True:
+                self._seen_low = False
+            self._clear_candidate()
+            self._arm_epoch = None
 
     def process_sample(self, value: float, *, timestamp: float) -> TtlPulse | None:
+        with self._state_lock:
+            return self._process_sample(value, timestamp=timestamp)
+
+    def _process_sample(self, value: float, *, timestamp: float) -> TtlPulse | None:
         try:
             sample = float(value)
             captured_at = float(timestamp)

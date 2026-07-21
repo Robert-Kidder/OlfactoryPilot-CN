@@ -36,6 +36,12 @@ class MockHAL(HalBase):
         ts = float(timestamp if timestamp is not None else time.time())
         return AnalogInputFrame(timestamp=ts, ai0=self.read_ai0(ts), ai6=float(self._ttl_level))
 
+    def read_ai_frames(self, timestamp: float | None = None) -> list[AnalogInputFrame]:
+        return [self.read_ai_frame(timestamp)]
+
+    def reset_ai_input(self) -> None:
+        return None
+
     def set_ttl_level(self, value: float) -> None:
         self._ttl_level = float(value)
 

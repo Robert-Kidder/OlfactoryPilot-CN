@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import threading
 
 import pytest
 
@@ -101,6 +102,65 @@ def test_payload_is_frozen_and_captures_epoch_at_sample_time() -> None:
     assert pulse == TtlPulse(timestamp=1.1, arm_epoch=10, sequence=1)
     with pytest.raises((AttributeError, TypeError)):
         pulse.arm_epoch = 99  # type: ignore[misc]
+
+
+def test_epoch_change_during_debounce_cannot_relabel_old_edge() -> None:
+    service = _service(debounce_ms=5.0)
+    service.arm(arm_epoch=1)
+    service.process_sample(0.0, timestamp=0.000)
+    assert service.process_sample(3.0, timestamp=0.001) is None
+
+    service.arm(arm_epoch=2)
+
+    assert service.process_sample(3.0, timestamp=0.006) is None
+    assert service.process_sample(0.0, timestamp=0.007) is None
+    assert service.process_sample(3.0, timestamp=0.008) is None
+    assert service.process_sample(3.0, timestamp=0.013) == TtlPulse(
+        timestamp=0.013,
+        arm_epoch=2,
+        sequence=1,
+    )
+
+
+def test_epoch_change_waits_for_inflight_edge_to_capture_old_epoch() -> None:
+    service = _service(debounce_ms=5.0)
+    service.arm(arm_epoch=1)
+    service.process_sample(0.0, timestamp=0.000)
+    assert service.process_sample(3.0, timestamp=0.001) is None
+    entered_capture = threading.Event()
+    release_capture = threading.Event()
+    arm_finished = threading.Event()
+    original_clear = service._clear_candidate
+    first_clear = {"pending": True}
+
+    def blocking_clear() -> None:
+        original_clear()
+        if first_clear["pending"]:
+            first_clear["pending"] = False
+            entered_capture.set()
+            assert release_capture.wait(1.0)
+
+    service._clear_candidate = blocking_clear
+    pulses: list[TtlPulse | None] = []
+    reader = threading.Thread(
+        target=lambda: pulses.append(service.process_sample(3.0, timestamp=0.006))
+    )
+    armer = threading.Thread(
+        target=lambda: (service.arm(arm_epoch=2), arm_finished.set())
+    )
+
+    reader.start()
+    assert entered_capture.wait(1.0)
+    armer.start()
+    assert not arm_finished.wait(0.05)
+    release_capture.set()
+    reader.join(1.0)
+    armer.join(1.0)
+
+    assert not reader.is_alive()
+    assert not armer.is_alive()
+    assert pulses == [TtlPulse(timestamp=0.006, arm_epoch=1, sequence=1)]
+    assert service.arm_epoch == 2
 
 
 @pytest.mark.parametrize("value", [math.nan, math.inf, -math.inf])

@@ -25,6 +25,12 @@ class HalInterface(Protocol):
     def read_ai_frame(self, timestamp: float | None = None) -> AnalogInputFrame:
         """从单一 AI task 读取 AI0/AI6 共享采样帧。"""
 
+    def read_ai_frames(self, timestamp: float | None = None) -> list[AnalogInputFrame]:
+        """读取共享 AI task 当前可用的全部采样帧。"""
+
+    def reset_ai_input(self) -> None:
+        """释放失效的共享 AI task，使下一次读取重新创建采集资源。"""
+
     def read_ai0(self, timestamp: float | None = None) -> float:
         """读取模拟输入（呼吸波形）。"""
 
@@ -95,4 +101,12 @@ class HalBase(abc.ABC):
 
     @abc.abstractmethod
     def read_ai_frame(self, timestamp: float | None = None) -> AnalogInputFrame:  # pragma: no cover
+        raise NotImplementedError
+
+    @abc.abstractmethod
+    def read_ai_frames(self, timestamp: float | None = None) -> list[AnalogInputFrame]:  # pragma: no cover
+        raise NotImplementedError
+
+    @abc.abstractmethod
+    def reset_ai_input(self) -> None:  # pragma: no cover - interface
         raise NotImplementedError
