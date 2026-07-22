@@ -185,3 +185,57 @@ def test_protocol_view_disables_start_and_next_when_not_safe(qt_app, qtbot) -> N
     assert view._start_button.isEnabled() is False
     assert view._next_trial_button.isEnabled() is False
     assert view._stop_button.isEnabled() is True
+
+
+def test_protocol_view_renders_actuation_quality_remaining_and_pause_resume(qt_app, qtbot) -> None:
+    view = ProtocolView()
+    qtbot.addWidget(view)
+    paused = []
+    resumed = []
+    view.pause_requested.connect(lambda: paused.append(True))
+    view.resume_requested.connect(lambda: resumed.append(True))
+
+    view.render_execution_state(
+        ProtocolExecutionSnapshot(
+            status=ProtocolExecutionStatus.TRIGGERED,
+            status_text="已触发",
+            has_protocol=True,
+            can_start=False,
+            can_stop=True,
+            can_advance=False,
+            trial_label="1/2",
+            trial_id="trial-1",
+            valve=3,
+            next_odor="薄荷",
+            last_jitter_ms=4.25,
+            p95_open_ms=20.0,
+            p95_close_ms=21.5,
+            p95_combined_ms=19.0,
+            sample_count_open=20,
+            sample_count_close=20,
+            sample_count_combined=40,
+            remaining_ms=87.4,
+            can_pause=True,
+        )
+    )
+    assert "薄荷" in view._execution_trial_label.text()
+    assert "4.25" in view._execution_quality_label.text()
+    assert "临界" in view._execution_quality_label.text()
+    assert "警告" in view._execution_quality_label.text()
+    assert "87" in view._execution_wait_label.text()
+    view._pause_button.click()
+    assert paused == [True]
+
+    view.render_execution_state(
+        ProtocolExecutionSnapshot(
+            status=ProtocolExecutionStatus.PAUSED,
+            status_text="已暂停",
+            has_protocol=True,
+            can_start=False,
+            can_stop=True,
+            can_advance=False,
+            can_resume=True,
+        )
+    )
+    view._resume_button.click()
+    assert resumed == [True]

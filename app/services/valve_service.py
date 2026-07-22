@@ -1,14 +1,33 @@
 from __future__ import annotations
 
 import logging
+import threading
 import time
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from app.models import AppState, SafetyState
+from app.models import ActuationReceipt, ActuationResult, AppState, SafetyState
 
 if TYPE_CHECKING:
     from app.services import SafetyManager
     from app.workers import HardwareWorker
+
+
+@dataclass(frozen=True, slots=True)
+class ValvePlanStep:
+    logical_valve: int
+    device: str | None
+    line: str
+    state: bool
+    role: str
+
+
+@dataclass(frozen=True, slots=True)
+class ValveWritePlan:
+    requested_valve: int
+    requested_state: bool
+    safety_close: bool
+    steps: tuple[ValvePlanStep, ...]
 
 
 class ValveService:
@@ -31,22 +50,100 @@ class ValveService:
         self.hardware_variant = hardware_variant
         self.master_valve_line = master_valve_line
         self._master_always_on = bool(master_valve_line)
-        self._states: dict[int, bool] = {}
+        self._states: dict[int | str, bool] = {}
+        self._state_lock = threading.RLock()
         self._logger = logging.getLogger("valve_events")
 
     def reset_cached_state(self) -> None:
         """Clear cached valve states so master will be re-driven after reconnect."""
-        self._states.clear()
+        with self._state_lock:
+            self._states.clear()
 
     def active_map(self) -> dict[int, str]:
         """当前硬件变体的通道 -> 线路映射。"""
         return self.valve_variants.get(self.hardware_variant, {})
 
     def is_open(self, channel_id: int) -> bool:
-        return bool(self._states.get(int(channel_id), False))
+        with self._state_lock:
+            return bool(self._states.get(int(channel_id), False))
 
     def master_is_open(self) -> bool:
-        return bool(self._states.get("master", False))
+        with self._state_lock:
+            return bool(self._states.get("master", False))
+
+    def resolve_target(self, channel_id: int) -> tuple[str | None, str]:
+        channel_id = int(channel_id)
+        target = self.master_valve_line if channel_id == 0 else self.active_map().get(channel_id)
+        if not target:
+            raise ValueError(f"阀门 {channel_id} 未配置映射")
+        return self._split_target(target)
+
+    def emergency_close_steps(self) -> tuple[ValvePlanStep, ...]:
+        """Return every configured DO target once, including the master valve."""
+        steps: list[ValvePlanStep] = []
+        seen: set[tuple[str | None, str]] = set()
+        if self.master_valve_line:
+            device, line = self._split_target(self.master_valve_line)
+            seen.add((device, line))
+            steps.append(ValvePlanStep(0, device, line, False, "master_safety_close"))
+        for logical_valve, target in sorted(self.active_map().items()):
+            device, line = self._split_target(target)
+            if (device, line) in seen:
+                continue
+            seen.add((device, line))
+            steps.append(
+                ValvePlanStep(int(logical_valve), device, line, False, "odor_safety_close")
+            )
+        return tuple(steps)
+
+    def plan_valve(
+        self,
+        channel_id: int,
+        state: bool,
+        *,
+        safety_state: SafetyState | None = None,
+        safety_close: bool = False,
+    ) -> tuple[bool, ValveWritePlan | str]:
+        channel_id = int(channel_id)
+        mapping = self.active_map()
+        if not mapping:
+            return False, "未找到 20 通道映射，已阻断写入"
+        target = mapping.get(channel_id)
+        if not target:
+            return False, f"阀门 {channel_id} 未配置映射"
+        if safety_close and state:
+            return False, "安全关闭参数不能用于打开阀门，已阻断写入"
+        safety = safety_state or self._build_safety_state()
+        if state and not self.state.flow_setpoints_ready:
+            return False, "MFC 流量设定尚未建立，已阻断阀门打开"
+        if not safety_close:
+            allowed, reason = self.safety_manager.guard_command(
+                safety_state=safety,
+                hardware_ready=self._is_hardware_ready(),
+                action=f"valve-{channel_id}",
+                source="actuation-plan",
+            )
+            if not allowed:
+                return False, reason
+        steps: list[ValvePlanStep] = []
+        if state and self.master_valve_line and not self.master_is_open():
+            device, line = self._split_target(self.master_valve_line)
+            steps.append(ValvePlanStep(0, device, line, True, "master_prepare"))
+        device, line = self._split_target(target)
+        steps.append(ValvePlanStep(channel_id, device, line, bool(state), "odor"))
+        return True, ValveWritePlan(
+            requested_valve=channel_id,
+            requested_state=bool(state),
+            safety_close=bool(safety_close),
+            steps=tuple(steps),
+        )
+
+    def commit_receipt(self, receipt: ActuationReceipt) -> None:
+        if receipt.result != ActuationResult.SUCCESS:
+            return
+        with self._state_lock:
+            key: int | str = "master" if receipt.valve == 0 else receipt.valve
+            self._states[key] = receipt.action.value == "open"
 
     def set_valve(
         self,

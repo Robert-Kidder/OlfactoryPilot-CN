@@ -1,8 +1,17 @@
+from .actuation_do_adapter import ActuationDOAdapter  # noqa: F401
+from .actuation_metrics import ActuationMetrics, ActuationMetricsConfig  # noqa: F401
 from .breath_metrics import BreathSampleBuffer, FrameRateTracker, FrameStats  # noqa: F401
 from .calibration_service import CalibrationResult, CalibrationSession  # noqa: F401
 from .flow_service import FlowApplyResult, FlowService  # noqa: F401
 from .gating_service import GatingService  # noqa: F401
-from .hal import AnalogInputFrame, HalBase, HalInterface  # noqa: F401
+from .hal import (  # noqa: F401
+    AnalogInputFrame,
+    BreathSample,
+    BreathSampleBatch,
+    DigitalWriteAck,
+    HalBase,
+    HalInterface,
+)
 from .hardware_check_service import HardwareCheckService  # noqa: F401
 from .mock_hal import MockHAL  # noqa: F401
 from .protocol_executor import (  # noqa: F401
@@ -23,6 +32,9 @@ from .ttl_trigger_service import (  # noqa: F401
 from .valve_service import ValveService  # noqa: F401
 
 __all__ = [
+    "ActuationMetrics",
+    "ActuationMetricsConfig",
+    "ActuationDOAdapter",
     "BreathSampleBuffer",
     "FrameRateTracker",
     "FrameStats",
@@ -34,6 +46,9 @@ __all__ = [
     "HalBase",
     "HalInterface",
     "AnalogInputFrame",
+    "BreathSample",
+    "BreathSampleBatch",
+    "DigitalWriteAck",
     "HardwareCheckService",
     "MockHAL",
     "ProtocolParseError",

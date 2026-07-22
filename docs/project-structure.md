@@ -239,6 +239,8 @@ python -m PyInstaller pyinstaller.spec
 - 新状态对象：`app/models/`。
 - 新硬件或业务服务：`app/services/`。
 - 新后台线程：`app/workers/`。
+- 动作命令/回执模型：`app/models/actuation.py`；动作统计与 HAL adapter：`app/services/actuation_metrics.py`、`app/services/actuation_do_adapter.py`。
+- 单写者线程：`app/workers/actuation_worker.py`（DO/协议状态）与 `app/workers/flow_worker.py`（serial/MFC）；`hardware_worker.py` 只负责 AI producer。
 - 新通用配置项：`config/default_config.json`。
 - 新本机硬件/端口/校准覆盖：`config/local_config.json`，并视需要同步更新 `config/local_config.example.json`。
 - 新测试：`tests/test_*.py`。

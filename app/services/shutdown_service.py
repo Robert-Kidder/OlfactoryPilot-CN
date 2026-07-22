@@ -5,10 +5,13 @@ import logging
 import time
 from collections.abc import Callable
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from app.models import AppState, SafetyState
 from app.services.safety_manager import SafetyManager
-from app.workers import HardwareWorker
+
+if TYPE_CHECKING:
+    from app.workers import HardwareWorker
 
 LOG = logging.getLogger(__name__)
 DEFAULT_RECORD_PATH = Path.home() / ".olfactorypilot" / "last_shutdown_event.json"
@@ -28,6 +31,9 @@ class ShutdownService:
         record_path: Path | None = None,
         time_func: Callable[[], float] | None = None,
         sleep_func: Callable[[float], None] | None = None,
+        actuation_worker=None,
+        flow_worker=None,
+        actuation_timeout_ms: int = 2000,
     ) -> None:
         self.state = state
         self.worker = worker
@@ -37,6 +43,9 @@ class ShutdownService:
         self.record_path = record_path or DEFAULT_RECORD_PATH
         self._now = time_func or time.time
         self._sleep = sleep_func or time.sleep
+        self.actuation_worker = actuation_worker
+        self.flow_worker = flow_worker
+        self.actuation_timeout_ms = max(1, int(actuation_timeout_ms))
 
     def shutdown(
         self,
@@ -130,7 +139,7 @@ class ShutdownService:
             event["error"],
         )
 
-        if guard_allowed or force:
+        if (guard_allowed or force) and self.actuation_worker is None:
             self.worker.stop()
         else:
             LOG.warning("Shutdown guard blocked: %s", guard_reason)
@@ -139,10 +148,41 @@ class ShutdownService:
 
     def _attempt_shutdown_once(self) -> tuple[bool, bool, list[str]]:
         errors: list[str] = []
-        valves_closed = self._call_bool(self.worker.close_all_channels, "关闭阀门", errors)
+        if self.actuation_worker is None:
+            valves_closed = self._call_bool(self.worker.close_all_channels, "关闭阀门", errors)
+        else:
+            valves_closed = self._call_bool(
+                lambda: self.actuation_worker.emergency_close_all(self.actuation_timeout_ms),
+                "ActuationWorker 紧急全关",
+                errors,
+            )
+            owner_handed_off = self._call_bool(
+                lambda: self.actuation_worker.shutdown(self.actuation_timeout_ms),
+                "停止 ActuationWorker/交还 DO ownership",
+                errors,
+            )
+            if not owner_handed_off:
+                errors.append("DO ownership 未在超时内交还；禁止跨线程复用旧 task，需人工确认。")
+            elif not valves_closed:
+                valves_closed = self._call_bool(
+                    self.actuation_worker.fallback_close_all_after_handoff,
+                    "DO ownership 交还后的兜底全关",
+                    errors,
+                )
         heaters_off = self._call_bool(self.worker.stop_heaters, "停止加热", errors)
         self._call_optional(self.worker.flush_logs, "flush 日志", errors)
-        self._call_optional(self.worker.release_resources, "释放NI/RS232", errors)
+        if self.actuation_worker is None:
+            self._call_optional(self.worker.release_resources, "释放NI/RS232", errors)
+        else:
+            self._call_optional(self.worker.release_ai_resources, "释放 AI", errors)
+            if self.flow_worker is not None:
+                serial_stopped = self._call_bool(
+                    lambda: self.flow_worker.shutdown(self.actuation_timeout_ms),
+                    "释放 serial owner",
+                    errors,
+                )
+                if not serial_stopped:
+                    errors.append("serial owner 未在超时内停止。")
         return valves_closed, heaters_off, errors
 
     def _call_bool(self, func: Callable[[], bool], label: str, errors: list[str]) -> bool:

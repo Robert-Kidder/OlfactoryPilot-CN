@@ -1,3 +1,15 @@
+from .actuation import (
+    ActuationAction,
+    ActuationCategory,
+    ActuationCommand,
+    ActuationMetricsUpdate,
+    ActuationQualitySnapshot,
+    ActuationReceipt,
+    ActuationResult,
+    ActuationStreamSnapshot,
+    ActuationWarningTransition,
+    duration_ms_to_ns,
+)
 from .app_state import AppState, Telemetry
 from .protocol import ProtocolDocument, ProtocolMetadata, ProtocolTrial, TriggerMode
 from .protocol_execution import (
@@ -11,6 +23,15 @@ from .safety_state import SafetyState
 from .self_check import SelfCheckResult
 
 __all__ = [
+    "ActuationAction",
+    "ActuationCategory",
+    "ActuationCommand",
+    "ActuationMetricsUpdate",
+    "ActuationQualitySnapshot",
+    "ActuationReceipt",
+    "ActuationResult",
+    "ActuationStreamSnapshot",
+    "ActuationWarningTransition",
     "AppState",
     "ProtocolDocument",
     "ProtocolExecutionReadiness",
@@ -24,4 +45,5 @@ __all__ = [
     "SelfCheckResult",
     "Telemetry",
     "TriggerMode",
+    "duration_ms_to_ns",
 ]

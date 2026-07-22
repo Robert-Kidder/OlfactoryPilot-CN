@@ -12,8 +12,18 @@ from typing import TYPE_CHECKING
 
 from PySide6.QtCore import QObject, QTimer, Signal, Slot
 
-from app.models import AppState, ProtocolExecutionReadiness, SafetyState, TriggerMode
+from app.models import (
+    ActuationCategory,
+    AppState,
+    ProtocolExecutionReadiness,
+    ProtocolExecutionSnapshot,
+    ProtocolExecutionStatus,
+    SafetyState,
+)
 from app.services import (
+    ActuationDOAdapter,
+    AnalogInputFrame,
+    BreathSampleBatch,
     CalibrationSession,
     FlowApplyResult,
     FlowService,
@@ -28,7 +38,14 @@ from app.services import (
     ValveService,
     parse_protocol_file,
 )
-from app.workers import HardwareWorker
+from app.services.valve_service import ValveWritePlan
+from app.workers import (
+    ActuationInterlockIngress,
+    ActuationWorker,
+    FlowWorker,
+    HardwareWorker,
+    InterlockSnapshot,
+)
 
 if TYPE_CHECKING:
     from app.views import MainWindow
@@ -79,22 +96,65 @@ class MainController(QObject):
         )
         self.protocol_executor = ProtocolExecutor(
             gating_service=self.gating_service,
-            valve_writer=self._write_protocol_valve,
+            valve_writer=self._reject_synchronous_protocol_write,
             config=config or {},
             clock=time.time,
+            deferred_actuation=True,
         )
         self._protocol_logger = logging.getLogger("protocol_execution")
         hal_instance = getattr(worker, "hal", None) or MockHAL()
+        self.actuation_interlock = ActuationInterlockIngress(
+            InterlockSnapshot(
+                connected=bool(state.telemetry.connected),
+                hardware_ready=bool(state.hardware_ready),
+                flow_setpoints_ready=bool(state.flow_setpoints_ready),
+                safety_state=state.telemetry.safety_state,
+                ttl_input_ready=bool(getattr(worker, "ttl_input_ready", False)),
+                has_protocol=bool(state.loaded_protocol),
+                device_lease="idle",
+            ),
+            safety_manager=self.safety_manager,
+        )
+        self.actuation_adapter = ActuationDOAdapter(
+            hal=hal_instance,
+            target_resolver=self.valve_service.resolve_target,
+            write_timeout_ms=int((config or {}).get("actuation_write_timeout_ms", 100)),
+        )
         self.flow_service = FlowService(
             hal_instance,
             master_target=state.master_valve_line or None,
-            master_writer=getattr(worker, "write_digital", None),
+            master_writer=None,
         )
+        self.flow_worker = FlowWorker(self.flow_service, parent=self)
+        self.actuation_worker = ActuationWorker(
+            protocol_executor=self.protocol_executor,
+            writer=self.actuation_adapter.execute,
+            interlock=self.actuation_interlock,
+            valve_service=self.valve_service,
+            sample_transform=state.apply_calibration,
+            normal_queue_capacity=int((config or {}).get("actuation_normal_queue_capacity", 256)),
+            flow_submitter=self.flow_worker.submit,
+            parent=self,
+        )
+        self.shutdown_service.actuation_worker = self.actuation_worker
+        self.shutdown_service.flow_worker = self.flow_worker
+        self.shutdown_service.actuation_timeout_ms = int(
+            (config or {}).get("actuation_shutdown_timeout_ms", 2000)
+        )
+        if hasattr(worker, "set_actuation_sink"):
+            worker.set_actuation_sink(
+                self.actuation_worker,
+                interlock_ingress=self.actuation_interlock,
+            )
         self.calibration_session = CalibrationSession() # Story 2.6
         self._last_safety_state: SafetyState | None = None
         self._has_seen_connection = False
         self._connect_in_progress = False
         self._pretest_sequence_in_progress = False
+        self._actuation_request_sequence = 0
+        self._pending_plan_ui: dict[str, dict] = {}
+        self._pending_flow_context: dict[str, dict] = {}
+        self._last_flow_result: FlowApplyResult | None = None
         self.view: MainWindow | None = None
         self.worker.telemetry_ready.connect(self.handle_telemetry)
         self.worker.status_message.connect(self.handle_status)
@@ -105,6 +165,27 @@ class MainController(QObject):
             self.worker.ttl_pulse.connect(self.handle_ttl_pulse)
         if hasattr(self.worker, "ttl_input_error"):
             self.worker.ttl_input_error.connect(self.handle_ttl_input_error)
+        if hasattr(self.worker, "ttl_arm_ack"):
+            self.worker.ttl_arm_ack.connect(self.actuation_worker.consume_ttl_arm_ack)
+        self.actuation_worker.ttl_arm_requested.connect(
+            lambda epoch: self.worker.arm_ttl(arm_epoch=epoch)
+        )
+        self.actuation_worker.ttl_disarm_requested.connect(self.worker.disarm_ttl)
+        self.actuation_worker.executor_result_ready.connect(self._publish_protocol_result)
+        self.actuation_worker.receipt_ready.connect(self._handle_actuation_receipt)
+        self.actuation_worker.plan_result_ready.connect(self._handle_actuation_plan_result)
+        self.flow_worker.result_ready.connect(self.actuation_worker.post_flow_result)
+        self.actuation_worker.flow_result_ready.connect(self._handle_flow_command_result)
+        self.actuation_worker.snapshot_ready.connect(self._handle_protocol_snapshot)
+        self.actuation_worker.document_result_ready.connect(self._handle_document_result)
+        self._protocol_snapshot = ProtocolExecutionSnapshot(
+            status=ProtocolExecutionStatus.IDLE,
+            status_text="空闲",
+            has_protocol=False,
+            can_start=False,
+            can_stop=False,
+            can_advance=False,
+        )
         self._pretest_sequence_completed.connect(self._handle_pretest_sequence_completed)
         self._startup_zero_completed.connect(self._handle_startup_zero_completed)
         self._breath_logger = logging.getLogger("breath_viz")
@@ -146,6 +227,14 @@ class MainController(QObject):
             )
 
     def start_worker(self) -> None:
+        if not self.flow_worker.isRunning():
+            LOG.info("Starting serial flow worker thread")
+            self.flow_worker.prepare_restart()
+            self.flow_worker.start()
+        if not self.actuation_worker.isRunning():
+            LOG.info("Starting actuation worker thread")
+            self.actuation_worker.prepare_restart()
+            self.actuation_worker.start()
         if not self.worker.isRunning():
             LOG.info("Starting hardware worker thread")
             self.worker.start()
@@ -193,20 +282,12 @@ class MainController(QObject):
             hardware_safety=hardware_safety,
             previous_state_override=previous_safety_state,
         )
-        if self.state.telemetry.safety_state != "SAFE":
-            self._publish_protocol_result(
-                self.protocol_executor.handle_safety_update(
-                    self.state.telemetry.safety_state,
-                    timestamp=self.state.telemetry.timestamp or time.time(),
-                )
-            )
-        else:
-            self._publish_protocol_result(
-                self.protocol_executor.handle_readiness_lost(
-                    self._execution_readiness(),
-                    timestamp=self.state.telemetry.timestamp or time.time(),
-                )
-            )
+        self._publish_interlock_from_state()
+        self.actuation_worker.post_readiness_update(
+            readiness=self._execution_readiness(),
+            timestamp=self.state.telemetry.timestamp or time.time(),
+        )
+        self._drain_actuation_if_not_running()
         if self.view:
             self.view.render_telemetry(self.state.telemetry)
             self.view.update_status(self.state.status_message)
@@ -244,10 +325,19 @@ class MainController(QObject):
             updated_at=self.state.telemetry.timestamp,
             reason=self.state.telemetry.safety_reason,
         )
-        success, message = self.valve_service.set_valve(
+        success, plan_or_message = self.valve_service.plan_valve(
             channel_id,
             desired_state,
             safety_state=safety_state,
+        )
+        message = (
+            self._submit_valve_plan(
+                plan_or_message,
+                category=ActuationCategory.MANUAL,
+                ui_context={"kind": "manual", "channels": [channel_id]},
+            )
+            if success and isinstance(plan_or_message, ValveWritePlan)
+            else str(plan_or_message)
         )
         self.state.update_status(message)
         if self.view:
@@ -292,30 +382,28 @@ class MainController(QObject):
             reason=self.state.telemetry.safety_reason,
         )
 
-        opened_channels: list[int] = []
         messages: list[str] = []
         success = True
         for channel in channels:
             channel_id = int(channel)
-            ok, message = self.valve_service.set_valve(
+            ok, plan_or_message = self.valve_service.plan_valve(
                 channel_id,
                 desired_state,
                 safety_state=safety_state,
             )
+            message = (
+                self._submit_valve_plan(
+                    plan_or_message,
+                    category=ActuationCategory.PRETEST,
+                    ui_context={"kind": "sequence", "channels": [channel_id]},
+                )
+                if ok and isinstance(plan_or_message, ValveWritePlan)
+                else str(plan_or_message)
+            )
             messages.append(message)
-            if ok and desired_state:
-                opened_channels.append(channel_id)
             if not ok:
                 success = False
                 break
-
-        if desired_state and not success:
-            for channel_id in opened_channels:
-                self.valve_service.set_valve(
-                    channel_id,
-                    False,
-                    safety_state=safety_state,
-                )
 
         status = (
             f"启动阀门序列完成：{', '.join(str(int(ch)) for ch in channels)}"
@@ -403,51 +491,13 @@ class MainController(QObject):
             self._pretest_sequence_completed.emit(mode, channels, result, False, result.message)
             return
 
-        desired_open = mode == "stim_start"
-        if desired_open:
-            result = self.flow_service.apply_stim_start(a_target=a, b_target=b)
-        else:
-            result = self.flow_service.apply_stim_end(a_target=a, b_target=b, c_target=c)
-
-        self.state.flow_setpoints_ready = bool(result.success)
-        if not result.success:
-            self._pretest_sequence_completed.emit(mode, channels, result, False, result.message)
-            return
-
-        safety_state = self._last_safety_state or SafetyState(
-            state=self.state.telemetry.safety_state,
-            airflow=self.state.telemetry.airflow,
-            threshold=self.state.low_flow_threshold,
-            updated_at=self.state.telemetry.timestamp,
-            reason=self.state.telemetry.safety_reason,
-        )
-        opened_channels: list[int] = []
-        for channel_id in channels:
-            ok, message = self.valve_service.set_valve(
-                channel_id,
-                desired_open,
-                safety_state=safety_state,
-            )
-            if ok and desired_open:
-                opened_channels.append(channel_id)
-            if not ok:
-                if desired_open:
-                    for opened in opened_channels:
-                        self.valve_service.set_valve(
-                            opened,
-                            False,
-                            safety_state=safety_state,
-                        )
-                self._pretest_sequence_completed.emit(mode, channels, result, False, message)
-                return
-
-        if desired_open:
-            status = f"启动阀门序列完成：{', '.join(str(ch) for ch in channels)}"
-        elif channels:
-            status = f"关闭阀门序列完成：{', '.join(str(ch) for ch in channels)}"
-        else:
-            status = result.message
-        self._pretest_sequence_completed.emit(mode, channels, result, True, status)
+        source = f"pretest:{self._actuation_request_sequence + 1}"
+        self._pending_flow_context[source] = {
+            "kind": "pretest",
+            "mode": mode,
+            "channels": channels,
+        }
+        self._submit_flow_intent(mode=mode, a=a, b=b, c=c, source=source)
 
     @Slot(str, list, object, bool, str)
     def _handle_pretest_sequence_completed(
@@ -521,23 +571,30 @@ class MainController(QObject):
                 pretest.apply_safety_state("DATA_STALE", message, disabled=True)
             return result
 
-        result = self.flow_service.apply_flows(
-            a_target=flow_a,
-            b_target=flow_b,
-            c_target=flow_c,
-            mode="rest",
+        source = f"manual:{self._actuation_request_sequence + 1}"
+        self._pending_flow_context[source] = {"kind": "apply"}
+        return self._submit_flow_intent(
+            mode="rest", a=flow_a, b=flow_b, c=flow_c, source=source
         )
-        self._handle_apply_result(result, pretest=pretest)
-        return result
 
-    @Slot(list, float)
-    def handle_breath_samples(self, samples: list, timestamp: float) -> None:
+    @Slot(object)
+    def handle_breath_samples(
+        self,
+        samples: list | BreathSampleBatch,
+        timestamp: float | None = None,
+    ) -> None:
+        structured = samples if isinstance(samples, BreathSampleBatch) else None
+        values = [sample.value for sample in structured.samples] if structured else list(samples)
+        if structured:
+            timestamp = structured.samples[-1].timestamp if structured.samples else timestamp
+        if timestamp is None:
+            return
         if self.view:
-            self.view.ingest_breath_samples(samples, timestamp=timestamp)
+            self.view.ingest_breath_samples(values, timestamp=timestamp)
 
         # Calibration Session Update (Story 2.6)
         if self.calibration_session.is_active:
-            for sample in samples:
+            for sample in values:
                 self.calibration_session.update(sample)
 
             # Check for completion
@@ -578,48 +635,35 @@ class MainController(QObject):
                      self.calibration_session.current_min
                  )
 
-        # Process gating logic (100Hz resolution)
-        # Calculate sample interval (assuming 100Hz from worker, or derive from timestamp)
-        # We'll assume strict 100Hz (0.01s) as per requirement FR3.1
-        dt = 0.01
-        sample_count = len(samples)
+        sample_count = len(values)
         if sample_count == 0:
             return
-        start_ts = timestamp - ((sample_count - 1) * dt)
-
-        # Apply calibration to samples before gating (AC3 / Bug Fix)
-        # User sees transformed data, so thresholds apply to transformed data.
-        calibrated_samples = [self.state.apply_calibration(s) for s in samples]
-
-        executor_result = self.protocol_executor.process_breath_samples(
-            samples=calibrated_samples,
-            safety_state=self.state.telemetry.safety_state,
-            readiness=self._execution_readiness(),
-            timestamp_start=start_ts,
-            dt=dt,
+        direct_sink_running = (
+            getattr(self.worker, "_actuation_sink", None) is self.actuation_worker
+            and self.worker.isRunning()
         )
-        transitions = executor_result.transitions
-
-        if transitions:
-            # Update current state
-            last_transition = transitions[-1]
-            self.state.telemetry.gating_state = last_transition.state
-            if self.view:
-                self.view.update_gating_state(last_transition.state)
-
-            # Log transitions
-            for t in transitions:
-                log_entry = {
-                    "event": "threshold_cross",
-                    "ts": t.timestamp,
-                    "sample_value": t.sample_value,
-                    "gate_state": t.state,
-                    "inhale": self.gating_service.inhale_threshold,
-                    "exhale": self.gating_service.exhale_threshold,
-                    "safety_state": t.safety_state,
-                }
-                self._breath_logger.info(log_entry)
-        self._publish_protocol_result(executor_result)
+        if not direct_sink_running:
+            if structured is None:
+                dt = 0.01
+                start_ts = timestamp - ((sample_count - 1) * dt)
+                start_ns = time.perf_counter_ns() - ((sample_count - 1) * 10_000_000)
+                structured = BreathSampleBatch.from_frames(
+                    tuple(
+                        AnalogInputFrame(
+                            timestamp=start_ts + index * dt,
+                            ai0=float(value),
+                            monotonic_ns=start_ns + index * 10_000_000,
+                            ai_epoch=1,
+                            sample_sequence=index,
+                        )
+                        for index, value in enumerate(values)
+                    )
+                )
+            self.actuation_worker.post_ai_batch(
+                structured,
+                readiness=self._execution_readiness(),
+            )
+            self._drain_actuation_if_not_running()
 
     def handle_breath_metrics(self, payload: dict) -> None:
         warning = bool(payload.get("warning_flag"))
@@ -667,12 +711,12 @@ class MainController(QObject):
         if hardware_ready:
             self._reset_startup_flows_to_zero_async()
         else:
-            self._publish_protocol_result(
-                self.protocol_executor.handle_readiness_lost(
-                    self._execution_readiness(),
-                    timestamp=time.time(),
-                )
+            self._publish_interlock_from_state()
+            self.actuation_worker.post_readiness_update(
+                readiness=self._execution_readiness(),
+                timestamp=time.time(),
             )
+            self._drain_actuation_if_not_running()
         self._refresh_toolbar_state()
 
     def request_self_check(self) -> None:
@@ -709,28 +753,11 @@ class MainController(QObject):
             LOG.warning("Protocol parse failed | path=%s | error=%s", path, exc)
             return False
 
-        if self.protocol_executor.state.document is not None:
-            cleanup = self.protocol_executor.stop(
-                safety_state=self.state.telemetry.safety_state,
-                timestamp=time.time(),
-                message="加载新协议前已清理旧执行状态。",
-            )
-            self._publish_protocol_result(cleanup)
-            if cleanup.state.active_valve is not None or any(
-                event.result == "close_failed" for event in cleanup.events
-            ):
-                message = "旧协议安全清理失败，新协议未加载；请检查硬件并再次停止。"
-                self.state.update_status(message)
-                if self.view:
-                    self.view.update_status(message)
-                return False
-
-        reset_result = self.protocol_executor.reset(document)
-        if reset_result.events:
-            self._publish_protocol_result(reset_result)
+        self.actuation_worker.post_load(document)
+        self._drain_actuation_if_not_running()
+        if self.state.loaded_protocol is not document and not self.actuation_worker.isRunning():
             return False
-        self.state.loaded_protocol = document
-        self._sync_worker_ttl_arm()
+        self._publish_interlock_from_state()
         message = f"协议加载成功：{document.source_name}，共 {len(document.trials)} 个 trial"
         self.state.update_status(message)
         if self.view:
@@ -745,108 +772,78 @@ class MainController(QObject):
     def handle_protocol_start_requested(self) -> None:
         document = (
             self.state.loaded_protocol
-            if self.protocol_executor.state.document is None
+            if not self._protocol_snapshot.has_protocol
             else None
         )
-        self._publish_protocol_result(
-            self.protocol_executor.start(
-                document,
-                readiness=self._execution_readiness(),
-                timestamp=time.time(),
-            )
+        self._publish_interlock_from_state(device_lease="protocol")
+        self.actuation_worker.post_start(
+            document=document,
+            readiness=self._execution_readiness(),
         )
+        self._drain_actuation_if_not_running()
 
     @Slot()
     def handle_protocol_manual_trigger_requested(self) -> None:
-        self._publish_protocol_result(
-            self.protocol_executor.accept_trigger(
-                TriggerMode.MANUAL,
-                readiness=self._execution_readiness(),
-                timestamp=time.time(),
-            )
-        )
+        self.actuation_worker.post_manual_trigger(readiness=self._execution_readiness())
+        self._drain_actuation_if_not_running()
 
     @Slot(str)
     def handle_protocol_trigger_mode_requested(self, mode: str) -> None:
-        self._publish_protocol_result(
-            self.protocol_executor.set_trigger_mode(
-                mode,
-                readiness=self._execution_readiness(),
-                timestamp=time.time(),
-            )
-        )
+        self.actuation_worker.post_mode(mode)
+        self._drain_actuation_if_not_running()
 
     @Slot(object)
     def handle_ttl_pulse(self, pulse: object) -> None:
         if not isinstance(pulse, TtlPulse):
             LOG.warning("忽略无效 TTL pulse payload：%r", pulse)
             return
-        self._publish_protocol_result(
-            self.protocol_executor.accept_trigger(
-                TriggerMode.TTL,
+        if not (
+            getattr(self.worker, "_actuation_sink", None) is self.actuation_worker
+            and self.worker.isRunning()
+        ):
+            self.actuation_worker.post_ttl_pulse(
+                pulse,
                 readiness=self._execution_readiness(),
-                timestamp=pulse.timestamp,
-                captured_epoch=pulse.arm_epoch,
-                sequence=pulse.sequence,
             )
-        )
+            self._drain_actuation_if_not_running()
 
     @Slot(str)
     def handle_ttl_input_error(self, message: str) -> None:
-        self._publish_protocol_result(
-            self.protocol_executor.handle_input_error(
-                message,
-                safety_state=self.state.telemetry.safety_state,
-                timestamp=time.time(),
-            )
-        )
+        if not (
+            getattr(self.worker, "_actuation_sink", None) is self.actuation_worker
+            and self.worker.isRunning()
+        ):
+            self.actuation_worker.post_input_error(message)
+            self._drain_actuation_if_not_running()
 
     @Slot()
     def handle_protocol_rearm_requested(self) -> None:
-        self._publish_protocol_result(
-            self.protocol_executor.rearm_current(
-                readiness=self._execution_readiness(),
-                timestamp=time.time(),
-            )
-        )
+        self.actuation_worker.post_rearm()
+        self._drain_actuation_if_not_running()
+
+    @Slot()
+    def handle_protocol_pause_requested(self) -> None:
+        self.actuation_worker.post_pause()
+        self._drain_actuation_if_not_running()
+
+    @Slot()
+    def handle_protocol_resume_requested(self) -> None:
+        self.actuation_worker.post_resume()
+        self._drain_actuation_if_not_running()
 
     @Slot()
     def handle_protocol_stop_requested(self) -> None:
-        self._publish_protocol_result(
-            self.protocol_executor.stop(
-                safety_state=self.state.telemetry.safety_state,
-                timestamp=time.time(),
-            )
-        )
+        self.actuation_worker.post_stop()
+        self._drain_actuation_if_not_running()
 
     @Slot()
     def handle_protocol_next_requested(self) -> None:
-        self._publish_protocol_result(
-            self.protocol_executor.skip_current(
-                safety_state=self.state.telemetry.safety_state,
-                readiness=self._execution_readiness(),
-                timestamp=time.time(),
-                message="用户请求跳过当前 trial，准备下一 trial。",
-            )
-        )
+        self.actuation_worker.post_skip()
+        self._drain_actuation_if_not_running()
 
     @Slot()
     def handle_protocol_executor_tick(self) -> None:
-        readiness_result = self.protocol_executor.handle_readiness_lost(
-            self._execution_readiness(),
-            timestamp=time.time(),
-        )
-        if readiness_result.events:
-            self._publish_protocol_result(readiness_result)
-            return
-        self._publish_protocol_result(
-            self.protocol_executor.tick(
-                safety_state=self.state.telemetry.safety_state,
-                readiness=self._execution_readiness(),
-                timestamp=time.time(),
-            ),
-            render_even_without_events=True,
-        )
+        self._render_protocol_execution_state()
 
     def reset_hardware(self) -> None:
         # 允许在未 ready 时执行 reset，用于恢复异常状态；仍需安全检查。
@@ -858,13 +855,8 @@ class MainController(QObject):
         if self.view:
             self.view.update_status(self.state.status_message)
 
-        self._publish_protocol_result(
-            self.protocol_executor.stop(
-                safety_state=self.state.telemetry.safety_state,
-                timestamp=time.time(),
-                message="硬件重置请求已停止门控流程。",
-            )
-        )
+        self.actuation_worker.post_stop(message="硬件重置请求已停止门控流程。")
+        self._drain_actuation_if_not_running()
         event = self.shutdown_service.shutdown(
             source="reset",
             reason="reset_request",
@@ -895,13 +887,8 @@ class MainController(QObject):
             self.worker.request_self_check()
 
     def stop_hardware(self) -> None:
-        self._publish_protocol_result(
-            self.protocol_executor.stop(
-                safety_state=self.state.telemetry.safety_state,
-                timestamp=time.time(),
-                message="用户停止硬件，门控流程已停止。",
-            )
-        )
+        self.actuation_worker.post_stop(message="用户停止硬件，门控流程已停止。")
+        self._drain_actuation_if_not_running()
         self.state.update_status("正在安全停止，关闭阀门并释放资源...")
         if self.view:
             self.view.update_status(self.state.status_message)
@@ -995,13 +982,12 @@ class MainController(QObject):
             reason=telemetry.safety_reason,
         )
 
-    def _write_protocol_valve(self, channel_id: int, open_state: bool) -> tuple[bool, str]:
-        return self.valve_service.set_valve(
-            channel_id,
-            open_state,
-            safety_state=self._build_current_safety_state(),
-            safety_close=not open_state,
-        )
+    @staticmethod
+    def _reject_synchronous_protocol_write(
+        channel_id: int, open_state: bool
+    ) -> tuple[bool, str]:
+        del channel_id, open_state
+        raise RuntimeError("生产协议动作只能由 ActuationWorker 异步执行。")
 
     def _publish_protocol_result(
         self,
@@ -1009,9 +995,31 @@ class MainController(QObject):
         *,
         render_even_without_events: bool = False,
     ) -> None:
+        if result.transitions:
+            last_transition = result.transitions[-1]
+            self.state.telemetry.gating_state = last_transition.state
+            if self.view:
+                self.view.update_gating_state(last_transition.state)
+            for transition in result.transitions:
+                self._breath_logger.info(
+                    {
+                        "event": "threshold_cross",
+                        "ts": transition.timestamp,
+                        "monotonic_ns": transition.monotonic_ns,
+                        "sample_value": transition.sample_value,
+                        "gate_state": transition.state,
+                        "inhale": self.gating_service.inhale_threshold,
+                        "exhale": self.gating_service.exhale_threshold,
+                        "safety_state": transition.safety_state,
+                    }
+                )
         if result.events:
             for event in result.events:
                 self._protocol_logger.info("protocol_gate | %s", event.as_dict())
+                if event.warning and event.message and self.view and hasattr(
+                    self.view, "render_actuation_alert"
+                ):
+                    self.view.render_actuation_alert(event.message, severe=event.severe)
             message = result.events[-1].message
             if message:
                 self.state.update_status(message)
@@ -1019,7 +1027,7 @@ class MainController(QObject):
                     self.view.update_status(self.state.status_message)
         if result.events or render_even_without_events:
             self._render_protocol_execution_state()
-        self._sync_worker_ttl_arm()
+        self._publish_interlock_from_state()
 
     def _execution_readiness(self) -> ProtocolExecutionReadiness:
         return ProtocolExecutionReadiness(
@@ -1030,21 +1038,223 @@ class MainController(QObject):
             ttl_input_ready=bool(getattr(self.worker, "ttl_input_ready", False)),
         )
 
-    def _sync_worker_ttl_arm(self) -> None:
-        state = self.protocol_executor.state
-        if state.ttl_armed:
-            self.worker.arm_ttl(arm_epoch=state.arm_epoch)
-        else:
-            self.worker.disarm_ttl()
+    def _publish_interlock_from_state(self, *, device_lease: str | None = None) -> None:
+        current = self.actuation_interlock.read()[1]
+        lease = device_lease
+        if lease is None:
+            lease = (
+                "protocol"
+                if self._protocol_snapshot.status.value
+                in {"waiting_trigger", "waiting_exhale", "triggered", "paused", "blocked"}
+                else "idle"
+            )
+        self.actuation_interlock.publish(
+            InterlockSnapshot(
+                connected=bool(self.state.telemetry.connected),
+                hardware_ready=bool(self.state.hardware_ready),
+                flow_setpoints_ready=bool(self.state.flow_setpoints_ready),
+                safety_state=self.state.telemetry.safety_state,
+                ttl_input_ready=bool(getattr(self.worker, "ttl_input_ready", False)),
+                has_protocol=bool(
+                    self.state.loaded_protocol or self._protocol_snapshot.has_protocol
+                ),
+                device_lease=lease or current.device_lease,
+            )
+        )
+
+    def _drain_actuation_if_not_running(self) -> None:
+        if not self.actuation_worker.isRunning():
+            self.actuation_worker.process_ready_with_do_ownership()
+
+    def _submit_flow_intent(
+        self,
+        *,
+        mode: str,
+        a: float,
+        b: float,
+        c: float,
+        source: str,
+    ) -> FlowApplyResult:
+        self._actuation_request_sequence += 1
+        self._last_flow_result = None
+        effective_c = 0.0 if mode == "stim_start" else float(c)
+        self.actuation_worker.post_flow_intent(
+            mode=mode,
+            a=float(a),
+            b=float(b),
+            c=effective_c,
+            source=source,
+        )
+        self._drain_actuation_if_not_running()
+        if not self.flow_worker.isRunning():
+            self.flow_worker.process_ready()
+            self._drain_actuation_if_not_running()
+        if self._last_flow_result is not None:
+            return self._last_flow_result
+        return FlowApplyResult(
+            True,
+            "流量变更已提交，等待串口确认。",
+            float(a),
+            float(b),
+            effective_c,
+            float(a) + (effective_c if mode in {"rest", "zero"} else 0.0),
+        )
+
+    def _submit_valve_plan(
+        self,
+        plan: ValveWritePlan,
+        *,
+        category: ActuationCategory,
+        ui_context: dict,
+    ) -> str:
+        self._actuation_request_sequence += 1
+        request_id = f"valve-plan-{self._actuation_request_sequence}"
+        self._pending_plan_ui[request_id] = dict(ui_context)
+        self.actuation_worker.post_valve_plan(
+            plan,
+            category=category,
+            request_id=request_id,
+        )
+        self._drain_actuation_if_not_running()
+        return "阀门动作已提交，等待硬件确认。"
+
+    @Slot(object)
+    def _handle_flow_command_result(self, wrapped) -> None:
+        result = wrapped.result
+        self._last_flow_result = result
+        self.state.flow_setpoints_ready = bool(result.success)
+        context = self._pending_flow_context.pop(wrapped.command.source, {})
+        kind = context.get("kind")
+        if kind == "startup_zero":
+            self._startup_zero_completed.emit(result)
+            return
+        if kind == "apply":
+            pretest = self.view.pretest_view if self.view and hasattr(self.view, "pretest_view") else None
+            self._handle_apply_result(result, pretest=pretest)
+            return
+        if kind != "pretest":
+            return
+        mode = str(context["mode"])
+        channels = [int(channel) for channel in context["channels"]]
+        if not result.success:
+            self._pretest_sequence_completed.emit(mode, channels, result, False, result.message)
+            return
+        desired_open = mode == "stim_start"
+        safety_state = self._build_current_safety_state()
+        combined_steps = []
+        master_planned = False
+        for channel_id in channels:
+            ok, plan_or_message = self.valve_service.plan_valve(
+                channel_id,
+                desired_open,
+                safety_state=safety_state,
+            )
+            if not ok:
+                self._pretest_sequence_completed.emit(
+                    mode, channels, result, False, str(plan_or_message)
+                )
+                return
+            assert isinstance(plan_or_message, ValveWritePlan)
+            for step in plan_or_message.steps:
+                if step.role == "master_prepare" and master_planned:
+                    continue
+                if step.role == "master_prepare":
+                    master_planned = True
+                combined_steps.append(step)
+        if not combined_steps:
+            self._pretest_sequence_completed.emit(mode, channels, result, True, result.message)
+            return
+        self._submit_valve_plan(
+            ValveWritePlan(
+                requested_valve=channels[0],
+                requested_state=desired_open,
+                safety_close=False,
+                steps=tuple(combined_steps),
+            ),
+            category=ActuationCategory.PRETEST,
+            ui_context={
+                "kind": "pretest",
+                "mode": mode,
+                "channels": channels,
+                "flow_result": result,
+            },
+        )
+
+    @Slot(object)
+    def _handle_actuation_receipt(self, receipt) -> None:
+        self.valve_service.commit_receipt(receipt)
+        self._protocol_logger.info(
+            "actuation_receipt | %s",
+            {
+                "command_id": receipt.command_id,
+                "execution_epoch": receipt.execution_epoch,
+                "arm_epoch": receipt.arm_epoch,
+                "sequence": receipt.sequence,
+                "trial_id": receipt.trial_id,
+                "trial_index": receipt.trial_index,
+                "valve": receipt.valve,
+                "action": receipt.action.value,
+                "category": receipt.category.value,
+                "expected_ns": receipt.expected_ns,
+                "started_ns": receipt.started_ns,
+                "actual_ns": receipt.actual_ns,
+                "offset_ms": receipt.offset_ms,
+                "jitter_ms": receipt.jitter_ms,
+                "result": receipt.result.value,
+                "measurement_point": receipt.measurement_point,
+                "stale": receipt.stale,
+            },
+        )
+        self._render_protocol_execution_state()
+        if self.view and hasattr(self.view, "render_actuation_alert"):
+            severe = bool(
+                receipt.jitter_ms is not None
+                and receipt.jitter_ms
+                > self.actuation_worker.metrics.config.single_limit_ms
+            )
+            if severe or receipt.result.value != "success":
+                message = receipt.message or (
+                    "阀门时序严重超限；确认全部阀门关闭后重新布防。"
+                    if severe
+                    else "阀门动作失败；请检查硬件并执行安全停止。"
+                )
+                self.view.render_actuation_alert(message, severe=True)
+
+    @Slot(object)
+    def _handle_actuation_plan_result(self, result: dict) -> None:
+        context = self._pending_plan_ui.pop(str(result.get("request_id", "")), {})
+        message = str(result.get("message", ""))
+        if context.get("kind") == "pretest":
+            flow_result = context.get("flow_result")
+            self._pretest_sequence_completed.emit(
+                str(context.get("mode", "")),
+                list(context.get("channels", [])),
+                flow_result,
+                bool(result.get("success")),
+                message,
+            )
+        if message:
+            self.state.update_status(message)
+            if self.view:
+                self.view.update_status(message)
+
+    @Slot(object)
+    def _handle_protocol_snapshot(self, snapshot) -> None:
+        self._protocol_snapshot = snapshot
+        if self.view and hasattr(self.view, "protocol_view"):
+            self.view.protocol_view.render_execution_state(snapshot)
+
+    @Slot(object)
+    def _handle_document_result(self, result: dict) -> None:
+        if result.get("success"):
+            self.state.loaded_protocol = result.get("document")
+            self._publish_interlock_from_state()
 
     def _render_protocol_execution_state(self) -> None:
         if self.view and hasattr(self.view, "protocol_view"):
-            self.view.protocol_view.render_execution_state(
-                self.protocol_executor.snapshot(
-                    time.time(),
-                    readiness=self._execution_readiness(),
-                )
-            )
+            self.view.protocol_view.render_execution_state(self._protocol_snapshot)
+        self.actuation_worker.post_snapshot_request()
+        self._drain_actuation_if_not_running()
 
     def ensure_safe_command(self, action: str, source: str | None = None) -> bool:
         """统一安全守卫：硬件就绪 + 安全状态 SAFE 才放行。"""
@@ -1177,8 +1387,10 @@ class MainController(QObject):
         thread.start()
 
     def _run_startup_zero(self) -> None:
-        result = self.flow_service.apply_zero()
-        self._startup_zero_completed.emit(result)
+        self._pending_flow_context["safety:startup-zero"] = {"kind": "startup_zero"}
+        self._submit_flow_intent(
+            mode="zero", a=0.0, b=0.0, c=0.0, source="safety:startup-zero"
+        )
 
     @Slot(object)
     def _handle_startup_zero_completed(self, result_obj: object) -> None:
@@ -1225,13 +1437,9 @@ class MainController(QObject):
                 pretest.apply_safety_state("DATA_STALE", reason, disabled=True)
             return result
 
-        if mode == "stim_start":
-            result = self.flow_service.apply_stim_start(a_target=a, b_target=b)
-        else:
-            result = self.flow_service.apply_stim_end(a_target=a, b_target=b, c_target=c)
-
-        self._handle_apply_result(result, pretest=pretest)
-        return result
+        source = f"manual-sequence:{self._actuation_request_sequence + 1}"
+        self._pending_flow_context[source] = {"kind": "apply"}
+        return self._submit_flow_intent(mode=mode, a=a, b=b, c=c, source=source)
 
     def _apply_previous_shutdown_status(self) -> None:
         """Show last shutdown summary when app starts."""

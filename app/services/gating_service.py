@@ -11,12 +11,18 @@ class GatingState(str, Enum):
     BLOCKED = "BLOCKED"
 
 
-@dataclass
+from app.services.hal import BreathSampleBatch
+
+
+@dataclass(frozen=True)
 class GatingTransition:
     state: GatingState
     timestamp: float
     sample_value: float
     safety_state: str
+    monotonic_ns: int = 0
+    ai_epoch: int = 0
+    sample_sequence: int = 0
 
 
 class GatingService:
@@ -71,6 +77,30 @@ class GatingService:
                         timestamp=ts,
                         sample_value=value,
                         safety_state=safety_state,
+                    )
+                )
+        return transitions
+
+    def process_sample_batch(
+        self,
+        batch: BreathSampleBatch,
+        *,
+        safety_state: str,
+    ) -> list[GatingTransition]:
+        transitions: list[GatingTransition] = []
+        for sample in batch.samples:
+            new_state = self._determine_state(sample.value, safety_state)
+            if new_state != self.current_state:
+                self.current_state = new_state
+                transitions.append(
+                    GatingTransition(
+                        state=new_state,
+                        timestamp=sample.timestamp,
+                        sample_value=sample.value,
+                        safety_state=safety_state,
+                        monotonic_ns=sample.monotonic_ns,
+                        ai_epoch=sample.ai_epoch,
+                        sample_sequence=sample.sample_sequence,
                     )
                 )
         return transitions

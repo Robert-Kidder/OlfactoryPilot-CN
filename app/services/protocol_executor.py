@@ -7,6 +7,11 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from app.models import (
+    ActuationAction,
+    ActuationCategory,
+    ActuationCommand,
+    ActuationReceipt,
+    ActuationResult,
     ProtocolDocument,
     ProtocolExecutionReadiness,
     ProtocolExecutionSnapshot,
@@ -15,8 +20,10 @@ from app.models import (
     ProtocolGateEvent,
     ProtocolTrial,
     TriggerMode,
+    duration_ms_to_ns,
 )
 from app.services.gating_service import GatingService, GatingState, GatingTransition
+from app.services.hal import BreathSampleBatch
 
 ValveWriter = Callable[[int, bool], tuple[bool, str]]
 
@@ -51,6 +58,7 @@ class ProtocolExecutorResult:
     state: ProtocolExecutionState
     events: list[ProtocolGateEvent] = field(default_factory=list)
     transitions: list[GatingTransition] = field(default_factory=list)
+    action_requests: tuple[ActuationCommand, ...] = ()
 
 
 class ProtocolExecutor:
@@ -61,6 +69,7 @@ class ProtocolExecutor:
         valve_writer: ValveWriter,
         config: ProtocolExecutionConfig | dict[str, Any] | None = None,
         clock: Callable[[], float] | None = None,
+        deferred_actuation: bool = False,
     ) -> None:
         self.gating_service = gating_service
         self.valve_writer = valve_writer
@@ -70,6 +79,8 @@ class ProtocolExecutor:
             else ProtocolExecutionConfig.from_mapping(config)
         )
         self.clock = clock or time.time
+        self.deferred_actuation = bool(deferred_actuation)
+        self._action_sequence = 0
         self.state = ProtocolExecutionState()
 
     def empty_result(self) -> ProtocolExecutorResult:
@@ -94,6 +105,7 @@ class ProtocolExecutor:
             document=document,
             status=status,
             arm_epoch=invalidated_epoch,
+            execution_epoch=self.state.execution_epoch + 1,
         )
         self._sync_trial_mode(clear_override=True)
         return self.empty_result()
@@ -152,18 +164,21 @@ class ProtocolExecutor:
                 message=reason,
             )
 
+        previous_execution_epoch = self.state.execution_epoch
         if document is not None:
             invalidated_epoch = self.state.arm_epoch + 1
             self.state = ProtocolExecutionState(
                 document=candidate_document,
                 status=ProtocolExecutionStatus.READY,
                 arm_epoch=invalidated_epoch,
+                execution_epoch=previous_execution_epoch,
             )
             self._sync_trial_mode(clear_override=True)
         elif self.state.status == ProtocolExecutionStatus.STOPPED:
             self.state.trial_index = 0
             self._sync_trial_mode(clear_override=True)
         self.state.retry_count = 0
+        self.state.execution_epoch = previous_execution_epoch + 1
         return self._enter_trigger_waiting(now, readiness=ready)
 
     def accept_trigger(
@@ -360,6 +375,7 @@ class ProtocolExecutor:
                 safety_state=readiness.safety_state,
                 message=reason,
             )
+        self.state.execution_epoch += 1
         self.state.retry_count = 0
         return self._enter_trigger_waiting(now, readiness=readiness)
 
@@ -416,31 +432,42 @@ class ProtocolExecutor:
 
     def process_breath_samples(
         self,
-        samples: list[float],
+        samples: list[float] | BreathSampleBatch,
         *,
         safety_state: str,
         readiness: ProtocolExecutionReadiness | None = None,
-        timestamp_start: float,
+        timestamp_start: float | None = None,
         dt: float = 0.01,
+        safety_generation: int = 0,
     ) -> ProtocolExecutorResult:
-        if not samples:
+        structured = samples if isinstance(samples, BreathSampleBatch) else None
+        values = [sample.value for sample in structured.samples] if structured else samples
+        if not values:
             return self.empty_result()
+        if structured:
+            timestamp_start = structured.samples[0].timestamp
+        if timestamp_start is None:
+            raise ValueError("timestamp_start 不能为空。")
         ready = self._readiness(readiness, safety_state)
         readiness_result = self.handle_readiness_lost(ready, timestamp=timestamp_start)
         if readiness_result.events:
             return readiness_result
-        if not all(math.isfinite(float(sample)) for sample in samples):
+        if not all(math.isfinite(float(sample)) for sample in values):
             return self._block(
                 timestamp_start,
                 safety_state=safety_state,
                 message="呼吸样本包含无效数值，已停止门控；请检查采集信号。",
             )
 
-        transitions = self.gating_service.process_batch(
-            [float(sample) for sample in samples],
-            safety_state,
-            timestamp_start=timestamp_start,
-            dt=dt,
+        transitions = (
+            self.gating_service.process_sample_batch(structured, safety_state=safety_state)
+            if structured
+            else self.gating_service.process_batch(
+                [float(sample) for sample in values],
+                safety_state,
+                timestamp_start=timestamp_start,
+                dt=dt,
+            )
         )
         if safety_state != "SAFE":
             blocked = self.handle_safety_update(safety_state, timestamp=timestamp_start)
@@ -451,6 +478,7 @@ class ProtocolExecutor:
             )
 
         events: list[ProtocolGateEvent] = []
+        action_requests: list[ActuationCommand] = []
         if self.state.status == ProtocolExecutionStatus.WAITING_EXHALE:
             trigger_transition = next(
                 (transition for transition in transitions if transition.state == GatingState.EXHALE),
@@ -462,19 +490,40 @@ class ProtocolExecutor:
                     safety_state=safety_state,
                     sample_value=trigger_transition.sample_value,
                     gate_state=trigger_transition.state.value,
+                    expected_open_ns=trigger_transition.monotonic_ns or None,
+                    trigger_reason="exhale_transition",
+                    safety_generation=safety_generation,
                 )
                 events.extend(triggered.events)
+                action_requests.extend(triggered.action_requests)
             elif self.gating_service.current_state == GatingState.EXHALE:
-                sample = float(samples[-1])
+                sample = float(values[-1])
+                fallback_timestamp = (
+                    structured.samples[-1].timestamp
+                    if structured
+                    else timestamp_start + (len(values) - 1) * dt
+                )
+                fallback_monotonic_ns = (
+                    structured.samples[-1].monotonic_ns if structured else None
+                )
                 triggered = self._trigger_current(
-                    timestamp_start + (len(samples) - 1) * dt,
+                    fallback_timestamp,
                     safety_state=safety_state,
                     sample_value=sample,
                     gate_state=GatingState.EXHALE.value,
+                    expected_open_ns=fallback_monotonic_ns,
+                    trigger_reason="exhale_state_fallback",
+                    safety_generation=safety_generation,
                 )
                 events.extend(triggered.events)
+                action_requests.extend(triggered.action_requests)
 
-        return ProtocolExecutorResult(state=self.state, events=events, transitions=transitions)
+        return ProtocolExecutorResult(
+            state=self.state,
+            events=events,
+            transitions=transitions,
+            action_requests=tuple(action_requests),
+        )
 
     def tick(
         self,
@@ -504,6 +553,17 @@ class ProtocolExecutor:
                 return self._finish_triggered_trial(now, readiness=ready)
 
         return self.empty_result()
+
+    def handle_breath_timeout_deadline(
+        self,
+        *,
+        readiness: ProtocolExecutionReadiness,
+        timestamp: float | None = None,
+    ) -> ProtocolExecutorResult:
+        """Owner-scheduled monotonic deadline entry; wall time is logging only."""
+        if self.state.status != ProtocolExecutionStatus.WAITING_EXHALE:
+            return self.empty_result()
+        return self._handle_timeout(self._now(timestamp), readiness=readiness)
 
     def skip_current(
         self,
@@ -585,6 +645,62 @@ class ProtocolExecutor:
         events.append(self._event("stopped", now, safety_state=safety_state, message=message))
         return self._result_with_events(events)
 
+    def pause_after_cleanup(
+        self,
+        *,
+        safety_state: str,
+        timestamp: float | None = None,
+    ) -> ProtocolExecutorResult:
+        now = self._now(timestamp)
+        if self.state.active_valve is not None or self.state.possibly_open_valves:
+            return self._block(
+                now,
+                safety_state=safety_state,
+                message="暂停前的安全关闭尚未确认。",
+            )
+        self._invalidate_arm()
+        self.state.status = ProtocolExecutionStatus.PAUSED
+        self.state.waiting_started_at = None
+        self.state.waiting_trigger_started_at = None
+        self.state.triggered_at = None
+        return self._result_with_events(
+            [self._event("paused", now, safety_state=safety_state, message="协议已暂停，所有阀门已确认关闭。")]
+        )
+
+    def resume_paused(
+        self,
+        *,
+        readiness: ProtocolExecutionReadiness,
+        timestamp: float | None = None,
+    ) -> ProtocolExecutorResult:
+        now = self._now(timestamp)
+        if self.state.status != ProtocolExecutionStatus.PAUSED:
+            return self._rejected(
+                "resume_rejected",
+                now,
+                safety_state=readiness.safety_state,
+                message="当前协议未处于暂停状态。",
+            )
+        reason = readiness.rejection_reason(
+            has_protocol=bool(self.state.document and self.state.document.trials),
+            require_ttl=self.state.current_mode == TriggerMode.TTL,
+        )
+        if reason:
+            return self._rejected(
+                "resume_rejected",
+                now,
+                safety_state=readiness.safety_state,
+                message=reason,
+            )
+        self.state.execution_epoch += 1
+        self._invalidate_arm()
+        self.state.retry_count = 0
+        self.state.trigger_source = None
+        result = self._enter_trigger_waiting(now, readiness=readiness)
+        return self._result_with_events(
+            [self._event("resumed", now, safety_state=readiness.safety_state, message="协议已恢复并重新等待触发。"), *result.events]
+        )
+
     def handle_safety_update(
         self,
         safety_state: str,
@@ -613,6 +729,7 @@ class ProtocolExecutor:
         *,
         readiness: ProtocolExecutionReadiness | None = None,
         safety_state: str | None = None,
+        monotonic_ns: int | None = None,
     ) -> ProtocolExecutionSnapshot:
         now = self._now(timestamp)
         ready = self._readiness(readiness, safety_state)
@@ -646,6 +763,19 @@ class ProtocolExecutor:
             ProtocolExecutionStatus.WAITING_EXHALE,
             ProtocolExecutionStatus.TRIGGERED,
         }
+        next_trial = None
+        if self.state.document and self.state.trial_index + 1 < len(self.state.document.trials):
+            next_trial = self.state.document.trials[self.state.trial_index + 1]
+        next_odor = "-"
+        if next_trial is not None:
+            next_odor = next_trial.metadata.get("odor") or next_trial.metadata.get("label") or "-"
+        quality = self.state.quality
+        remaining_ms = None
+        if self.state.close_deadline_ns is not None and monotonic_ns is not None:
+            remaining_ms = max(
+                0.0,
+                (self.state.close_deadline_ns - int(monotonic_ns)) / 1_000_000,
+            )
         return ProtocolExecutionSnapshot(
             status=self.state.status,
             status_text=_STATUS_TEXT.get(self.state.status, self.state.status.value),
@@ -698,6 +828,24 @@ class ProtocolExecutor:
             trigger_source=self.state.trigger_source or "-",
             last_ttl_timestamp=self.state.last_ttl_timestamp,
             arm_epoch=self.state.arm_epoch,
+            execution_epoch=self.state.execution_epoch,
+            can_pause=self.state.status
+            in {
+                ProtocolExecutionStatus.WAITING_TRIGGER,
+                ProtocolExecutionStatus.WAITING_EXHALE,
+                ProtocolExecutionStatus.TRIGGERED,
+            },
+            can_resume=common_ready and self.state.status == ProtocolExecutionStatus.PAUSED,
+            next_odor=next_odor,
+            last_jitter_ms=quality.last_jitter_ms,
+            p95_open_ms=quality.open.p95_ms,
+            p95_close_ms=quality.close.p95_ms,
+            p95_combined_ms=quality.combined.p95_ms,
+            sample_count_open=quality.open.sample_count,
+            sample_count_close=quality.close.sample_count,
+            sample_count_combined=quality.combined.sample_count,
+            remaining_ms=remaining_ms,
+            quality_block_reason=self.state.quality_block_reason,
         )
 
     def _enter_trigger_waiting(
@@ -780,18 +928,71 @@ class ProtocolExecutor:
         safety_state: str,
         sample_value: float,
         gate_state: str,
+        expected_open_ns: int | None = None,
+        trigger_reason: str = "exhale_transition",
+        safety_generation: int = 0,
     ) -> ProtocolExecutorResult:
         trial = self.state.current_trial
         invalid = self._validate_trial(trial)
         if invalid:
             return self._block(timestamp, safety_state=safety_state, message=invalid)
         assert trial is not None
+        self.state.status = ProtocolExecutionStatus.TRIGGERED
+        self.state.triggered_at = timestamp
+        self.state.expected_open_ns = expected_open_ns
+        self.state.waiting_started_at = None
+        if self.deferred_actuation:
+            if expected_open_ns is None or expected_open_ns < 0:
+                return self._block(
+                    timestamp,
+                    safety_state=safety_state,
+                    message="呼吸样本缺少有效 monotonic_ns，已阻断开阀。",
+                )
+            if self.state.pending_open_command_id is not None:
+                return self.empty_result()
+            try:
+                duration_ns = duration_ms_to_ns(float(trial.duration_ms))
+            except ValueError as exc:
+                return self._block(timestamp, safety_state=safety_state, message=str(exc))
+            self._action_sequence += 1
+            command = ActuationCommand(
+                command_id=(
+                    f"protocol-{self.state.execution_epoch}-open-{self._action_sequence}"
+                ),
+                execution_epoch=self.state.execution_epoch,
+                arm_epoch=self.state.arm_epoch,
+                sequence=self._action_sequence,
+                trial_id=trial.trial_id,
+                trial_index=self.state.trial_index,
+                valve=trial.valve,
+                action=ActuationAction.OPEN,
+                category=ActuationCategory.NORMAL,
+                expected_ns=expected_open_ns,
+                duration_ns=duration_ns,
+                wall_timestamp=timestamp,
+                safety_generation=safety_generation,
+            )
+            self.state.pending_open_command_id = command.command_id
+            return self._result_with_events(
+                [
+                    self._event(
+                        "open_requested",
+                        timestamp,
+                        safety_state=safety_state,
+                        gate_state=gate_state,
+                        sample_value=sample_value,
+                        result="pending",
+                        message="呼气条件已满足，已提交开阀请求等待硬件回执。",
+                        planned_duration_ms=float(trial.duration_ms),
+                        trigger_reason=trigger_reason,
+                        command_id=command.command_id,
+                    )
+                ],
+                action_requests=(command,),
+            )
         ok, message = self.valve_writer(trial.valve, True)
         if not ok:
             return self._block(timestamp, safety_state=safety_state, message=message)
-        self.state.status = ProtocolExecutionStatus.TRIGGERED
-        self.state.triggered_at = timestamp
-        self.state.waiting_started_at = None
         self.state.active_valve = trial.valve
         return self._result_with_events(
             [
@@ -804,9 +1005,163 @@ class ProtocolExecutor:
                     result="success",
                     message="已达到呼气阈值并触发当前 trial。",
                     planned_duration_ms=float(trial.duration_ms),
+                    trigger_reason=trigger_reason,
                 )
             ]
         )
+
+    def create_close_request(
+        self,
+        open_receipt: ActuationReceipt,
+        *,
+        sequence: int,
+        safety_generation: int,
+    ) -> ActuationCommand:
+        if open_receipt.actual_ns is None:
+            raise ValueError("open receipt 缺少 actual_ns，不能安排 close。")
+        trial = self.state.current_trial
+        if trial is None:
+            raise ValueError("当前 trial 不存在，不能安排 close。")
+        duration_ns = duration_ms_to_ns(float(trial.duration_ms))
+        expected_ns = open_receipt.actual_ns + duration_ns
+        command = ActuationCommand(
+            command_id=f"protocol-{open_receipt.execution_epoch}-close-{sequence}",
+            execution_epoch=open_receipt.execution_epoch,
+            arm_epoch=open_receipt.arm_epoch,
+            sequence=sequence,
+            trial_id=open_receipt.trial_id,
+            trial_index=open_receipt.trial_index,
+            valve=open_receipt.valve,
+            action=ActuationAction.CLOSE,
+            category=ActuationCategory.NORMAL,
+            expected_ns=expected_ns,
+            duration_ns=None,
+            wall_timestamp=open_receipt.wall_timestamp,
+            safety_generation=safety_generation,
+        )
+        self.state.pending_close_command_id = command.command_id
+        self.state.close_deadline_ns = expected_ns
+        return command
+
+    def consume_actuation_receipt(
+        self,
+        receipt: ActuationReceipt,
+        *,
+        readiness: ProtocolExecutionReadiness,
+    ) -> ProtocolExecutorResult:
+        pending_id = (
+            self.state.pending_open_command_id
+            if receipt.action == ActuationAction.OPEN
+            else self.state.pending_close_command_id
+        )
+        if (
+            receipt.stale
+            or receipt.execution_epoch != self.state.execution_epoch
+            or receipt.command_id != pending_id
+        ):
+            return self._result_with_events(
+                [
+                    self._event(
+                        "actuation_receipt_stale",
+                        receipt.wall_timestamp,
+                        safety_state=readiness.safety_state,
+                        result="stale",
+                        message="动作回执身份或 execution epoch 已过期，未推进协议状态。",
+                        command_id=receipt.command_id,
+                    )
+                ]
+            )
+        if receipt.action == ActuationAction.OPEN:
+            self.state.pending_open_command_id = None
+            if receipt.result != ActuationResult.SUCCESS:
+                self.state.possibly_open_valves.add(receipt.valve)
+                self.state.status = ProtocolExecutionStatus.BLOCKED
+                return self._result_with_events(
+                    [
+                        self._event(
+                            "blocked",
+                            receipt.wall_timestamp,
+                            safety_state=readiness.safety_state,
+                            result=receipt.result.value,
+                            message="开阀失败或结果不确定，已阻断并要求安全关闭。",
+                            command_id=receipt.command_id,
+                        )
+                    ]
+                )
+            self.state.active_valve = receipt.valve
+            self.state.actual_open_ns = receipt.actual_ns
+            self.state.status = ProtocolExecutionStatus.TRIGGERED
+            return self._result_with_events(
+                [
+                    self._event(
+                        "exhale_trigger",
+                        receipt.wall_timestamp,
+                        safety_state=readiness.safety_state,
+                        result="success",
+                        message="开阀硬件回执成功，当前 trial 已进入刺激阶段。",
+                        command_id=receipt.command_id,
+                    )
+                ]
+            )
+
+        if receipt.result != ActuationResult.SUCCESS:
+            self.state.status = ProtocolExecutionStatus.BLOCKED
+            self.state.possibly_open_valves.add(receipt.valve)
+            return self._result_with_events(
+                [
+                    self._event(
+                        "blocked",
+                        receipt.wall_timestamp,
+                        safety_state=readiness.safety_state,
+                        result="close_failed",
+                        message="关闭回执失败，保留活动阀事实并等待安全重试。",
+                        command_id=receipt.command_id,
+                    )
+                ]
+            )
+        if (
+            self.state.actual_open_ns is None
+            or receipt.actual_ns is None
+            or receipt.actual_ns < self.state.actual_open_ns
+        ):
+            self.state.status = ProtocolExecutionStatus.BLOCKED
+            return self._result_with_events(
+                [
+                    self._event(
+                        "measurement_fault",
+                        receipt.wall_timestamp,
+                        safety_state=readiness.safety_state,
+                        result="measurement_fault",
+                        message="关闭回执时间早于开阀回执，已排除质量样本并阻断。",
+                        command_id=receipt.command_id,
+                    )
+                ]
+            )
+        trial = self.state.current_trial
+        actual_duration_ms = (receipt.actual_ns - self.state.actual_open_ns) / 1_000_000
+        self.state.pending_close_command_id = None
+        self.state.active_valve = None
+        self.state.possibly_open_valves.discard(receipt.valve)
+        self.state.close_deadline_ns = None
+        self.state.actual_open_ns = None
+        events = [
+            self._event(
+                "stimulus_end",
+                receipt.wall_timestamp,
+                safety_state=readiness.safety_state,
+                result="success",
+                message="关闭硬件回执成功，当前 trial 已完成。",
+                planned_duration_ms=float(trial.duration_ms) if trial else None,
+                actual_duration_ms=actual_duration_ms,
+                command_id=receipt.command_id,
+            )
+        ]
+        self.state.trial_index += 1
+        self.state.retry_count = 0
+        events.extend(
+            self._prepare_after_advance(receipt.wall_timestamp, readiness=readiness).events
+        )
+        return self._result_with_events(events)
 
     def _finish_triggered_trial(
         self,
@@ -1018,6 +1373,8 @@ class ProtocolExecutor:
         actual_duration_ms: float | None = None,
         trigger_source: str | None = None,
         pulse_sequence: int | None = None,
+        trigger_reason: str | None = None,
+        command_id: str | None = None,
     ) -> ProtocolGateEvent:
         trial = self.state.current_trial
         return ProtocolGateEvent(
@@ -1039,6 +1396,9 @@ class ProtocolExecutor:
             trigger_source=trigger_source or self.state.trigger_source,
             arm_epoch=self.state.arm_epoch,
             pulse_sequence=pulse_sequence,
+            trigger_reason=trigger_reason,
+            command_id=command_id,
+            execution_epoch=self.state.execution_epoch,
         )
 
     def _rejected(
@@ -1095,11 +1455,20 @@ class ProtocolExecutor:
             ttl_input_ready=True,
         )
 
-    def _result_with_events(self, events: list[ProtocolGateEvent]) -> ProtocolExecutorResult:
+    def _result_with_events(
+        self,
+        events: list[ProtocolGateEvent],
+        *,
+        action_requests: tuple[ActuationCommand, ...] = (),
+    ) -> ProtocolExecutorResult:
         for event in events:
             self.state.recent_event = event
             self.state.events.append(event)
-        return ProtocolExecutorResult(state=self.state, events=events)
+        return ProtocolExecutorResult(
+            state=self.state,
+            events=events,
+            action_requests=action_requests,
+        )
 
     @staticmethod
     def _validate_trial(trial: ProtocolTrial | None) -> str:
@@ -1137,4 +1506,5 @@ _STATUS_TEXT = {
     ProtocolExecutionStatus.COMPLETED: "已完成",
     ProtocolExecutionStatus.BLOCKED: "已阻断",
     ProtocolExecutionStatus.STOPPED: "已停止",
+    ProtocolExecutionStatus.PAUSED: "已暂停",
 }

@@ -56,7 +56,7 @@ def test_worker_uses_hal_for_signal_generation(qt_app):
     worker = HardwareWorker(telemetry_hz=10, breath_hz=10, hal=hal, simulation=True)
 
     captured = []
-    worker.breath_samples.connect(lambda payload, ts: captured.append(payload[0]))
+    worker.breath_samples.connect(lambda batch: captured.append(batch.samples[0].value))
 
     worker._emit_breath_sample(1.23)
     assert captured == [0.42]

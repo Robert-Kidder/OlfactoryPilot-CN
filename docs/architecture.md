@@ -44,6 +44,15 @@ tests/                 # 自动化测试
 - Worker 在线程中处理硬件读写、协议时序和安全检查，避免阻塞 UI。
 - Qt signal/slot 用于 UI 线程和工作线程之间通信。
 
+### 低抖动动作与资源所有权
+
+- `HardwareWorker` 独占唯一 AI0/AI6 continuous task，并把带 AI epoch、sample sequence 与采样点 `monotonic_ns` 的 frozen batch 直接提交给 `ActuationWorker`；UI signal 不参与协议 deadline。
+- `ActuationWorker` 独占 `ProtocolExecutor`、`GatingService`、动作质量窗口和全部 DO session。协议、手动、预检与安全动作统一进入其 deadline/紧急队列，HAL 成功回执点明确为 `daqmx_write_ack`，不代表机械阀物理完成。
+- `FlowWorker` 是 Alicat 串口单写者。Controller 只提交 flow intent；`ActuationWorker` 先检查协议设备租约与 interlock，再把获准命令交给 `FlowWorker`。
+- `ActuationInterlockIngress` 是 producer-safe 的 immutable readiness store。AI/telemetry/serial producer 先更新 generation 和 unsafe latch，再发 UI 消息；只有动作 owner 在 readiness 恢复且阀门已确认关闭后才能清除 latch。
+- shutdown 固定为：停止新提交与失效 normal epoch → `emergency_close_all` 有界确认 → ActuationWorker 停止并释放 DO → HardwareWorker 在线程内释放 AI → FlowWorker 最后释放 serial。DO owner 未交还时禁止跨线程复用旧 task 做兜底关闭。
+- RealHAL 按 device/port 建立持久 DO task，deadline 路径只更新端口状态向量并调用 on-demand `Task.write(auto_start=False)`；最终资源分组及 `<20ms` 性能仍必须由真实 Windows/NI HIL 证据确认。
+
 ### HAL 硬件抽象
 
 所有硬件访问必须通过 HAL：

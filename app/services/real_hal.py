@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import logging
 import math
+import re
 import threading
 import time
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass
 
 from app.models import SelfCheckResult
-from app.services.hal import AnalogInputFrame, HalBase
+from app.services.hal import AnalogInputFrame, DigitalWriteAck, HalBase
 from app.services.ttl_trigger_service import TtlTriggerConfig
 
 try:  # Local hardware drivers; keep import errors explicit for clear startup failures.
@@ -42,6 +44,16 @@ FLOW_FIELD_INDEX = {
 }
 
 
+@dataclass
+class _DOPortSession:
+    task: object
+    device: str
+    port: str
+    first_line: int
+    last_line: int
+    states: list[bool]
+
+
 class RealHAL(HalBase):
     """Real hardware HAL using NI-DAQmx for IO and Alicat RS232 for flow control."""
 
@@ -63,6 +75,8 @@ class RealHAL(HalBase):
         alicat_setpoint_scale: float = 0.001,
         alicat_readback_scale: float = 1000.0,
         valve_lines: Iterable[str] | None = None,
+        monotonic_ns_clock: Callable[[], int] | None = None,
+        wall_clock: Callable[[], float] | None = None,
     ) -> None:
         if _NIDAQMX_IMPORT_ERROR:
             raise RuntimeError(f"nidaqmx import failed: {_NIDAQMX_IMPORT_ERROR}") from _NIDAQMX_IMPORT_ERROR
@@ -81,6 +95,13 @@ class RealHAL(HalBase):
         self._serial_lock = threading.Lock()
         self._serial = None
         self._ai_task = None
+        self._monotonic_ns_clock = monotonic_ns_clock or time.perf_counter_ns
+        self._wall_clock = wall_clock or time.time
+        self._ai_epoch = 0
+        self._ai_sequence = 0
+        self._ai_origin_ns = 0
+        self._ai_wall_origin = 0.0
+        self._ai_origin_uncertainty_ns = 0
         self._unit_ids = self._normalize_unit_ids(alicat_unit_ids)
         self._flow_unit_id = self._resolve_flow_unit_id(alicat_flow_unit)
         self._flow_field_index = FLOW_FIELD_INDEX.get(alicat_flow_field, 3)
@@ -90,8 +111,9 @@ class RealHAL(HalBase):
         self._setpoint_scale = float(alicat_setpoint_scale)
         self._readback_scale = float(alicat_readback_scale)
         self._digital_lines = list(valve_lines or [])
-        # Eagerly validate NI-DAQmx channel to surface hardware issues on startup.
-        self._ensure_ai_task()
+        self._do_sessions: dict[tuple[str, str], _DOPortSession] = {}
+        self._do_owner_thread_id: int | None = None
+        # HardwareWorker lazily creates the AI task on its own thread.
 
     @classmethod
     def from_config(cls, config: dict) -> RealHAL:
@@ -124,19 +146,34 @@ class RealHAL(HalBase):
 
     def read_ai_frame(self, timestamp: float | None = None) -> AnalogInputFrame:
         task = self._ensure_ai_task()
-        captured_at = float(timestamp if timestamp is not None else time.time())
         values = task.read()
+        frame_timestamp, monotonic_ns, sequence = self._next_ai_identity()
         if self._ttl_input_ready:
             if not isinstance(values, list | tuple) or len(values) < 2:
                 raise RuntimeError("共享 AI task 未返回 AI0/AI6 两通道样本")
-            return AnalogInputFrame(timestamp=captured_at, ai0=float(values[0]), ai6=float(values[1]))
+            return AnalogInputFrame(
+                timestamp=frame_timestamp,
+                ai0=float(values[0]),
+                ai6=float(values[1]),
+                monotonic_ns=monotonic_ns,
+                ai_epoch=self._ai_epoch,
+                sample_sequence=sequence,
+                origin_uncertainty_ns=self._ai_origin_uncertainty_ns,
+            )
         value = values[0] if isinstance(values, list | tuple) else values
-        return AnalogInputFrame(timestamp=captured_at, ai0=float(value), ai6=None)
+        return AnalogInputFrame(
+            timestamp=frame_timestamp,
+            ai0=float(value),
+            ai6=None,
+            monotonic_ns=monotonic_ns,
+            ai_epoch=self._ai_epoch,
+            sample_sequence=sequence,
+            origin_uncertainty_ns=self._ai_origin_uncertainty_ns,
+        )
 
     def read_ai_frames(self, timestamp: float | None = None) -> list[AnalogInputFrame]:
         """Drain every currently buffered sample so the 1 kHz producer cannot outrun the worker."""
         task = self._ensure_ai_task()
-        captured_at = float(timestamp if timestamp is not None else time.time())
         values = task.read(number_of_samples_per_channel=READ_ALL_AVAILABLE)
         if self._ttl_input_ready:
             if not isinstance(values, list | tuple) or len(values) < 2:
@@ -145,14 +182,15 @@ class RealHAL(HalBase):
             ai6_values = list(values[1])
             if len(ai0_values) != len(ai6_values):
                 raise RuntimeError("共享 AI task 返回的 AI0/AI6 样本数不一致")
-            return self._build_ai_frames(captured_at, ai0_values, ai6_values)
+            return self._build_ai_frames(ai0_values, ai6_values)
         ai0_values = list(values) if isinstance(values, list | tuple) else [values]
-        return self._build_ai_frames(captured_at, ai0_values, None)
+        return self._build_ai_frames(ai0_values, None)
 
     def reset_ai_input(self) -> None:
         task = self._ai_task
         self._ai_task = None
         self._ttl_input_ready = False
+        self._ai_sequence = 0
         if task is None:
             return
         try:
@@ -162,23 +200,35 @@ class RealHAL(HalBase):
 
     def _build_ai_frames(
         self,
-        captured_at: float,
         ai0_values: list,
         ai6_values: list | None,
     ) -> list[AnalogInputFrame]:
         count = len(ai0_values)
         if count == 0:
             return []
-        interval = 1.0 / self.ttl_poll_hz
-        first_timestamp = captured_at - ((count - 1) * interval)
-        return [
-            AnalogInputFrame(
-                timestamp=first_timestamp + (index * interval),
-                ai0=float(ai0),
-                ai6=float(ai6_values[index]) if ai6_values is not None else None,
+        frames: list[AnalogInputFrame] = []
+        for index, ai0 in enumerate(ai0_values):
+            timestamp, monotonic_ns, sequence = self._next_ai_identity()
+            frames.append(
+                AnalogInputFrame(
+                    timestamp=timestamp,
+                    ai0=float(ai0),
+                    ai6=float(ai6_values[index]) if ai6_values is not None else None,
+                    monotonic_ns=monotonic_ns,
+                    ai_epoch=self._ai_epoch,
+                    sample_sequence=sequence,
+                    origin_uncertainty_ns=self._ai_origin_uncertainty_ns,
+                )
             )
-            for index, ai0 in enumerate(ai0_values)
-        ]
+        return frames
+
+    def _next_ai_identity(self) -> tuple[float, int, int]:
+        sequence = self._ai_sequence
+        interval_ns = 1_000_000_000 // self.ttl_poll_hz
+        monotonic_ns = self._ai_origin_ns + sequence * interval_ns
+        timestamp = self._ai_wall_origin + sequence / self.ttl_poll_hz
+        self._ai_sequence += 1
+        return timestamp, monotonic_ns, sequence
 
     def read_flow(self) -> float:
         unit_id = self._flow_unit_id
@@ -253,6 +303,13 @@ class RealHAL(HalBase):
             return False
 
     def write_digital(self, *, device: str | None, line: str, state: bool) -> bool:
+        if self._digital_lines:
+            return self.write_digital_ack(
+                device=device,
+                line=line,
+                state=state,
+                timeout_ms=100,
+            ).success
         if LineGrouping is None:
             raise RuntimeError("nidaqmx is unavailable for digital output")
         line = _normalize_digital_line(line)
@@ -266,7 +323,137 @@ class RealHAL(HalBase):
             LOG.exception("Digital write failed for %s", channel)
             return False
 
+    def write_digital_ack(
+        self,
+        *,
+        device: str | None,
+        line: str,
+        state: bool,
+        timeout_ms: int,
+    ) -> DigitalWriteAck:
+        owner = threading.get_ident()
+        if self._do_owner_thread_id != owner:
+            return DigitalWriteAck(
+                success=False,
+                started_ns=None,
+                actual_ns=None,
+                wall_timestamp=self._wall_clock(),
+                message="DO task 所有权不属于当前线程，已拒绝跨线程写入。",
+            )
+        normalized = _normalize_digital_line(line)
+        parsed = _parse_port_line(normalized)
+        if device is None or parsed is None:
+            return DigitalWriteAck(
+                success=False,
+                started_ns=None,
+                actual_ns=None,
+                wall_timestamp=self._wall_clock(),
+                message=f"数字输出目标无效：{device}/{line}",
+            )
+        port, bit = parsed
+        session = self._do_sessions.get((device, port))
+        if session is None or bit < session.first_line or bit > session.last_line:
+            return DigitalWriteAck(
+                success=False,
+                started_ns=None,
+                actual_ns=None,
+                wall_timestamp=self._wall_clock(),
+                message=f"DO task 尚未准备或不包含目标：{device}/{normalized}",
+            )
+        candidate = list(session.states)
+        candidate[bit - session.first_line] = bool(state)
+        started_ns = int(self._monotonic_ns_clock())
+        try:
+            session.task.write(
+                candidate,
+                auto_start=False,
+                timeout=max(0.001, int(timeout_ms) / 1000),
+            )
+        except Exception as exc:
+            return DigitalWriteAck(
+                success=False,
+                started_ns=started_ns,
+                actual_ns=None,
+                wall_timestamp=self._wall_clock(),
+                message=f"NI-DAQmx 数字输出异常：{exc}",
+                uncertain=True,
+            )
+        actual_ns = int(self._monotonic_ns_clock())
+        session.states = candidate
+        return DigitalWriteAck(
+            success=True,
+            started_ns=started_ns,
+            actual_ns=actual_ns,
+            wall_timestamp=self._wall_clock(),
+            message="ok",
+        )
+
+    def prepare_do_output(self) -> bool:
+        owner = threading.get_ident()
+        if self._do_sessions:
+            return self._do_owner_thread_id == owner
+        if LineGrouping is None or not hasattr(LineGrouping, "CHAN_FOR_ALL_LINES"):
+            return False
+        groups: dict[tuple[str, str], set[int]] = {}
+        for target in self._digital_lines:
+            device, line = _split_target(target)
+            parsed = _parse_port_line(_normalize_digital_line(line))
+            if device is None or parsed is None:
+                LOG.error("无法准备 DO 映射：%s", target)
+                return False
+            port, bit = parsed
+            groups.setdefault((device, port), set()).add(bit)
+        created: list[_DOPortSession] = []
+        try:
+            for (device, port), bits in sorted(groups.items()):
+                first = min(bits)
+                last = max(bits)
+                suffix = f"line{first}" if first == last else f"line{first}:{last}"
+                task = nidaqmx.Task()
+                task.do_channels.add_do_chan(
+                    f"{device}/{port}/{suffix}",
+                    line_grouping=LineGrouping.CHAN_FOR_ALL_LINES,
+                )
+                if hasattr(task, "start"):
+                    task.start()
+                created.append(
+                    _DOPortSession(
+                        task=task,
+                        device=device,
+                        port=port,
+                        first_line=first,
+                        last_line=last,
+                        states=[False] * (last - first + 1),
+                    )
+                )
+        except Exception:
+            LOG.exception("预建 NI-DAQmx DO task 失败")
+            for session in created:
+                try:
+                    session.task.close()
+                except Exception:
+                    LOG.exception("回滚 DO task 失败")
+            return False
+        self._do_sessions = {(item.device, item.port): item for item in created}
+        self._do_owner_thread_id = owner
+        return True
+
+    def release_do_output(self) -> None:
+        owner = threading.get_ident()
+        if self._do_sessions and self._do_owner_thread_id != owner:
+            raise RuntimeError("DO task 所有权不属于当前线程，不能跨线程释放。")
+        sessions = list(self._do_sessions.values())
+        self._do_sessions.clear()
+        self._do_owner_thread_id = None
+        for session in sessions:
+            try:
+                session.task.close()
+            except Exception:
+                LOG.exception("释放 NI-DAQmx DO task 失败")
+
     def close_all(self) -> bool:
+        if self._digital_lines and not self._do_sessions and not self.prepare_do_output():
+            return False
         success = True
         for target in self._digital_lines:
             device, line = _split_target(target)
@@ -278,7 +465,7 @@ class RealHAL(HalBase):
         return True
 
     def flush_logs(self) -> None:
-        self._close_resources()
+        return None
 
     def self_check(self) -> tuple[list[SelfCheckResult], bool]:
         now_ts = time.time()
@@ -356,6 +543,7 @@ class RealHAL(HalBase):
                         sample_mode=AcquisitionType.CONTINUOUS,
                         samps_per_chan=self.ttl_poll_hz,
                     )
+                self._start_ai_task(task)
                 self._ai_task = task
                 self._ttl_input_ready = True
             except Exception as exc:
@@ -375,18 +563,37 @@ class RealHAL(HalBase):
                         sample_mode=AcquisitionType.CONTINUOUS,
                         samps_per_chan=self.ttl_poll_hz,
                     )
+                self._start_ai_task(fallback)
                 self._ai_task = fallback
                 self._ttl_input_ready = False
         return self._ai_task
 
+    def _start_ai_task(self, task) -> None:
+        before_ns = int(self._monotonic_ns_clock())
+        wall_origin = float(self._wall_clock())
+        if hasattr(task, "start"):
+            task.start()
+        after_ns = int(self._monotonic_ns_clock())
+        if after_ns < before_ns:
+            raise RuntimeError("AI task 启动期间单调时钟倒退")
+        self._ai_epoch += 1
+        self._ai_sequence = 0
+        self._ai_origin_ns = before_ns + ((after_ns - before_ns) // 2)
+        self._ai_origin_uncertainty_ns = (after_ns - before_ns) // 2
+        self._ai_wall_origin = wall_origin
+
     def _close_resources(self) -> None:
         self.reset_ai_input()
+        self.release_serial_resources()
+
+    def release_serial_resources(self) -> None:
         try:
-            if self._serial is not None:
-                self._serial.close()
+            with self._serial_lock:
+                if self._serial is not None:
+                    self._serial.close()
+                self._serial = None
         except Exception:  # pragma: no cover - defensive
             LOG.exception("Failed to close serial port")
-        self._serial = None
 
     def _normalize_unit_ids(self, mapping: dict[str, str] | None) -> dict[str, str]:
         if not mapping:
@@ -504,3 +711,10 @@ def _normalize_digital_line(line: str) -> str:
         if port.isdigit() and bit.isdigit():
             return f"port{int(port)}/line{int(bit)}"
     return normalized
+
+
+def _parse_port_line(line: str) -> tuple[str, int] | None:
+    match = re.fullmatch(r"(port\d+)/line(\d+)", str(line).strip().lower())
+    if match is None:
+        return None
+    return match.group(1), int(match.group(2))

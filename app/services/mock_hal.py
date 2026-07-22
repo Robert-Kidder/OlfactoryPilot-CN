@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import math
+import threading
 import time
 
 from app.models import SelfCheckResult
-from app.services.hal import AnalogInputFrame, HalBase
+from app.services.hal import AnalogInputFrame, DigitalWriteAck, HalBase
 
 
 class MockHAL(HalBase):
@@ -27,6 +28,9 @@ class MockHAL(HalBase):
         self.fail_on: set[str] = set()
         self.master_events: list[tuple[str, bool]] = []
         self._ttl_level = 0.0
+        self._ai_epoch = 1
+        self._ai_sequence = 0
+        self._do_owner_thread_id: int | None = None
 
     @property
     def ttl_input_ready(self) -> bool:
@@ -34,13 +38,23 @@ class MockHAL(HalBase):
 
     def read_ai_frame(self, timestamp: float | None = None) -> AnalogInputFrame:
         ts = float(timestamp if timestamp is not None else time.time())
-        return AnalogInputFrame(timestamp=ts, ai0=self.read_ai0(ts), ai6=float(self._ttl_level))
+        frame = AnalogInputFrame(
+            timestamp=ts,
+            ai0=self.read_ai0(ts),
+            ai6=float(self._ttl_level),
+            monotonic_ns=time.perf_counter_ns(),
+            ai_epoch=self._ai_epoch,
+            sample_sequence=self._ai_sequence,
+        )
+        self._ai_sequence += 1
+        return frame
 
     def read_ai_frames(self, timestamp: float | None = None) -> list[AnalogInputFrame]:
         return [self.read_ai_frame(timestamp)]
 
     def reset_ai_input(self) -> None:
-        return None
+        self._ai_epoch += 1
+        self._ai_sequence = 0
 
     def set_ttl_level(self, value: float) -> None:
         self._ttl_level = float(value)
@@ -76,6 +90,47 @@ class MockHAL(HalBase):
         if line.lower() == "p1.0" or "master" in key.lower():
             self.master_events.append((key, bool(state)))
         return True
+
+    def write_digital_ack(
+        self,
+        *,
+        device: str | None,
+        line: str,
+        state: bool,
+        timeout_ms: int,
+    ) -> DigitalWriteAck:
+        if self._do_owner_thread_id != threading.get_ident():
+            return DigitalWriteAck(
+                success=False,
+                started_ns=None,
+                actual_ns=None,
+                wall_timestamp=time.time(),
+                message="DO task 所有权不属于当前线程，已拒绝跨线程写入。",
+            )
+        started_ns = time.perf_counter_ns()
+        success = self.write_digital(device=device, line=line, state=state)
+        actual_ns = time.perf_counter_ns()
+        return DigitalWriteAck(
+            success=success,
+            started_ns=started_ns,
+            actual_ns=actual_ns if success else None,
+            wall_timestamp=time.time(),
+            message="ok" if success else "Mock 数字输出失败",
+        )
+
+    def prepare_do_output(self) -> bool:
+        owner = threading.get_ident()
+        if self._do_owner_thread_id is None:
+            self._do_owner_thread_id = owner
+        return self._do_owner_thread_id == owner
+
+    def release_do_output(self) -> None:
+        if self._do_owner_thread_id not in {None, threading.get_ident()}:
+            raise RuntimeError("DO task 所有权不属于当前线程，不能跨线程释放。")
+        self._do_owner_thread_id = None
+
+    def release_serial_resources(self) -> None:
+        return None
 
     def close_all(self) -> bool:
         for key in list(self._digital_state.keys()):

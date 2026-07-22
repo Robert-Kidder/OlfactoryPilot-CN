@@ -18,6 +18,7 @@ class TtlPulse:
     timestamp: float
     arm_epoch: int
     sequence: int
+    monotonic_ns: int = 0
 
 
 @dataclass(frozen=True)
@@ -96,11 +97,17 @@ class TtlTriggerService:
             self._clear_candidate()
             self._arm_epoch = None
 
-    def process_sample(self, value: float, *, timestamp: float) -> TtlPulse | None:
+    def process_sample(
+        self,
+        value: float,
+        *,
+        timestamp: float,
+        monotonic_ns: int = 0,
+    ) -> TtlPulse | None:
         with self._state_lock:
-            return self._process_sample(value, timestamp=timestamp)
+            return self._process_sample(value, timestamp=timestamp, monotonic_ns=monotonic_ns)
 
-    def _process_sample(self, value: float, *, timestamp: float) -> TtlPulse | None:
+    def _process_sample(self, value: float, *, timestamp: float, monotonic_ns: int) -> TtlPulse | None:
         try:
             sample = float(value)
             captured_at = float(timestamp)
@@ -149,6 +156,7 @@ class TtlTriggerService:
             timestamp=captured_at,
             arm_epoch=self._arm_epoch,
             sequence=self._sequence,
+            monotonic_ns=int(monotonic_ns),
         )
 
     def _clear_candidate(self) -> None:

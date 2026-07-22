@@ -11,6 +11,7 @@ from app.workers import HardwareWorker
 @pytest.fixture
 def mock_worker():
     worker = MagicMock(spec=HardwareWorker)
+    worker.isRunning.return_value = False
     # Mock signals if needed, or just rely on manual calls in controller
     return worker
 
@@ -107,15 +108,22 @@ def test_controller_feeds_calibrated_samples_into_protocol_executor(controller):
 
     controller.handle_breath_samples([-1.4], 50.0)
 
-    args = controller.protocol_executor.process_breath_samples.call_args.kwargs
-    assert args["samples"] == [-0.7999999999999998]
-    assert args["safety_state"] == "SAFE"
+    call = controller.protocol_executor.process_breath_samples.call_args
+    batch = call.args[0]
+    assert [sample.value for sample in batch.samples] == [-0.7999999999999998]
+    assert call.kwargs["safety_state"] == "SAFE"
 
 
 def test_controller_protocol_executor_trigger_uses_valve_service(controller):
     from pathlib import Path
 
-    from app.models import ProtocolDocument, ProtocolTrial, TriggerMode
+    from app.models import (
+        ActuationReceipt,
+        ActuationResult,
+        ProtocolDocument,
+        ProtocolTrial,
+        TriggerMode,
+    )
 
     controller.state.loaded_protocol = ProtocolDocument(
         source_path=Path("demo.csv"),
@@ -134,24 +142,41 @@ def test_controller_protocol_executor_trigger_uses_valve_service(controller):
     controller.state.hardware_ready = True
     controller.state.telemetry.connected = True
     controller.state.telemetry.safety_state = "SAFE"
-    controller.valve_service.set_valve = MagicMock(return_value=(True, "ok"))
+    commands = []
+
+    def writer(command):
+        commands.append(command)
+        return ActuationReceipt.from_write(
+            command=command,
+            started_ns=command.expected_ns,
+            actual_ns=command.expected_ns,
+            wall_timestamp=10.0,
+            result=ActuationResult.SUCCESS,
+        )
+
+    controller.actuation_worker.writer = writer
 
     controller.handle_protocol_start_requested()
     controller.handle_protocol_manual_trigger_requested()
     controller.handle_breath_samples([-0.6], 10.0)
 
-    controller.valve_service.set_valve.assert_called_with(
-        1,
-        True,
-        safety_state=controller._build_current_safety_state(),
-        safety_close=False,
-    )
+    assert len(commands) == 1
+    assert commands[0].valve == 1
+    assert commands[0].action.value == "open"
+    assert commands[0].category.value == "normal"
 
 
 def test_controller_protocol_close_uses_safety_close_path(controller):
     from pathlib import Path
 
-    from app.models import ProtocolDocument, ProtocolTrial, TriggerMode
+    from app.models import (
+        ActuationReceipt,
+        ActuationResult,
+        ProtocolDocument,
+        ProtocolExecutionReadiness,
+        ProtocolTrial,
+        TriggerMode,
+    )
 
     controller.state.loaded_protocol = ProtocolDocument(
         source_path=Path("demo.csv"),
@@ -170,17 +195,30 @@ def test_controller_protocol_close_uses_safety_close_path(controller):
     controller.state.hardware_ready = True
     controller.state.telemetry.connected = True
     controller.state.telemetry.safety_state = "SAFE"
-    controller.valve_service.set_valve = MagicMock(return_value=(True, "ok"))
+    commands = []
+
+    def writer(command):
+        commands.append(command)
+        return ActuationReceipt.from_write(
+            command=command,
+            started_ns=command.expected_ns,
+            actual_ns=command.expected_ns,
+            wall_timestamp=10.0,
+            result=ActuationResult.SUCCESS,
+        )
+
+    controller.actuation_worker.writer = writer
 
     controller.handle_protocol_start_requested()
     controller.handle_protocol_manual_trigger_requested()
     controller.handle_breath_samples([-0.6], 10.0)
     controller.state.telemetry.safety_state = "LOW_FLOW"
-    controller.protocol_executor.handle_safety_update("LOW_FLOW", timestamp=10.2)
-
-    controller.valve_service.set_valve.assert_any_call(
-        1,
-        False,
-        safety_state=controller._build_current_safety_state(),
-        safety_close=True,
+    controller.actuation_interlock.update(safety_state="LOW_FLOW")
+    controller.actuation_worker.post_readiness_update(
+        readiness=ProtocolExecutionReadiness(True, True, True, "LOW_FLOW", True),
+        timestamp=10.2,
     )
+    controller._drain_actuation_if_not_running()
+
+    assert [command.action.value for command in commands] == ["open", "close"]
+    assert commands[-1].category.value == "safety"

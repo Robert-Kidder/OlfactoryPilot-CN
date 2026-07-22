@@ -24,6 +24,18 @@ def qt_app():
     yield app
 
 
+@pytest.fixture
+def track_controller_workers(request):
+    """Always stop auxiliary QThreads started by controller lifecycle tests."""
+
+    def track(controller: MainController) -> MainController:
+        request.addfinalizer(lambda: controller.actuation_worker.shutdown(1000))
+        request.addfinalizer(lambda: controller.flow_worker.shutdown(1000))
+        return controller
+
+    return track
+
+
 def wait_until(qt_app, predicate, timeout: float = 1.0) -> None:
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -670,7 +682,7 @@ def test_worker_releases_hal_handles_before_check_service(qt_app):
     assert worker.is_connected is True
 
 
-def test_recheck_triggers_worker(qt_app):
+def test_recheck_triggers_worker(qt_app, track_controller_workers):
     state = AppState.from_config(
         {
             "language": "zh-CN",
@@ -693,6 +705,7 @@ def test_recheck_triggers_worker(qt_app):
     worker.request_self_check = fake_request  # type: ignore[assignment]
     worker.start = fake_start  # type: ignore[assignment]
     controller = MainController(state, worker, safety_manager=SafetyManager(low_flow_threshold=0.2))
+    track_controller_workers(controller)
 
     controller.request_self_check()
     assert called["flag"] is True
@@ -1174,7 +1187,7 @@ def test_connect_failure_surfaces_reason_and_allows_retry(qt_app):
     assert "\n" in window._self_check_label.text()
 
 
-def test_connect_requests_self_check_and_sets_connected_status(qt_app):
+def test_connect_requests_self_check_and_sets_connected_status(qt_app, track_controller_workers):
     state = AppState.from_config(
         {
             "language": "zh-CN",
@@ -1197,6 +1210,7 @@ def test_connect_requests_self_check_and_sets_connected_status(qt_app):
     worker.request_self_check = fake_request  # type: ignore[assignment]
     worker.start = fake_start  # type: ignore[assignment]
     controller = MainController(state, worker, safety_manager=SafetyManager(low_flow_threshold=0.2))
+    track_controller_workers(controller)
     window = MainWindow(controller, state)
     controller.bind_view(window)
 
@@ -1221,7 +1235,7 @@ def test_connect_requests_self_check_and_sets_connected_status(qt_app):
     assert window._reset_button.isEnabled()
 
 
-def test_connect_requests_recheck_when_worker_already_running(qt_app):
+def test_connect_requests_recheck_when_worker_already_running(qt_app, track_controller_workers):
     state = AppState.from_config(
         {
             "language": "zh-CN",
@@ -1240,6 +1254,7 @@ def test_connect_requests_recheck_when_worker_already_running(qt_app):
     worker.isRunning = lambda: True  # type: ignore[assignment]
     worker.request_self_check = fake_request  # type: ignore[assignment]
     controller = MainController(state, worker, safety_manager=SafetyManager(low_flow_threshold=0.2))
+    track_controller_workers(controller)
     window = MainWindow(controller, state)
     controller.bind_view(window)
 
@@ -1283,7 +1298,7 @@ def test_self_check_zero_flow_runs_without_blocking_ui(qt_app):
     ]
 
 
-def test_reset_requires_ready_and_reinitializes_hardware(qt_app):
+def test_reset_requires_ready_and_reinitializes_hardware(qt_app, track_controller_workers):
     state = AppState.from_config(
         {
             "language": "zh-CN",
@@ -1295,6 +1310,7 @@ def test_reset_requires_ready_and_reinitializes_hardware(qt_app):
     )
     worker = HardwareWorker(telemetry_hz=1)
     controller = MainController(state, worker, safety_manager=SafetyManager(low_flow_threshold=0.2))
+    track_controller_workers(controller)
     now_ts = time.time()
     state.hardware_ready = True
     state.telemetry.connected = True
@@ -1329,12 +1345,13 @@ def test_reset_requires_ready_and_reinitializes_hardware(qt_app):
     assert state.last_shutdown_event["reason"] == "reset_request"
 
 
-def test_reset_clears_pretest_valve_selection(qt_app):
+def test_reset_clears_pretest_valve_selection(qt_app, track_controller_workers):
     config = load_config(DEFAULT_CONFIG)
     config["low_flow_threshold"] = 0.2
     state = AppState.from_config(config)
     worker = HardwareWorker(telemetry_hz=1)
     controller = MainController(state, worker, safety_manager=SafetyManager(low_flow_threshold=0.2))
+    track_controller_workers(controller)
     window = MainWindow(controller, state)
     controller.bind_view(window)
     now_ts = time.time()
@@ -1390,7 +1407,7 @@ def test_reset_blocked_when_not_ready(qt_app):
     assert "阻断" in state.status_message or "自检未通过" in state.status_message
 
 
-def test_reset_reinitializes_without_pending_double_self_check(qt_app):
+def test_reset_reinitializes_without_pending_double_self_check(qt_app, track_controller_workers):
     state = AppState.from_config(
         {
             "language": "zh-CN",
@@ -1402,6 +1419,7 @@ def test_reset_reinitializes_without_pending_double_self_check(qt_app):
     )
     worker = HardwareWorker(telemetry_hz=1)
     controller = MainController(state, worker, safety_manager=SafetyManager(low_flow_threshold=0.2))
+    track_controller_workers(controller)
     now_ts = time.time()
     state.hardware_ready = True
     state.telemetry.connected = True

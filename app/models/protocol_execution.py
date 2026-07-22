@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import StrEnum
 
+from app.models.actuation import ActuationQualitySnapshot
 from app.models.protocol import ProtocolDocument, ProtocolTrial, TriggerMode
 
 
@@ -15,6 +16,7 @@ class ProtocolExecutionStatus(StrEnum):
     SKIPPED = "skipped"
     COMPLETED = "completed"
     BLOCKED = "blocked"
+    PAUSED = "paused"
     STOPPED = "stopped"
 
 
@@ -62,6 +64,26 @@ class ProtocolGateEvent:
     trigger_source: str | None = None
     arm_epoch: int | None = None
     pulse_sequence: int | None = None
+    trigger_reason: str | None = None
+    command_id: str | None = None
+    execution_epoch: int | None = None
+    action_sequence: int | None = None
+    action: str | None = None
+    action_category: str | None = None
+    expected_ns: int | None = None
+    started_ns: int | None = None
+    actual_ns: int | None = None
+    offset_ms: float | None = None
+    jitter_ms: float | None = None
+    p95_open_ms: float | None = None
+    p95_close_ms: float | None = None
+    p95_combined_ms: float | None = None
+    sample_count_open: int = 0
+    sample_count_close: int = 0
+    sample_count_combined: int = 0
+    warning: bool = False
+    severe: bool = False
+    measurement_point: str | None = None
 
     def as_dict(self) -> dict:
         return {
@@ -83,6 +105,26 @@ class ProtocolGateEvent:
             "trigger_source": self.trigger_source,
             "arm_epoch": self.arm_epoch,
             "pulse_sequence": self.pulse_sequence,
+            "trigger_reason": self.trigger_reason,
+            "command_id": self.command_id,
+            "execution_epoch": self.execution_epoch,
+            "action_sequence": self.action_sequence,
+            "action": self.action,
+            "action_category": self.action_category,
+            "expected_ns": self.expected_ns,
+            "started_ns": self.started_ns,
+            "actual_ns": self.actual_ns,
+            "offset_ms": self.offset_ms,
+            "jitter_ms": self.jitter_ms,
+            "p95_open_ms": self.p95_open_ms,
+            "p95_close_ms": self.p95_close_ms,
+            "p95_combined_ms": self.p95_combined_ms,
+            "sample_count_open": self.sample_count_open,
+            "sample_count_close": self.sample_count_close,
+            "sample_count_combined": self.sample_count_combined,
+            "warning": self.warning,
+            "severe": self.severe,
+            "measurement_point": self.measurement_point,
         }
 
 
@@ -96,10 +138,21 @@ class ProtocolExecutionState:
     current_mode: TriggerMode | None = None
     mode_override: TriggerMode | None = None
     arm_epoch: int = 0
+    execution_epoch: int = 0
     waiting_trigger_started_at: float | None = None
     waiting_started_at: float | None = None
     triggered_at: float | None = None
     active_valve: int | None = None
+    possibly_open_valves: set[int] = field(default_factory=set)
+    pending_open_command_id: str | None = None
+    pending_close_command_id: str | None = None
+    close_deadline_ns: int | None = None
+    actual_open_ns: int | None = None
+    expected_open_ns: int | None = None
+    quality: ActuationQualitySnapshot = field(default_factory=ActuationQualitySnapshot)
+    quality_block_reason: str = ""
+    quality_resume_status: ProtocolExecutionStatus | None = None
+    executed_quality_failed_trials: set[str] = field(default_factory=set)
     trigger_source: str | None = None
     last_ttl_timestamp: float | None = None
     last_pulse_sequence: int = -1
@@ -144,3 +197,16 @@ class ProtocolExecutionSnapshot:
     trigger_source: str = "-"
     last_ttl_timestamp: float | None = None
     arm_epoch: int = 0
+    execution_epoch: int = 0
+    can_pause: bool = False
+    can_resume: bool = False
+    next_odor: str = "-"
+    last_jitter_ms: float | None = None
+    p95_open_ms: float | None = None
+    p95_close_ms: float | None = None
+    p95_combined_ms: float | None = None
+    sample_count_open: int = 0
+    sample_count_close: int = 0
+    sample_count_combined: int = 0
+    remaining_ms: float | None = None
+    quality_block_reason: str = ""

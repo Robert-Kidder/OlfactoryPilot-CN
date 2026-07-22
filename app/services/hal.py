@@ -12,6 +12,64 @@ class AnalogInputFrame:
     timestamp: float
     ai0: float
     ai6: float | None = None
+    monotonic_ns: int = 0
+    ai_epoch: int = 0
+    sample_sequence: int = 0
+    origin_uncertainty_ns: int = 0
+
+
+@dataclass(frozen=True)
+class BreathSample:
+    timestamp: float
+    monotonic_ns: int
+    value: float
+    ai_epoch: int
+    sample_sequence: int
+
+
+@dataclass(frozen=True)
+class BreathSampleBatch:
+    samples: tuple[BreathSample, ...]
+
+    @classmethod
+    def from_frames(cls, frames: tuple[AnalogInputFrame, ...]) -> BreathSampleBatch:
+        return cls(
+            samples=tuple(
+                BreathSample(
+                    timestamp=frame.timestamp,
+                    monotonic_ns=frame.monotonic_ns,
+                    value=frame.ai0,
+                    ai_epoch=frame.ai_epoch,
+                    sample_sequence=frame.sample_sequence,
+                )
+                for frame in frames
+            )
+        )
+
+    def map_values(self, transform) -> BreathSampleBatch:
+        return BreathSampleBatch(
+            tuple(
+                BreathSample(
+                    timestamp=sample.timestamp,
+                    monotonic_ns=sample.monotonic_ns,
+                    value=float(transform(sample.value)),
+                    ai_epoch=sample.ai_epoch,
+                    sample_sequence=sample.sample_sequence,
+                )
+                for sample in self.samples
+            )
+        )
+
+
+@dataclass(frozen=True)
+class DigitalWriteAck:
+    success: bool
+    started_ns: int | None
+    actual_ns: int | None
+    wall_timestamp: float
+    message: str = ""
+    uncertain: bool = False
+    measurement_point: str = "daqmx_write_ack"
 
 
 @runtime_checkable
@@ -45,6 +103,25 @@ class HalInterface(Protocol):
 
     def write_digital(self, *, device: str | None, line: str, state: bool) -> bool:
         """写入数字输出（阀/继电器）。"""
+
+    def write_digital_ack(
+        self,
+        *,
+        device: str | None,
+        line: str,
+        state: bool,
+        timeout_ms: int,
+    ) -> DigitalWriteAck:
+        """在 HAL 边界返回 write 前/后的单调测量。"""
+
+    def prepare_do_output(self) -> bool:
+        """由 ActuationWorker 线程预建并取得 DO session 所有权。"""
+
+    def release_do_output(self) -> None:
+        """由当前 DO owner 确定性释放 session。"""
+
+    def release_serial_resources(self) -> None:
+        """由 serial owner 最后释放 MFC 串口。"""
 
     def close_all(self) -> bool:
         """关闭全部通道/阀门。"""

@@ -7,7 +7,7 @@ import time
 from PySide6.QtCore import QThread, Signal
 
 from app.models import SelfCheckResult
-from app.services.hal import HalInterface
+from app.services.hal import AnalogInputFrame, BreathSampleBatch, HalInterface
 from app.services.hardware_check_service import HardwareCheckService
 from app.services.mock_hal import MockHAL
 from app.services.ttl_trigger_service import TtlTriggerConfig, TtlTriggerService
@@ -19,10 +19,12 @@ class HardwareWorker(QThread):
     telemetry_ready = Signal(dict)
     status_message = Signal(str)
     self_check_completed = Signal(list, bool)
-    breath_samples = Signal(list, float)
+    breath_samples = Signal(object)
     ttl_pulse = Signal(object)
     ttl_input_error = Signal(str)
     ttl_readiness_changed = Signal(bool)
+    ttl_arm_ack = Signal(int, bool)
+    ttl_disarm_ack = Signal(bool)
 
     def __init__(
         self,
@@ -49,6 +51,9 @@ class HardwareWorker(QThread):
         self.ttl_interval_ms = self._compute_interval_ms(config.poll_hz)
         self._breath_emit_every = max(1, round(config.poll_hz / max(1, breath_hz)))
         self._ai_sample_count = 0
+        self._last_ai_epoch = -1
+        self._last_ai_sequence = -1
+        self._last_ai_monotonic_ns = -1
         self.check_service = check_service
         self.hal: HalInterface = hal or MockHAL()
         self._ttl_runtime_ready = bool(getattr(self.hal, "ttl_input_ready", False))
@@ -58,6 +63,8 @@ class HardwareWorker(QThread):
         self.simulation_mode = simulation
         self._self_check_requested = False
         self._connected = False
+        self._actuation_sink = None
+        self._interlock_ingress = None
 
     @property
     def is_connected(self) -> bool:
@@ -88,11 +95,28 @@ class HardwareWorker(QThread):
                     "safety_state": "SAFE",
                     "timestamp": now,
                 }
+                if self._interlock_ingress is not None:
+                    current = self._interlock_ingress.read()[1]
+                    self._interlock_ingress.publish_raw_telemetry(
+                        airflow=float(payload["airflow"]),
+                        timestamp=now,
+                        hardware_state=str(payload["safety_state"]),
+                        connected=bool(payload["connected"]),
+                        hardware_ready=bool(self._connected),
+                        flow_setpoints_ready=current.flow_setpoints_ready,
+                        ttl_input_ready=self.ttl_input_ready,
+                        has_protocol=current.has_protocol,
+                        device_lease=current.device_lease,
+                    )
                 self.telemetry_ready.emit(payload)
                 next_telemetry += max(self.telemetry_interval_ms, 1) / 1000.0
 
             sleep_ms = min(self.telemetry_interval_ms, self.ttl_interval_ms)
             self.msleep(max(1, sleep_ms))
+        try:
+            self.hal.reset_ai_input()
+        except Exception:  # pragma: no cover - defensive
+            LOG.exception("HardwareWorker 线程释放 AI 资源失败")
         self.status_message.emit("硬件线程已停止")
 
     def stop(self) -> None:
@@ -107,6 +131,10 @@ class HardwareWorker(QThread):
     def request_self_check(self) -> None:
         """Allow controller/UI to trigger another self-check without blocking UI."""
         self._self_check_requested = True
+
+    def set_actuation_sink(self, sink, *, interlock_ingress=None) -> None:
+        self._actuation_sink = sink
+        self._interlock_ingress = interlock_ingress
 
     def write_digital(self, *, device: str | None, line: str, state: bool) -> bool:
         """数字输出由 HAL 处理；记录日志并更新连接状态。"""
@@ -138,10 +166,20 @@ class HardwareWorker(QThread):
         return bool(self._ttl_runtime_ready and getattr(self.hal, "ttl_input_ready", False))
 
     def arm_ttl(self, *, arm_epoch: int) -> None:
-        self.ttl_service.arm(arm_epoch=arm_epoch)
+        try:
+            self.ttl_service.arm(arm_epoch=arm_epoch)
+            self.ttl_arm_ack.emit(int(arm_epoch), True)
+        except Exception:  # pragma: no cover - defensive
+            LOG.exception("TTL 布防失败")
+            self.ttl_arm_ack.emit(int(arm_epoch), False)
 
     def disarm_ttl(self) -> None:
-        self.ttl_service.disarm()
+        try:
+            self.ttl_service.disarm()
+            self.ttl_disarm_ack.emit(True)
+        except Exception:  # pragma: no cover - defensive
+            LOG.exception("TTL 解除布防失败")
+            self.ttl_disarm_ack.emit(False)
 
     # Shutdown helpers for safe-stop scenarios.
     def close_all_channels(self) -> bool:
@@ -182,6 +220,10 @@ class HardwareWorker(QThread):
                 self.hal.close_all()
         except Exception:  # pragma: no cover - defensive
             LOG.exception("HAL release resources failed")
+        self.stop()
+
+    def release_ai_resources(self) -> None:
+        """Release only HardwareWorker-owned AI resources; DO belongs elsewhere."""
         self.stop()
 
     def _run_self_check(self) -> None:
@@ -237,7 +279,15 @@ class HardwareWorker(QThread):
         except Exception:  # pragma: no cover - defensive
             LOG.exception("HAL read_ai0 failed")
             value = 0.0
-        self.breath_samples.emit([value], timestamp)
+        frame = AnalogInputFrame(
+            timestamp=timestamp,
+            ai0=value,
+            monotonic_ns=time.perf_counter_ns(),
+            ai_epoch=0,
+            sample_sequence=self._ai_sample_count,
+        )
+        self._ai_sample_count += 1
+        self.breath_samples.emit(BreathSampleBatch.from_frames((frame,)))
 
     def _emit_ai_frame(self, timestamp: float) -> None:
         attempt_started = time.monotonic()
@@ -247,27 +297,58 @@ class HardwareWorker(QThread):
             frames = self.hal.read_ai_frames(timestamp)
             if not frames:
                 return
-            normalized_frames: list[tuple[float, float, float | None]] = []
+            normalized_frames: list[AnalogInputFrame] = []
             for frame in frames:
                 frame_timestamp = float(frame.timestamp)
+                monotonic_ns = int(frame.monotonic_ns)
+                ai_epoch = int(frame.ai_epoch)
+                sample_sequence = int(frame.sample_sequence)
                 ai0 = float(frame.ai0)
                 ai6 = None if frame.ai6 is None else float(frame.ai6)
-                if not math.isfinite(frame_timestamp) or not math.isfinite(ai0):
+                if (
+                    not math.isfinite(frame_timestamp)
+                    or not math.isfinite(ai0)
+                    or monotonic_ns <= 0
+                    or ai_epoch <= 0
+                    or sample_sequence < 0
+                ):
                     raise ValueError("共享 AI 帧包含非有限的时间戳或 AI0 样本")
                 if ai6 is not None and not math.isfinite(ai6):
                     raise ValueError("共享 AI 帧包含非有限的 AI6 样本")
-                normalized_frames.append((frame_timestamp, ai0, ai6))
+                if ai_epoch < self._last_ai_epoch:
+                    raise ValueError("共享 AI epoch 倒退")
+                if ai_epoch == self._last_ai_epoch and (
+                    sample_sequence <= self._last_ai_sequence
+                    or monotonic_ns <= self._last_ai_monotonic_ns
+                ):
+                    raise ValueError("共享 AI 样本 identity 重复或倒退")
+                self._last_ai_epoch = ai_epoch
+                self._last_ai_sequence = sample_sequence
+                self._last_ai_monotonic_ns = monotonic_ns
+                normalized_frames.append(
+                    AnalogInputFrame(
+                        timestamp=frame_timestamp,
+                        ai0=ai0,
+                        ai6=ai6,
+                        monotonic_ns=monotonic_ns,
+                        ai_epoch=ai_epoch,
+                        sample_sequence=sample_sequence,
+                        origin_uncertainty_ns=int(frame.origin_uncertainty_ns),
+                    )
+                )
 
             pulses = []
-            breath_values: list[float] = []
-            breath_timestamp: float | None = None
-            for frame_timestamp, ai0, ai6 in normalized_frames:
+            breath_frames: list[AnalogInputFrame] = []
+            for frame in normalized_frames:
                 if self._ai_sample_count % self._breath_emit_every == 0:
-                    breath_values.append(ai0)
-                    breath_timestamp = frame_timestamp
+                    breath_frames.append(frame)
                 self._ai_sample_count += 1
-                if ai6 is not None:
-                    pulse = self.ttl_service.process_sample(ai6, timestamp=frame_timestamp)
+                if frame.ai6 is not None:
+                    pulse = self.ttl_service.process_sample(
+                        frame.ai6,
+                        timestamp=frame.timestamp,
+                        monotonic_ns=frame.monotonic_ns,
+                    )
                     if pulse is not None:
                         pulses.append(pulse)
 
@@ -277,9 +358,14 @@ class HardwareWorker(QThread):
                 if restored != self._ttl_runtime_ready:
                     self._ttl_runtime_ready = restored
                     self.ttl_readiness_changed.emit(restored)
-            if breath_values and breath_timestamp is not None:
-                self.breath_samples.emit(breath_values, breath_timestamp)
+            if breath_frames:
+                batch = BreathSampleBatch.from_frames(tuple(breath_frames))
+                if self._actuation_sink is not None:
+                    self._actuation_sink.post_ai_batch(batch)
+                self.breath_samples.emit(batch)
             for pulse in pulses:
+                if self._actuation_sink is not None:
+                    self._actuation_sink.post_ttl_pulse(pulse)
                 self.ttl_pulse.emit(pulse)
         except Exception as exc:  # pragma: no cover - hardware boundary
             first_failure = not self._ai_error_latched
@@ -292,11 +378,19 @@ class HardwareWorker(QThread):
             if self._ttl_runtime_ready:
                 self._ttl_runtime_ready = False
                 self.ttl_readiness_changed.emit(False)
+            if self._interlock_ingress is not None:
+                self._interlock_ingress.update(
+                    hardware_ready=False,
+                    ttl_input_ready=False,
+                    safety_state="DATA_STALE",
+                )
             self.disarm_ttl()
             if not first_failure:
                 LOG.debug("共享 AI 读取仍未恢复，保持故障锁存并延后重试：%s", exc)
                 return
             message = f"TTL/共享 AI 读取失败：{exc}；协议执行已请求安全阻断。"
+            if self._actuation_sink is not None:
+                self._actuation_sink.post_input_error(message)
             LOG.exception(message)
             self.ttl_input_error.emit(message)
 

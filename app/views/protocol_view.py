@@ -29,6 +29,8 @@ class ProtocolView(QWidget):
     trigger_mode_requested = Signal(str)
     manual_trigger_requested = Signal()
     rearm_requested = Signal()
+    pause_requested = Signal()
+    resume_requested = Signal()
 
     def __init__(self) -> None:
         super().__init__()
@@ -49,6 +51,8 @@ class ProtocolView(QWidget):
         self._mode_group.addButton(self._ttl_mode_button)
         self._manual_trigger_button = QPushButton("手动触发")
         self._rearm_button = QPushButton("重新布防")
+        self._pause_button = QPushButton("暂停")
+        self._resume_button = QPushButton("恢复")
         self._execution_status_label = QLabel("状态：空闲")
         self._execution_trial_label = QLabel("trial：-")
         self._execution_valve_label = QLabel("阀门：-")
@@ -56,6 +60,7 @@ class ProtocolView(QWidget):
         self._execution_arm_label = QLabel("触发布防：-")
         self._execution_wait_label = QLabel("等待：0 ms")
         self._execution_event_label = QLabel("最近事件：-")
+        self._execution_quality_label = QLabel("动作质量：尚无样本")
         self._preview_table = QTableWidget(0, 5)
 
         for label in (
@@ -71,6 +76,7 @@ class ProtocolView(QWidget):
             self._execution_arm_label,
             self._execution_wait_label,
             self._execution_event_label,
+            self._execution_quality_label,
         ):
             label.setWordWrap(True)
         self._error_label.setStyleSheet("color: #b00020; font-weight: 600;")
@@ -81,6 +87,8 @@ class ProtocolView(QWidget):
             self._next_trial_button,
             self._manual_trigger_button,
             self._rearm_button,
+            self._pause_button,
+            self._resume_button,
             self._manual_mode_button,
             self._ttl_mode_button,
         ):
@@ -98,6 +106,8 @@ class ProtocolView(QWidget):
         )
         self._manual_trigger_button.clicked.connect(self.manual_trigger_requested.emit)
         self._rearm_button.clicked.connect(self.rearm_requested.emit)
+        self._pause_button.clicked.connect(self.pause_requested.emit)
+        self._resume_button.clicked.connect(self.resume_requested.emit)
         self._build_layout()
 
     def _build_layout(self) -> None:
@@ -126,6 +136,8 @@ class ProtocolView(QWidget):
         action_row.addWidget(self._ttl_mode_button)
         action_row.addWidget(self._manual_trigger_button)
         action_row.addWidget(self._rearm_button)
+        action_row.addWidget(self._pause_button)
+        action_row.addWidget(self._resume_button)
         action_row.addStretch()
         layout.addLayout(action_row)
 
@@ -138,6 +150,7 @@ class ProtocolView(QWidget):
         execution_layout.addWidget(self._execution_arm_label)
         execution_layout.addWidget(self._execution_wait_label)
         execution_layout.addWidget(self._execution_event_label)
+        execution_layout.addWidget(self._execution_quality_label)
         execution.setLayout(execution_layout)
         layout.addWidget(execution)
 
@@ -186,7 +199,7 @@ class ProtocolView(QWidget):
         )
         self._execution_status_label.setText(f"状态：{snapshot.status_text}")
         self._execution_trial_label.setText(
-            f"trial：{snapshot.trial_label}（{snapshot.trial_id}）"
+            f"trial：{snapshot.trial_label}（{snapshot.trial_id}）；下一个气味：{snapshot.next_odor}"
         )
         self._execution_valve_label.setText(f"阀门：{valve_text}；计划时长：{duration}")
         self._execution_trigger_label.setText(
@@ -199,8 +212,21 @@ class ProtocolView(QWidget):
         else:
             arm_text = snapshot.readiness_reason or "未等待外部 TTL"
         self._execution_arm_label.setText(f"触发布防：{arm_text}")
-        self._execution_wait_label.setText(f"等待：{snapshot.wait_elapsed_ms} ms")
+        if snapshot.remaining_ms is not None:
+            self._execution_wait_label.setText(f"剩余刺激时间：{snapshot.remaining_ms:.0f} ms")
+        else:
+            self._execution_wait_label.setText(f"等待：{snapshot.wait_elapsed_ms} ms")
         self._execution_event_label.setText(f"最近事件：{snapshot.recent_event}")
+        self._execution_quality_label.setText(self._format_quality(snapshot))
+        if snapshot.quality_block_reason:
+            self._execution_quality_label.setStyleSheet("color: #b00020; font-weight: 700;")
+        elif any(
+            value is not None and value > 20.0
+            for value in (snapshot.p95_open_ms, snapshot.p95_close_ms, snapshot.p95_combined_ms)
+        ):
+            self._execution_quality_label.setStyleSheet("color: #c56a00; font-weight: 600;")
+        else:
+            self._execution_quality_label.setStyleSheet("")
         self._start_button.setEnabled(snapshot.can_start)
         self._stop_button.setEnabled(snapshot.can_stop)
         self._next_trial_button.setEnabled(snapshot.can_advance)
@@ -208,11 +234,35 @@ class ProtocolView(QWidget):
         self._ttl_mode_button.setEnabled(snapshot.can_select_ttl_mode)
         self._manual_trigger_button.setEnabled(snapshot.can_manual_trigger)
         self._rearm_button.setEnabled(snapshot.can_rearm)
+        self._pause_button.setEnabled(snapshot.can_pause)
+        self._resume_button.setEnabled(snapshot.can_resume)
         manual_blocker = QSignalBlocker(self._manual_mode_button)
         ttl_blocker = QSignalBlocker(self._ttl_mode_button)
         self._manual_mode_button.setChecked(snapshot.current_mode == "manual")
         self._ttl_mode_button.setChecked(snapshot.current_mode == "ttl")
         del manual_blocker, ttl_blocker
+
+    @staticmethod
+    def _format_quality(snapshot: ProtocolExecutionSnapshot) -> str:
+        def metric(name: str, value: float | None, count: int) -> str:
+            if value is None:
+                return f"{name} -（n={count}）"
+            suffix = ""
+            if value > 20.0:
+                suffix = " 警告"
+            elif value == 20.0:
+                suffix = " 临界（未达到 <20ms 目标）"
+            return f"{name} {value:.2f}ms（n={count}）{suffix}"
+
+        jitter = "-" if snapshot.last_jitter_ms is None else f"{snapshot.last_jitter_ms:.2f}ms"
+        reason = f"；{snapshot.quality_block_reason}" if snapshot.quality_block_reason else ""
+        return "动作质量：最近 {}；{}；{}；{}{}".format(
+            jitter,
+            metric("open p95", snapshot.p95_open_ms, snapshot.sample_count_open),
+            metric("close p95", snapshot.p95_close_ms, snapshot.sample_count_close),
+            metric("combined p95", snapshot.p95_combined_ms, snapshot.sample_count_combined),
+            reason,
+        )
 
     def _render_preview(self, document: ProtocolDocument) -> None:
         rows = min(len(document.trials), 8)

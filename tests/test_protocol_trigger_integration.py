@@ -4,7 +4,15 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from app.controllers.main_controller import MainController
-from app.models import AppState, ProtocolDocument, ProtocolTrial, TriggerMode
+from app.models import (
+    ActuationAction,
+    ActuationReceipt,
+    ActuationResult,
+    AppState,
+    ProtocolDocument,
+    ProtocolTrial,
+    TriggerMode,
+)
 from app.models.protocol_execution import ProtocolExecutionStatus
 from app.services.mock_hal import MockHAL
 from app.services.ttl_trigger_service import TtlPulse
@@ -125,7 +133,11 @@ def test_queued_ttl_pulse_cannot_advance_after_disconnect() -> None:
     old_epoch = queued.arm_epoch
 
     controller.state.telemetry.connected = False
-    controller.handle_protocol_executor_tick()
+    controller.actuation_interlock.update(connected=False, safety_state="DATA_STALE")
+    controller.actuation_worker.post_readiness_update(
+        readiness=controller._execution_readiness(), timestamp=10.0
+    )
+    controller._drain_actuation_if_not_running()
     controller.handle_ttl_pulse(queued)
 
     assert controller.protocol_executor.state.status == ProtocolExecutionStatus.BLOCKED
@@ -168,7 +180,6 @@ def test_runtime_read_error_keeps_ttl_rearm_rejected_until_a_frame_recovers() ->
 
 def test_breath_sample_blocks_on_fresh_readiness_loss_before_opening_valve() -> None:
     controller = _controller()
-    controller.valve_service.set_valve = MagicMock(return_value=(True, "ok"))
     controller.handle_protocol_start_requested()
     controller.handle_protocol_manual_trigger_requested()
     controller.state.telemetry.connected = False
@@ -177,7 +188,7 @@ def test_breath_sample_blocks_on_fresh_readiness_loss_before_opening_valve() -> 
 
     assert controller.protocol_executor.state.status == ProtocolExecutionStatus.BLOCKED
     assert controller.protocol_executor.state.active_valve is None
-    controller.valve_service.set_valve.assert_not_called()
+    assert controller.worker.hal.get_line_state("Dev1/P0.0") is None
     assert "连接" in controller.protocol_executor.state.recent_event.message
 
 
@@ -185,10 +196,22 @@ def test_protocol_replacement_close_failure_keeps_old_document_and_active_valve(
     controller = _controller()
     old_document = controller.state.loaded_protocol
 
-    def writer(channel: int, open_state: bool, **kwargs) -> tuple[bool, str]:
-        return (True, "ok") if open_state else (False, "关闭失败")
+    def writer(command):
+        result = (
+            ActuationResult.FAILED
+            if command.action == ActuationAction.CLOSE
+            else ActuationResult.SUCCESS
+        )
+        return ActuationReceipt.from_write(
+            command=command,
+            started_ns=command.expected_ns,
+            actual_ns=command.expected_ns if result == ActuationResult.SUCCESS else None,
+            wall_timestamp=10.0,
+            result=result,
+            message="关闭失败" if result == ActuationResult.FAILED else "ok",
+        )
 
-    controller.valve_service.set_valve = MagicMock(side_effect=writer)
+    controller.actuation_worker.writer = writer
     controller.handle_protocol_start_requested()
     controller.handle_protocol_manual_trigger_requested()
     controller.handle_breath_samples([-0.6], 10.0)

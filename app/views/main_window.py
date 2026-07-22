@@ -34,12 +34,14 @@ class MainWindow(QMainWindow):
         self._status_label = QLabel(state.status_message)
         self._telemetry_label = QLabel(self._format_telemetry(state.telemetry))
         self._shutdown_label = QLabel(self._format_shutdown(state.last_shutdown_event))
+        self._actuation_alert_label = QLabel("时序告警：无")
         self._self_check_label = QLabel("尚未进行硬件自检")
         for label in (
             self._status_label,
             self._telemetry_label,
             self._shutdown_label,
             self._self_check_label,
+            self._actuation_alert_label,
         ):
             label.setWordWrap(True)
             label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
@@ -85,6 +87,12 @@ class MainWindow(QMainWindow):
         self.protocol_view.rearm_requested.connect(
             self.controller.handle_protocol_rearm_requested
         )
+        self.protocol_view.pause_requested.connect(
+            self.controller.handle_protocol_pause_requested
+        )
+        self.protocol_view.resume_requested.connect(
+            self.controller.handle_protocol_resume_requested
+        )
         self.tabs.addTab(self._build_tab("概览", "硬件连接、安全状态概览"), "概览")
         self.tabs.addTab(self.calibration_view, "校准")
         self.tabs.addTab(self.pretest_view, "预检")
@@ -112,6 +120,7 @@ class MainWindow(QMainWindow):
         status_bar = QStatusBar()
         status_bar.addPermanentWidget(self._shutdown_label)
         status_bar.addPermanentWidget(self._telemetry_label)
+        status_bar.addPermanentWidget(self._actuation_alert_label)
         status_bar.addWidget(self._status_label)
         self.setStatusBar(status_bar)
 
@@ -155,6 +164,15 @@ class MainWindow(QMainWindow):
 
     def update_status(self, message: str) -> None:
         self._status_label.setText(message)
+
+    def render_actuation_alert(self, message: str, *, severe: bool) -> None:
+        self._actuation_alert_label.setText(f"时序告警：{message or '无'}")
+        color = "#b00020" if severe else "#c56a00"
+        self._actuation_alert_label.setStyleSheet(
+            f"color: {color}; font-weight: {'700' if severe else '600'};"
+            if message
+            else ""
+        )
 
     def ingest_breath_samples(self, samples, *, timestamp: float | None = None) -> None:
         if hasattr(self, "calibration_view"):
