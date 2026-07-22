@@ -4,7 +4,7 @@ baseline_commit: 8b8c126553ec915c034c6d3150d937b18c632986
 
 # Story 3.4: 低抖动阀门动作（<20ms）
 
-Status: ready-for-dev
+Status: review
 Epic: 3 - 协议执行与数据记录
 Story Key: 3-4-low-jitter-actuation-20ms
 Story ID: 3.4
@@ -154,59 +154,59 @@ Depends On: Story 3.3 review patch（已由提交 `3983c58`、`8b8c126` 完成�
   - [x] Story 3.3 review patch 已按协议状态安全与 TTL/共享 AI 可靠性拆分提交。
   - [x] 已在 frontmatter 写入包含完整 3.3 patch 的 `baseline_commit=8b8c126553ec915c034c6d3150d937b18c632986`；3.4 后续实现必须以该提交为基线区分新改动。
 
-- [ ] 固化动作指标、配置与不可变模型（AC: 1, 4, 5, 6, 9）
-  - [ ] 新增 `app/models/actuation.py`（或等价聚合文件），定义 frozen `ActuationCommand`、`ActuationReceipt`、动作分类/结果和质量快照；更新 `app/models/__init__.py`。
-  - [ ] 扩展 `app/models/protocol_execution.py`，增量加入 pending identity、possibly-open/active 状态、单调 deadline、动作指标和 UI snapshot 字段；保持 `ProtocolGateEvent.as_dict()` 现有键兼容。
-  - [ ] 新增纯逻辑 `app/services/actuation_metrics.py`，实现 open/close/combined 滑窗、nearest-rank p95、最小样本、严格阈值、warning transition 与 severe latch；更新 `app/services/__init__.py`。
-  - [ ] 在 `config/default_config.json` 加入默认值：`actuation_jitter_target_ms=20.0`、`actuation_jitter_single_limit_ms=30.0`、`actuation_jitter_window_size=100`、`actuation_jitter_min_samples=20`、`actuation_normal_queue_capacity=256`、`actuation_write_timeout_ms=100`、`actuation_emergency_close_timeout_ms=500`、`actuation_shutdown_timeout_ms=2000`；`config/local_config.example.json` 仅在需要说明真实机覆盖时同步键名。
+- [x] 固化动作指标、配置与不可变模型（AC: 1, 4, 5, 6, 9）
+  - [x] 新增 `app/models/actuation.py`（或等价聚合文件），定义 frozen `ActuationCommand`、`ActuationReceipt`、动作分类/结果和质量快照；更新 `app/models/__init__.py`。
+  - [x] 扩展 `app/models/protocol_execution.py`，增量加入 pending identity、possibly-open/active 状态、单调 deadline、动作指标和 UI snapshot 字段；保持 `ProtocolGateEvent.as_dict()` 现有键兼容。
+  - [x] 新增纯逻辑 `app/services/actuation_metrics.py`，实现 open/close/combined 滑窗、nearest-rank p95、最小样本、严格阈值、warning transition 与 severe latch；更新 `app/services/__init__.py`。
+  - [x] 在 `config/default_config.json` 加入默认值：`actuation_jitter_target_ms=20.0`、`actuation_jitter_single_limit_ms=30.0`、`actuation_jitter_window_size=100`、`actuation_jitter_min_samples=20`、`actuation_normal_queue_capacity=256`、`actuation_write_timeout_ms=100`、`actuation_emergency_close_timeout_ms=500`、`actuation_shutdown_timeout_ms=2000`；`config/local_config.example.json` 仅在需要说明真实机覆盖时同步键名。
 
-- [ ] 为 AI、TTL 与门控事件贯通单调时间（AC: 1, 2, 7, 10）
-  - [ ] 扩展 `AnalogInputFrame`、`TtlPulse` 与 `GatingTransition`，保留现有 wall `timestamp` 并增加采样点 `monotonic_ns`；Mock 和 Real HAL 共享契约。
-  - [ ] 将 `breath_samples = Signal(list, float)` 升级为 frozen 结构化 batch（或数值与等长 monotonic 数组的严格契约），从 HAL/HardwareWorker 一直保留每个样本 identity 到 GatingService/Executor；测试 EXHALE 位于多样本 batch 中间位置，禁止只传 batch 尾 wall time 后二次重建。
-  - [ ] RealHAL 显式启动 AI task，以 `perf_counter_ns()` 包围 `task.start()` 并记录 midpoint origin、uncertainty、AI epoch 与单调 sample sequence；每帧时间由 origin + sequence/采样率计算，batch backlog 不得向前重锚以隐藏延迟。reset 后创建新 AI epoch。
-  - [ ] `RealHAL.read_ai_frames()` 同时传播 wall/monotonic 样本时间；跨 batch 在同一 AI epoch 严格递增。缺失、非有限、倒退或超出已记录启动不确定度/采样周期约束时 fail closed 并走现有 AI 错误恢复，不得退回 UI arrival time。
-  - [ ] 明确 `expected_open_ns`：优先取本批首次合法 `EXHALE` transition 的 sample；若沿用 3.2 的“进入等待时 gating 已处于 EXHALE”分支，则取触发该次判定的最后一个有效样本 `monotonic_ns`，并以 distinct reason 记录。不得修改 TTL wall timestamp/epoch/sequence 语义。
+- [x] 为 AI、TTL 与门控事件贯通单调时间（AC: 1, 2, 7, 10）
+  - [x] 扩展 `AnalogInputFrame`、`TtlPulse` 与 `GatingTransition`，保留现有 wall `timestamp` 并增加采样点 `monotonic_ns`；Mock 和 Real HAL 共享契约。
+  - [x] 将 `breath_samples = Signal(list, float)` 升级为 frozen 结构化 batch（或数值与等长 monotonic 数组的严格契约），从 HAL/HardwareWorker 一直保留每个样本 identity 到 GatingService/Executor；测试 EXHALE 位于多样本 batch 中间位置，禁止只传 batch 尾 wall time 后二次重建。
+  - [x] RealHAL 显式启动 AI task，以 `perf_counter_ns()` 包围 `task.start()` 并记录 midpoint origin、uncertainty、AI epoch 与单调 sample sequence；每帧时间由 origin + sequence/采样率计算，batch backlog 不得向前重锚以隐藏延迟。reset 后创建新 AI epoch。
+  - [x] `RealHAL.read_ai_frames()` 同时传播 wall/monotonic 样本时间；跨 batch 在同一 AI epoch 严格递增。缺失、非有限、倒退或超出已记录启动不确定度/采样周期约束时 fail closed 并走现有 AI 错误恢复，不得退回 UI arrival time。
+  - [x] 明确 `expected_open_ns`：优先取本批首次合法 `EXHALE` transition 的 sample；若沿用 3.2 的“进入等待时 gating 已处于 EXHALE”分支，则取触发该次判定的最后一个有效样本 `monotonic_ns`，并以 distinct reason 记录。不得修改 TTL wall timestamp/epoch/sequence 语义。
 
-- [ ] 建立专用单写者 ActuationWorker（AC: 2, 3, 4, 6, 7）
-  - [ ] 新增 `app/workers/actuation_worker.py` 与导出，使用 thread-safe command API、紧急/普通队列、deadline heap/condition、稳定 sequence 和可注入 clock/wait strategy。
-  - [ ] 将单一 `ProtocolExecutor/GatingService/ActuationMetrics` 实例完全归属 ActuationWorker；在同一有序 command stream 中处理 AI/TTL/readiness/user intent/timeout/receipt，并在 open ack 后直接安排 close。
-  - [ ] 实现 safety generation、设备租约、epoch 取消、stale receipt 补偿关闭、幂等 close、queue backpressure 和 severe quality latch。
-  - [ ] 实现线程安全 `ActuationInterlockIngress`：producer 在入队前推进 generation/unsafe latch，Worker 在阻塞 write 前后比较；safe 恢复只能由 owner 显式 clear。使用 barrier 验证 write 期间 safety loss 必被发现并补偿关闭。
-  - [ ] 实现 ActuationWorker -> HardwareWorker 的有序 TTL arm/disarm/ack；只有匹配 epoch 的 arm ack 才显示 armed，覆盖 stop/mode/disconnect 与在途 pulse 竞态。
-  - [ ] HAL DO adapter 在 write 前/返回后采集 started/actual，ActuationWorker 只组装业务 receipt/metrics 并通过 Qt signal/线程安全结果通道交给 Controller；UI handler 到达时间不得参与 jitter。
+- [x] 建立专用单写者 ActuationWorker（AC: 2, 3, 4, 6, 7）
+  - [x] 新增 `app/workers/actuation_worker.py` 与导出，使用 thread-safe command API、紧急/普通队列、deadline heap/condition、稳定 sequence 和可注入 clock/wait strategy。
+  - [x] 将单一 `ProtocolExecutor/GatingService/ActuationMetrics` 实例完全归属 ActuationWorker；在同一有序 command stream 中处理 AI/TTL/readiness/user intent/timeout/receipt，并在 open ack 后直接安排 close。
+  - [x] 实现 safety generation、设备租约、epoch 取消、stale receipt 补偿关闭、幂等 close、queue backpressure 和 severe quality latch。
+  - [x] 实现线程安全 `ActuationInterlockIngress`：producer 在入队前推进 generation/unsafe latch，Worker 在阻塞 write 前后比较；safe 恢复只能由 owner 显式 clear。使用 barrier 验证 write 期间 safety loss 必被发现并补偿关闭。
+  - [x] 实现 ActuationWorker -> HardwareWorker 的有序 TTL arm/disarm/ack；只有匹配 epoch 的 arm ack 才显示 armed，覆盖 stop/mode/disconnect 与在途 pulse 竞态。
+  - [x] HAL DO adapter 在 write 前/返回后采集 started/actual，ActuationWorker 只组装业务 receipt/metrics 并通过 Qt signal/线程安全结果通道交给 Controller；UI handler 到达时间不得参与 jitter。
 
-- [ ] 将全部 DO 写入迁移到单写者并优化 HAL（AC: 3, 7, 8）
-  - [ ] 重构 `app/services/valve_service.py`：映射/安全校验/主阀计划与写入确认原子协作，缓存只在成功 receipt 后更新；为共享状态加锁或由单写者独占。
-  - [ ] 修改 `app/workers/hardware_worker.py`、`app/services/hal.py`、`mock_hal.py`、`real_hal.py`，让 HardwareWorker 仅拥有 AI；禁止 normal 路径跨线程直接写 DO，并提供分离的 AI/DO/serial 生命周期与结构化写入确认契约。
-  - [ ] 以真实 NI spike 决定 per-device/port/line task 复用策略；deadline 内不创建/销毁 task，且不破坏唯一 continuous AI task。
-  - [ ] 迁移 MainController 手动阀、预检后台序列、FlowService master writer、ShutdownService close-all 等入口；flow intent 必须先由 ActuationWorker 租约授权再触达 serial/FlowService，安全 close 始终具有最高优先级。
-  - [ ] 固定 shutdown/reconnect 顺序：停止新提交与 flow 变更 -> 失效 normal epoch -> emergency close ack -> 停止 ActuationWorker -> 由其释放 DO -> HardwareWorker 释放 AI -> serial owner 最后释放；任一步失败记录 unsafe/人工恢复，不得由别的线程抢先关闭共享 HAL。
+- [x] 将全部 DO 写入迁移到单写者并优化 HAL（AC: 3, 7, 8）
+  - [x] 重构 `app/services/valve_service.py`：映射/安全校验/主阀计划与写入确认原子协作，缓存只在成功 receipt 后更新；为共享状态加锁或由单写者独占。
+  - [x] 修改 `app/workers/hardware_worker.py`、`app/services/hal.py`、`mock_hal.py`、`real_hal.py`，让 HardwareWorker 仅拥有 AI；禁止 normal 路径跨线程直接写 DO，并提供分离的 AI/DO/serial 生命周期与结构化写入确认契约。
+  - [x] 以真实 NI spike 决定 per-device/port/line task 复用策略；deadline 内不创建/销毁 task，且不破坏唯一 continuous AI task。
+  - [x] 迁移 MainController 手动阀、预检后台序列、FlowService master writer、ShutdownService close-all 等入口；flow intent 必须先由 ActuationWorker 租约授权再触达 serial/FlowService，安全 close 始终具有最高优先级。
+  - [x] 固定 shutdown/reconnect 顺序：停止新提交与 flow 变更 -> 失效 normal epoch -> emergency close ack -> 停止 ActuationWorker -> 由其释放 DO -> HardwareWorker 释放 AI -> serial owner 最后释放；任一步失败记录 unsafe/人工恢复，不得由别的线程抢先关闭共享 HAL。
 
-- [ ] 异步接回 ProtocolExecutor、Controller 与应用生命周期（AC: 2, 4, 6, 7, 10）
-  - [ ] 修改 `app/services/protocol_executor.py`：从同步 writer 返回改为产生 action request/消费 receipt（或严格等价结构），open ack 后确认 active，close ack 后推进 trial。
-  - [ ] 50ms protocol timer 仅保留非关键 UI refresh/snapshot request；呼吸 timeout、刺激 close 与所有状态变更统一归 ActuationWorker deadline queue。
-  - [ ] 修改 `app/controllers/main_controller.py` 与 `app/main.py`，创建、启动、连接和确定性停止 ActuationWorker；所有用户 intent、readiness/safety update、动作 receipt 通过单一编排路径。
-  - [ ] stop/reset/disconnect/shutdown/mode switch/protocol replacement 等待或异步确认真实安全清理结果，不能先清逻辑状态再假定硬件已关闭。
-  - [ ] production submit API 默认为异步；禁止 UI、ActuationWorker 自身或 receipt handler 用 `Event.wait()`/future wait 保持旧同步接口。仅 shutdown ownership handoff 可在 Worker 外部按配置执行有界等待，超时必须进入失败记录而非死锁。
+- [x] 异步接回 ProtocolExecutor、Controller 与应用生命周期（AC: 2, 4, 6, 7, 10）
+  - [x] 修改 `app/services/protocol_executor.py`：从同步 writer 返回改为产生 action request/消费 receipt（或严格等价结构），open ack 后确认 active，close ack 后推进 trial。
+  - [x] 50ms protocol timer 仅保留非关键 UI refresh/snapshot request；呼吸 timeout、刺激 close 与所有状态变更统一归 ActuationWorker deadline queue。
+  - [x] 修改 `app/controllers/main_controller.py` 与 `app/main.py`，创建、启动、连接和确定性停止 ActuationWorker；所有用户 intent、readiness/safety update、动作 receipt 通过单一编排路径。
+  - [x] stop/reset/disconnect/shutdown/mode switch/protocol replacement 等待或异步确认真实安全清理结果，不能先清逻辑状态再假定硬件已关闭。
+  - [x] production submit API 默认为异步；禁止 UI、ActuationWorker 自身或 receipt handler 用 `Event.wait()`/future wait 保持旧同步接口。仅 shutdown ownership handoff 可在 Worker 外部按配置执行有界等待，超时必须进入失败记录而非死锁。
 
-- [ ] 增加指标日志与协议页反馈（AC: 5, 6, 9）
-  - [ ] 扩展 `app/views/protocol_view.py` 显示下一个气味、最近 jitter、open/close/combined p95、样本数、单调 remaining time 与质量阻断原因；增加受服务层守卫的暂停/恢复 intent，并保持现有 manual/TTL capability。
-  - [ ] 扩展 `app/views/main_window.py` 的持久状态栏严重事件显示，按 UX 使用黄/橙/红语义和可执行中文文案。
-  - [ ] `MainController._publish_protocol_result()` 记录完整结构化 receipt/metrics，按状态转换去重，供 Story 3.5 直接持久化。
+- [x] 增加指标日志与协议页反馈（AC: 5, 6, 9）
+  - [x] 扩展 `app/views/protocol_view.py` 显示下一个气味、最近 jitter、open/close/combined p95、样本数、单调 remaining time 与质量阻断原因；增加受服务层守卫的暂停/恢复 intent，并保持现有 manual/TTL capability。
+  - [x] 扩展 `app/views/main_window.py` 的持久状态栏严重事件显示，按 UX 使用黄/橙/红语义和可执行中文文案。
+  - [x] `MainController._publish_protocol_result()` 记录完整结构化 receipt/metrics，按状态转换去重，供 Story 3.5 直接持久化。
 
-- [ ] 建立 RED-GREEN-REFACTOR 自动化保护（AC: 1-11）
-  - [ ] 新增 `tests/test_actuation_metrics.py`、`tests/test_actuation_worker.py`，使用 fake clock/wait 与 barrier 覆盖统计、deadline、优先级和竞态。
-  - [ ] 扩展 `tests/test_protocol_executor.py`、`test_protocol_trigger_integration.py`、`test_integration_gating.py`，覆盖 pending/ack/close/advance、严重超限阻断与 stale 补偿关闭。
-  - [ ] 扩展 `tests/test_valve_service.py`、`test_flow_service.py`、`test_ttl_input.py`、shutdown/app/simulation 测试，覆盖单写者、MFC generation/租约、DO task 复用、AI 回归和应用生命周期。
-  - [ ] 扩展 `tests/test_protocol_view.py` 验证中文指标、颜色/警告、按钮能力与 persistent error。
-  - [ ] 运行定向测试、全量 `python -m pytest`、`python -m ruff check app tests` 与 `git diff --check`。
+- [x] 建立 RED-GREEN-REFACTOR 自动化保护（AC: 1-11）
+  - [x] 新增 `tests/test_actuation_metrics.py`、`tests/test_actuation_worker.py`，使用 fake clock/wait 与 barrier 覆盖统计、deadline、优先级和竞态。
+  - [x] 扩展 `tests/test_protocol_executor.py`、`test_protocol_trigger_integration.py`、`test_integration_gating.py`，覆盖 pending/ack/close/advance、严重超限阻断与 stale 补偿关闭。
+  - [x] 扩展 `tests/test_valve_service.py`、`test_flow_service.py`、`test_ttl_input.py`、shutdown/app/simulation 测试，覆盖单写者、MFC generation/租约、DO task 复用、AI 回归和应用生命周期。
+  - [x] 扩展 `tests/test_protocol_view.py` 验证中文指标、颜色/警告、按钮能力与 persistent error。
+  - [x] 运行定向测试、全量 `python -m pytest`、`python -m ruff check app tests` 与 `git diff --check`。
 
-- [ ] 完成真实 Windows/NI 性能与安全验收（AC: 8, 12）
-  - [ ] 在真实用户环境关闭 NI MAX 后验证 DO task 复用策略与 Dev1/Dev2 资源无冲突，保留设备/驱动/配置信息。
-  - [ ] 在 AI/TTL/UI/logging 并发负载下采集至少 200 open + 200 close receipt，保存原始样本并记录 open/close/combined p95、最大值和失败数。
-  - [ ] 验证 stop、LOW_FLOW/readiness loss、severe 注入和 shutdown 对主阀及全部气味阀的最终关闭事实；未经授权不得执行破坏性拔线/短接测试。
-  - [ ] 固定可复现参数：代表通道至少 valve 1/9/13、`duration_ms=100`、inter-trial 至少 250ms、主阀预备方式、惰性气路/无气味负载与操作者授权；原始 JSONL/CSV 写入 `logs/benchmarks/`，摘要写入本 story。
-  - [ ] 仅在全部自动化、ruff、diff check 与 HIL AC 均有证据后把 story 置为 review。
+- [x] 完成真实 Windows/NI 性能与安全验收（AC: 8, 12）
+  - [x] 在真实用户环境关闭 NI MAX 后验证 DO task 复用策略与 Dev1/Dev2 资源无冲突，保留设备/驱动/配置信息。
+  - [x] 在 AI/TTL/UI/logging 并发负载下采集至少 200 open + 200 close receipt，保存原始样本并记录 open/close/combined p95、最大值和失败数。
+  - [x] 验证 stop、LOW_FLOW/readiness loss、severe 注入和 shutdown 对主阀及全部气味阀的最终关闭事实；未经授权不得执行破坏性拔线/短接测试。
+  - [x] 固定可复现参数：代表通道至少 valve 1/9/13、`duration_ms=100`、inter-trial 至少 250ms、主阀预备方式、惰性气路/无气味负载与操作者授权；原始 JSONL/CSV 写入 `logs/benchmarks/`，摘要写入本 story。
+  - [x] 仅在全部自动化、ruff、diff check 与 HIL AC 均有证据后把 story 置为 review。
 
 ## Dev Notes
 
@@ -297,14 +297,83 @@ OpenAI Codex（GPT-5）
 
 ### Debug Log References
 
+- 2026-07-21 RED：`tests/test_actuation_metrics.py` 首次收集失败（缺少 `app.models.actuation`）；GREEN：动作模型/指标实现后定向 65 passed，全量 246 passed。
+- 2026-07-21 RED：`tests/test_monotonic_sampling.py` 首次收集失败（缺少 frozen batch），随后 distinct trigger reason 用例失败；GREEN：单调采样链路定向 110/80 passed，全量 252 passed。
+- 2026-07-21 RED：ActuationWorker、deferred executor 与 DO adapter 测试分别因模块/API 缺失失败；GREEN：核心定向 17 passed，全量 269 passed，含 barrier safety-loss、stale open、queue full、severe 与单调 timeout。
+- 2026-07-21 RED：DO 生命周期、FlowWorker 与 shutdown 测试分别暴露缺少持久 DO session、serial owner 和有界 ownership handoff；GREEN：对应定向测试通过，关闭顺序固定为 DO -> AI -> serial。
+- 2026-07-21 RED：协议页测试先暴露暂停/恢复控件与质量字段缺失；GREEN：中文状态、p95/样本数、remaining time、持久严重事件及按钮能力测试通过。
+- 2026-07-21 RED：首次全量回归出现 14 个旧同步路径失败；迁移既有断言到 immutable command/receipt 后全量恢复。最终又由 Windows 退出码 `0xC0000409` 定位到 QThread 启停竞态，修复后全量 `286 passed` 且进程退出码为 0。
+- 2026-07-21 RED：安全暂停 close 失败后第二次 pause 被 pending transition 吞掉；GREEN：保留 `BLOCKED + active/possibly_open`，清除未提交转换并允许显式安全重试。
+- 2026-07-22 RED：真实 HIL 首轮在第 56 次 open 测得 `30.4293ms`，severe latch 立即补偿关闭 Valve 9 并在 shutdown 全关；分析发现普通 AI/UI message 可排在已到期 action 前。GREEN：新增 backlog starvation 用例并将已到期 action 提升到普通消息之前，同时保留 safety/readiness message 抢占；全量增至 288 passed。
+- 2026-07-22 HIL：修复后在两台 USB-6001（Dev1 序列号 34887710、Dev2 序列号 34887797）与 COM6/MFC 约 499.6 sccm 环境完成 200 open + 200 close。open/close/combined p95=`16.3064/16.4634/16.3589ms`，最大值=`25.0354/19.4961/25.0354ms`，正式样本失败数 0；stop、LOW_FLOW、44.3513ms severe 注入和 shutdown 均获得成功安全关闭回执。
+
+### Implementation Plan
+
+- 以 frozen command/receipt 作为 executor、worker、HAL 与 UI 的唯一动作身份载体；HAL ack 为唯一 actual 测量点。
+- 由 ActuationWorker 独占可变 executor/gating/metrics 和 DO session；HardwareWorker 保持 AI 单一所有权。
+- 所有跨线程安全变化先进入 generation/latch ingress，再投递有序消息；open 写前后均复核 generation。
+
 ### Completion Notes List
 
-- Ultimate context engine analysis completed - comprehensive developer guide created.
 - Story 3.4 的 measurement point、滑动窗口、最小样本、严格阈值、严重超限与恢复语义已固定，开发者无需自行猜测上游歧义。
 - Story 3.3 review patch 已提交，Story 3.4 baseline 已固定为 `8b8c126553ec915c034c6d3150d937b18c632986`。
+- 已完成 frozen 动作模型、协议状态增量字段、nearest-rank 三窗口指标与 20/30ms 严格边界；定向测试 65 passed、全量 246 passed。
+- 已完成 AI midpoint origin/epoch/sequence、frozen breath batch、TTL/Gating 单调 identity 与 executor EXHALE/fallback expected-open 语义；全量 252 passed。
+- 已完成专用 ActuationWorker、deferred ProtocolExecutor request/receipt、interlock ingress、紧急关闭预留队列、TTL ack 和 HAL 原始取时 adapter；全量 269 passed。
+- 已迁移生产协议、手动阀、预检、flow 与 shutdown 动作到 ActuationWorker/FlowWorker 所有权边界；HardwareWorker 保持 AI owner，ActuationWorker 为 DO 单写者。
+- 已实现持久 per-device/port DO task、真实 DAQ write ack、分离 AI/DO/serial 生命周期、关闭失败保守事实与可重试安全转换；真实 NI 已验证 Dev1/Dev2 的 port0/port1 四个持久资源组可与 continuous AI 并存。
+- 已完成暂停/恢复、动作质量中文 UX、结构化 receipt/metrics 事件和架构文档更新。
+- 自动化证据：定向关键集 20 passed；全量 `288 passed`；`ruff check app tests` 通过；`git diff --check` 通过。
+- 真实 HIL 原始证据位于 `logs/benchmarks/story-3-4-20260722-165645-live/`：`receipts.jsonl`、`receipts.csv`、`metadata.json`、`summary.json`。正式 400 个动作样本全部成功且三类 p95 均 `<20ms`；额外 66 个 safety close 覆盖初始全关、stop、LOW_FLOW、severe、预 shutdown 与 shutdown。
+- HIL 限制：现场无外接 AI0 呼吸信号或 AI6 TTL 源；两通道 continuous AI task、TTL 采集管线和 UI/logging 负载保持并发，但本次证据不声称验证了真实呼吸波形或外部 TTL 边沿识别。
 
 ### File List
+
+- app/models/actuation.py
+- app/models/__init__.py
+- app/models/protocol_execution.py
+- app/services/actuation_metrics.py
+- app/services/actuation_do_adapter.py
+- app/services/__init__.py
+- app/services/gating_service.py
+- app/services/hal.py
+- app/services/mock_hal.py
+- app/services/protocol_executor.py
+- app/services/real_hal.py
+- app/services/shutdown_service.py
+- app/services/ttl_trigger_service.py
+- app/services/valve_service.py
+- app/workers/hardware_worker.py
+- app/workers/actuation_worker.py
+- app/workers/flow_worker.py
+- app/workers/__init__.py
+- app/controllers/main_controller.py
+- app/views/main_window.py
+- app/views/protocol_view.py
+- config/default_config.json
+- tests/test_actuation_metrics.py
+- tests/test_actuation_do_adapter.py
+- tests/test_actuation_worker.py
+- tests/test_async_protocol_executor.py
+- tests/test_do_lifecycle.py
+- tests/test_flow_worker.py
+- tests/test_monotonic_sampling.py
+- tests/test_shutdown_actuation.py
+- tests/test_app.py
+- tests/test_integration_gating.py
+- tests/test_protocol_trigger_integration.py
+- tests/test_protocol_view.py
+- tests/test_simulation_mode.py
+- tests/test_ttl_input.py
+- tests/test_valve_service.py
+- docs/architecture.md
+- docs/project-structure.md
+- docs/sprint-artifacts/3-4-low-jitter-actuation-20ms.md
+- docs/sprint-artifacts/sprint-status.yaml
+- scripts/hil_actuation_benchmark.py
 
 ## Change Log
 
 - 2026-07-21：创建 Story 3.4 开发上下文，状态设为 ready-for-dev。
+- 2026-07-21：完成 AC 1-11 的软件实现与自动化门禁；真实 Windows/NI HIL（AC 8/12）待用户明确授权，状态保持 in-progress。
+- 2026-07-22：经用户明确授权完成真实 Windows/NI HIL；修复 message backlog 对 deadline 的饥饿后，200+200 正式样本 p95 全部 `<20ms`，安全场景与最终全关通过，状态置为 review。

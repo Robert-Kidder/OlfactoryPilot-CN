@@ -31,7 +31,7 @@ development_status:
   3-1-protocol-file-parsing-txtcsv: done
   3-2-breath-gated-stimulation: done
   3-3-manual-vs-ttl-trigger-modes: done
-  3-4-low-jitter-actuation-20ms: ready-for-dev
+  3-4-low-jitter-actuation-20ms: review
   3-5-session-file-naming-and-logging: backlog
   epic-3-retrospective: optional
 
