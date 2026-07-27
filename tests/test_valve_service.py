@@ -255,6 +255,37 @@ def test_async_plan_contains_master_then_channel_without_mutating_cache():
     assert service.is_open(1) is False
 
 
+def test_protocol_master_prepare_plan_contains_only_master_and_requires_readiness():
+    service = build_service()
+    safe = SafetyState("SAFE", 0.5, 0.2, 1.0, "")
+
+    ok, message = service.plan_master_prepare(safety_state=safe)
+    assert ok is False
+    assert "MFC" in message
+
+    service.state.flow_setpoints_ready = True
+    ok, plan = service.plan_master_prepare(safety_state=safe)
+
+    assert ok is True
+    assert [(step.logical_valve, step.line, step.state) for step in plan.steps] == [
+        (0, "P1.0", True)
+    ]
+    assert service.master_is_open() is False
+
+
+def test_protocol_master_prepare_is_noop_after_confirmed_receipt():
+    service = build_service()
+    service.state.flow_setpoints_ready = True
+    service._states["master"] = True
+
+    ok, plan = service.plan_master_prepare(
+        safety_state=SafetyState("SAFE", 0.5, 0.2, 1.0, "")
+    )
+
+    assert ok is True
+    assert plan.steps == ()
+
+
 def test_async_cache_commits_only_successful_receipt():
     service = build_service()
     step = service.plan_valve(

@@ -92,7 +92,7 @@ class ProtocolExecutor:
         *,
         timestamp: float | None = None,
     ) -> ProtocolExecutorResult:
-        if self.state.active_valve is not None:
+        if self.state.active_valve is not None or self.state.possibly_open_valves:
             return self._rejected(
                 "reset_rejected",
                 self._now(timestamp),
@@ -120,7 +120,7 @@ class ProtocolExecutor:
     ) -> ProtocolExecutorResult:
         now = self._now(timestamp)
         ready = self._readiness(readiness, safety_state)
-        if self.state.active_valve is not None:
+        if self.state.active_valve is not None or self.state.possibly_open_valves:
             return self._rejected(
                 "start_rejected",
                 now,
@@ -241,6 +241,16 @@ class ProtocolExecutor:
                     pulse_sequence=sequence,
                     message="TTL pulse 属于陈旧布防代次，已忽略。",
                 )
+            if not self.state.ttl_armed:
+                return self._rejected(
+                    "ttl_pulse_ignored",
+                    now,
+                    safety_state=readiness.safety_state,
+                    trigger_source=trigger_source.value,
+                    result="ignored",
+                    pulse_sequence=sequence,
+                    message="TTL 检测器尚未确认布防，已忽略该 pulse。",
+                )
             if sequence is None or sequence <= self.state.last_pulse_sequence:
                 return self._rejected(
                     "ttl_pulse_ignored",
@@ -338,7 +348,7 @@ class ProtocolExecutor:
         if self.state.status != ProtocolExecutionStatus.READY:
             self.state.status = ProtocolExecutionStatus.WAITING_TRIGGER
             self.state.waiting_trigger_started_at = now
-            self.state.ttl_armed = target == TriggerMode.TTL
+            self.state.ttl_armed = False
         return self._result_with_events(
             [
                 self._event(
@@ -357,7 +367,11 @@ class ProtocolExecutor:
         timestamp: float | None = None,
     ) -> ProtocolExecutorResult:
         now = self._now(timestamp)
-        if self.state.status != ProtocolExecutionStatus.BLOCKED or self.state.active_valve is not None:
+        if (
+            self.state.status != ProtocolExecutionStatus.BLOCKED
+            or self.state.active_valve is not None
+            or self.state.possibly_open_valves
+        ):
             return self._rejected(
                 "rearm_rejected",
                 now,
@@ -559,9 +573,30 @@ class ProtocolExecutor:
         *,
         readiness: ProtocolExecutionReadiness,
         timestamp: float | None = None,
+        execution_epoch: int | None = None,
+        arm_epoch: int | None = None,
+        trial_index: int | None = None,
+        trial_id: str | None = None,
+        waiting_started_at: float | None = None,
     ) -> ProtocolExecutorResult:
         """Owner-scheduled monotonic deadline entry; wall time is logging only."""
         if self.state.status != ProtocolExecutionStatus.WAITING_EXHALE:
+            return self.empty_result()
+        current_trial = self.state.current_trial
+        if execution_epoch is not None and execution_epoch != self.state.execution_epoch:
+            return self.empty_result()
+        if arm_epoch is not None and arm_epoch != self.state.arm_epoch:
+            return self.empty_result()
+        if trial_index is not None and trial_index != self.state.trial_index:
+            return self.empty_result()
+        if trial_id is not None and (
+            current_trial is None or trial_id != current_trial.trial_id
+        ):
+            return self.empty_result()
+        if (
+            waiting_started_at is not None
+            and waiting_started_at != self.state.waiting_started_at
+        ):
             return self.empty_result()
         return self._handle_timeout(self._now(timestamp), readiness=readiness)
 
@@ -588,14 +623,18 @@ class ProtocolExecutor:
             ProtocolExecutionStatus.WAITING_TRIGGER,
             ProtocolExecutionStatus.WAITING_EXHALE,
         }
-        if self.state.active_valve is not None or self.state.status not in allowed:
+        if (
+            self.state.active_valve is not None
+            or self.state.possibly_open_valves
+            or self.state.status not in allowed
+        ):
             return self._rejected(
                 "skip_rejected",
                 now,
                 safety_state=ready.safety_state,
                 message=(
                     "当前 trial 正在刺激或存在未关闭阀门，不能跳过；请先停止并确认安全关闭。"
-                    if self.state.active_valve is not None
+                    if self.state.active_valve is not None or self.state.possibly_open_valves
                     else f"当前状态为 {_STATUS_TEXT[self.state.status]}，不能跳过 trial。"
                 ),
             )
@@ -625,8 +664,11 @@ class ProtocolExecutor:
         now = self._now(timestamp)
         self._invalidate_arm()
         events: list[ProtocolGateEvent] = []
+        valves = set(self.state.possibly_open_valves)
         if self.state.active_valve is not None:
-            ok, close_message = self.valve_writer(self.state.active_valve, False)
+            valves.add(self.state.active_valve)
+        for valve in sorted(valves):
+            ok, close_message = self.valve_writer(valve, False)
             if not ok:
                 self.state.status = ProtocolExecutionStatus.BLOCKED
                 events.append(
@@ -635,11 +677,14 @@ class ProtocolExecutor:
                         now,
                         safety_state=safety_state,
                         result="close_failed",
-                        message=f"{message} 关闭活动阀门失败：{close_message}；请检查硬件后再次停止。",
+                        message=f"{message} 关闭阀门 {valve} 失败：{close_message}；请检查硬件后再次停止。",
                     )
                 )
                 return self._result_with_events(events)
-            self.state.active_valve = None
+            self.state.possibly_open_valves.discard(valve)
+            if self.state.active_valve == valve:
+                self.state.active_valve = None
+        if valves:
             message = f"{message} 已关闭活动阀门。"
         self.state.status = ProtocolExecutionStatus.STOPPED
         events.append(self._event("stopped", now, safety_state=safety_state, message=message))
@@ -785,6 +830,8 @@ class ProtocolExecutor:
                 and self.state.document
                 and self.state.document.trials
                 and self.state.status in {ProtocolExecutionStatus.READY, ProtocolExecutionStatus.STOPPED}
+                and self.state.active_valve is None
+                and not self.state.possibly_open_valves
             ),
             can_stop=self.state.status
             in {
@@ -792,8 +839,16 @@ class ProtocolExecutor:
                 ProtocolExecutionStatus.WAITING_EXHALE,
                 ProtocolExecutionStatus.TRIGGERED,
             }
-            or (self.state.status == ProtocolExecutionStatus.BLOCKED and self.state.active_valve is not None),
+            or (
+                self.state.status == ProtocolExecutionStatus.BLOCKED
+                and (
+                    self.state.active_valve is not None
+                    or bool(self.state.possibly_open_valves)
+                )
+            ),
             can_advance=common_ready
+            and self.state.active_valve is None
+            and not self.state.possibly_open_valves
             and self.state.status
             in {ProtocolExecutionStatus.WAITING_TRIGGER, ProtocolExecutionStatus.WAITING_EXHALE},
             trial_label=f"{self.state.trial_index + 1}/{total}" if trial else "-",
@@ -812,11 +867,14 @@ class ProtocolExecutor:
                 common_ready
                 and self.state.status == ProtocolExecutionStatus.WAITING_TRIGGER
                 and self.state.current_mode == TriggerMode.MANUAL
+                and self.state.active_valve is None
+                and not self.state.possibly_open_valves
             ),
             can_rearm=bool(
                 execution_ready
                 and self.state.status == ProtocolExecutionStatus.BLOCKED
                 and self.state.active_valve is None
+                and not self.state.possibly_open_valves
             ),
             ttl_armed=self.state.ttl_armed,
             waiting_external_ttl=bool(
@@ -878,7 +936,9 @@ class ProtocolExecutor:
         self.state.triggered_at = None
         self.state.retry_count = 0
         self.state.trigger_source = None
-        self.state.ttl_armed = self.state.current_mode == TriggerMode.TTL
+        # The hardware detector is the authority for the armed state.  A TTL
+        # trial remains unarmed until its matching HardwareWorker ack arrives.
+        self.state.ttl_armed = False
         return self._result_with_events(
             [
                 self._event(
@@ -886,8 +946,8 @@ class ProtocolExecutor:
                     timestamp,
                     safety_state=readiness.safety_state,
                     message=(
-                        "已布防，等待外部 TTL 上升沿。"
-                        if self.state.ttl_armed
+                        "正在布防外部 TTL 上升沿检测器。"
+                        if self.state.current_mode == TriggerMode.TTL
                         else "开始等待手动触发。"
                     ),
                 )
@@ -1462,8 +1522,14 @@ class ProtocolExecutor:
         action_requests: tuple[ActuationCommand, ...] = (),
     ) -> ProtocolExecutorResult:
         for event in events:
-            self.state.recent_event = event
+            # Nested state transitions may already have recorded the same event
+            # object.  Move it into the outer result's order instead of logging
+            # it twice or leaving recent_event inconsistent with events[-1].
+            self.state.events[:] = [
+                recorded for recorded in self.state.events if recorded is not event
+            ]
             self.state.events.append(event)
+            self.state.recent_event = event
         return ProtocolExecutorResult(
             state=self.state,
             events=events,

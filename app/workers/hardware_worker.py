@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import logging
 import math
+import threading
 import time
+from collections import deque
+from collections.abc import Callable
 
 from PySide6.QtCore import QThread, Signal
 
-from app.models import SelfCheckResult
+from app.models import ProtocolExecutionReadiness, SelfCheckResult
 from app.services.hal import AnalogInputFrame, BreathSampleBatch, HalInterface
 from app.services.hardware_check_service import HardwareCheckService
 from app.services.mock_hal import MockHAL
@@ -65,6 +68,15 @@ class HardwareWorker(QThread):
         self._connected = False
         self._actuation_sink = None
         self._interlock_ingress = None
+        self._before_external_self_check: Callable[[], bool] | None = None
+        self._after_external_self_check: Callable[[], bool] | None = None
+        self._flow_sample_lock = threading.Lock()
+        self._flow_sample: tuple[float, float] | None = None
+        self._flow_sample_stale_after_s = 1.0
+        self._ai_release_attempted = False
+        self._ai_release_success = False
+        self._ttl_control_lock = threading.Lock()
+        self._ttl_control_queue: deque[tuple[str, int | None]] = deque()
 
     @property
     def is_connected(self) -> bool:
@@ -73,12 +85,15 @@ class HardwareWorker(QThread):
     def run(self) -> None:  # noqa: D401
         """Worker loop emits telemetry placeholders over signals."""
         self._running = True
+        self._ai_release_attempted = False
+        self._ai_release_success = False
         mode_label = "（模拟模式）" if self.simulation_mode else "（占位）"
         self.status_message.emit(f"硬件线程已启动{mode_label}")
         self._run_self_check()
         next_telemetry = time.time()
         next_ai = time.time()
         while self._running:
+            self._process_ttl_control()
             now = time.time()
             if self._self_check_requested:
                 self._self_check_requested = False
@@ -89,44 +104,28 @@ class HardwareWorker(QThread):
                 next_ai += max(self.ttl_interval_ms, 1) / 1000.0
 
             if now >= next_telemetry:
-                payload: dict[str, object] = {
-                    "connected": self._connected,
-                    "airflow": self._read_flow(),
-                    "safety_state": "SAFE",
-                    "timestamp": now,
-                }
-                if self._interlock_ingress is not None:
-                    current = self._interlock_ingress.read()[1]
-                    self._interlock_ingress.publish_raw_telemetry(
-                        airflow=float(payload["airflow"]),
-                        timestamp=now,
-                        hardware_state=str(payload["safety_state"]),
-                        connected=bool(payload["connected"]),
-                        hardware_ready=bool(self._connected),
-                        flow_setpoints_ready=current.flow_setpoints_ready,
-                        ttl_input_ready=self.ttl_input_ready,
-                        has_protocol=current.has_protocol,
-                        device_lease=current.device_lease,
-                    )
-                self.telemetry_ready.emit(payload)
+                self._emit_telemetry(now)
                 next_telemetry += max(self.telemetry_interval_ms, 1) / 1000.0
 
             sleep_ms = min(self.telemetry_interval_ms, self.ttl_interval_ms)
-            self.msleep(max(1, sleep_ms))
-        try:
-            self.hal.reset_ai_input()
-        except Exception:  # pragma: no cover - defensive
-            LOG.exception("HardwareWorker 线程释放 AI 资源失败")
+            # Python 3.11 uses a high-resolution waitable timer on Windows;
+            # QThread.msleep(1) rounds to the ~15.6 ms system timer quantum.
+            time.sleep(max(1, sleep_ms) / 1000.0)
+        self._apply_ttl_disarm()
+        self._release_ai_owned_resources(final=True)
         self.status_message.emit("硬件线程已停止")
 
-    def stop(self) -> None:
+    def stop(self) -> bool:
         self._self_check_requested = False
         if not self.isRunning():
             self._connected = False
-            return
+            if self._ai_release_attempted:
+                return self._ai_release_success
+            return self._release_ai_owned_resources(final=True)
         self._running = False
         self._connected = False
-        self.wait(2000)
+        stopped = bool(self.wait(2000))
+        return bool(stopped and self._ai_release_attempted and self._ai_release_success)
 
     def request_self_check(self) -> None:
         """Allow controller/UI to trigger another self-check without blocking UI."""
@@ -136,44 +135,105 @@ class HardwareWorker(QThread):
         self._actuation_sink = sink
         self._interlock_ingress = interlock_ingress
 
+    def set_self_check_coordinator(
+        self,
+        *,
+        before: Callable[[], bool],
+        after: Callable[[], bool],
+    ) -> None:
+        """Coordinate exclusive serial access around an external COM probe."""
+        self._before_external_self_check = before
+        self._after_external_self_check = after
+
+    def consume_airflow_sample(
+        self,
+        value: float,
+        timestamp: float,
+        error: str | None = None,
+    ) -> None:
+        """Consume serial-owner telemetry without acquiring the COM handle here."""
+        try:
+            sampled_at = float(timestamp)
+        except (TypeError, ValueError):
+            sampled_at = float("nan")
+        if not math.isfinite(sampled_at):
+            sampled_at = time.time()
+            error = error or "invalid airflow sample timestamp"
+        try:
+            airflow = float(value)
+        except (TypeError, ValueError):
+            airflow = float("nan")
+            error = error or "invalid airflow sample"
+        sample = (float("nan") if error is not None else airflow, sampled_at)
+        with self._flow_sample_lock:
+            self._flow_sample = sample
+        # Every serial sample is safety-significant: LOW_FLOW and errors must
+        # not wait for the next UI/telemetry tick before waking the owner.
+        self._publish_interlock(sample[0], sample[1])
+
     def write_digital(self, *, device: str | None, line: str, state: bool) -> bool:
-        """数字输出由 HAL 处理；记录日志并更新连接状态。"""
-        LOG.info(
-            "digital_write | device=%s | line=%s | state=%s",
+        """Reject the legacy DO path; ActuationWorker is the sole DO writer."""
+        LOG.error(
+            "Rejected legacy HardwareWorker DO write | device=%s | line=%s | state=%s",
             device or "N/A",
             line,
             state,
         )
-        if not self.hal:
-            self._connected = True
-            return True
-        try:
-            result = bool(self.hal.write_digital(device=device, line=line, state=state))
-            self._connected = self._connected or result
-            return result
-        except Exception:  # pragma: no cover - defensive
-            LOG.exception("HAL digital write failed")
-            return False
+        return False
 
     def mark_disconnected(self) -> None:
         """Explicitly mark hardware as disconnected for telemetry loop."""
         self._self_check_requested = False
         self._connected = False
-        self.disarm_ttl()
+        if self.isRunning():
+            self.post_ttl_disarm()
+        else:
+            self._apply_ttl_disarm()
 
     @property
     def ttl_input_ready(self) -> bool:
         return bool(self._ttl_runtime_ready and getattr(self.hal, "ttl_input_ready", False))
 
+    def post_ttl_arm(self, arm_epoch: int) -> None:
+        """Thread-safe producer endpoint; this worker performs the mutation."""
+        with self._ttl_control_lock:
+            self._ttl_control_queue.append(("arm", int(arm_epoch)))
+
+    def post_ttl_disarm(self) -> None:
+        """Thread-safe producer endpoint independent of the UI event loop."""
+        with self._ttl_control_lock:
+            self._ttl_control_queue.append(("disarm", None))
+
+    def _process_ttl_control(self) -> None:
+        while True:
+            with self._ttl_control_lock:
+                if not self._ttl_control_queue:
+                    return
+                action, arm_epoch = self._ttl_control_queue.popleft()
+            if action == "arm":
+                assert arm_epoch is not None
+                self._apply_ttl_arm(arm_epoch)
+            else:
+                self._apply_ttl_disarm()
+
     def arm_ttl(self, *, arm_epoch: int) -> None:
+        """Synchronous owner-local helper retained for deterministic tests."""
+        self._apply_ttl_arm(int(arm_epoch))
+
+    def _apply_ttl_arm(self, arm_epoch: int) -> None:
         try:
             self.ttl_service.arm(arm_epoch=arm_epoch)
-            self.ttl_arm_ack.emit(int(arm_epoch), True)
+            armed = True
         except Exception:  # pragma: no cover - defensive
             LOG.exception("TTL 布防失败")
-            self.ttl_arm_ack.emit(int(arm_epoch), False)
+            armed = False
+        self._notify_ttl_arm_ack(int(arm_epoch), armed)
 
     def disarm_ttl(self) -> None:
+        """Synchronous owner-local helper retained for shutdown/test callers."""
+        self._apply_ttl_disarm()
+
+    def _apply_ttl_disarm(self) -> None:
         try:
             self.ttl_service.disarm()
             self.ttl_disarm_ack.emit(True)
@@ -181,17 +241,19 @@ class HardwareWorker(QThread):
             LOG.exception("TTL 解除布防失败")
             self.ttl_disarm_ack.emit(False)
 
+    def _notify_ttl_arm_ack(self, arm_epoch: int, armed: bool) -> None:
+        sink = self._actuation_sink
+        consumer = getattr(sink, "consume_ttl_arm_ack", None)
+        if callable(consumer):
+            # The consumer only enqueues under ActuationWorker's own lock.
+            consumer(arm_epoch=arm_epoch, armed=armed)
+        self.ttl_arm_ack.emit(arm_epoch, armed)
+
     # Shutdown helpers for safe-stop scenarios.
     def close_all_channels(self) -> bool:
-        """Close valves/actuators; placeholder returns success for mock worker."""
-        self._connected = False
-        if not self.hal:
-            return True
-        try:
-            return bool(self.hal.close_all())
-        except Exception:  # pragma: no cover - defensive
-            LOG.exception("HAL close_all failed")
-            return False
+        """Reject the legacy DO path; use ActuationWorker emergency close."""
+        LOG.error("Rejected legacy HardwareWorker close_all; ActuationWorker owns DO")
+        return False
 
     def stop_heaters(self) -> bool:
         """Stop heaters/pumps; placeholder returns success for mock worker."""
@@ -213,18 +275,13 @@ class HardwareWorker(QThread):
             LOG.exception("HAL flush_logs failed")
             return None
 
-    def release_resources(self) -> None:
-        """Release NI/RS232 handles and stop worker loop."""
-        try:
-            if self.hal:
-                self.hal.close_all()
-        except Exception:  # pragma: no cover - defensive
-            LOG.exception("HAL release resources failed")
-        self.stop()
+    def release_resources(self) -> bool:
+        """Compatibility alias that releases only HardwareWorker-owned AI."""
+        return self.release_ai_resources()
 
-    def release_ai_resources(self) -> None:
+    def release_ai_resources(self) -> bool:
         """Release only HardwareWorker-owned AI resources; DO belongs elsewhere."""
-        self.stop()
+        return self.stop()
 
     def _run_self_check(self) -> None:
         results: list[SelfCheckResult] = []
@@ -233,8 +290,19 @@ class HardwareWorker(QThread):
             if self.simulation_mode and hasattr(self.hal, "self_check"):
                 results, ready = self.hal.self_check()
             elif self.check_service:
-                self._release_hal_handles_for_self_check()
-                results, ready = self.check_service.run_checks()
+                coordinated = False
+                if self._before_external_self_check is not None:
+                    coordinated = bool(self._before_external_self_check())
+                    if not coordinated:
+                        raise RuntimeError("无法暂停 serial owner，已取消自检以避免并发打开 COM")
+                elif bool(getattr(self.hal, "serial_resources_in_use", False)):
+                    raise RuntimeError("serial owner 仍持有 COM，已取消自检以避免并发打开")
+                try:
+                    results, ready = self.check_service.run_checks()
+                finally:
+                    if coordinated and self._after_external_self_check is not None:
+                        if not self._after_external_self_check():
+                            raise RuntimeError("serial owner 在自检后恢复失败")
             elif hasattr(self.hal, "self_check"):
                 results, ready = self.hal.self_check()
             elif self.simulation_mode:
@@ -255,6 +323,24 @@ class HardwareWorker(QThread):
             ]
             ready = False
         self._connected = ready
+        if self._interlock_ingress is not None:
+            self._interlock_ingress.update(
+                connected=bool(ready),
+                hardware_ready=bool(ready and not self._ai_error_latched),
+                ttl_input_ready=bool(ready and self.ttl_input_ready),
+            )
+            current = self._interlock_ingress.read()[1]
+            if self._actuation_sink is not None:
+                self._actuation_sink.post_readiness_update(
+                    readiness=ProtocolExecutionReadiness(
+                        connected=current.connected,
+                        hardware_ready=current.hardware_ready,
+                        flow_setpoints_ready=current.flow_setpoints_ready,
+                        safety_state=current.safety_state,
+                        ttl_input_ready=current.ttl_input_ready,
+                    ),
+                    timestamp=time.time(),
+                )
         self.self_check_completed.emit(results, ready)
         if self.simulation_mode and ready:
             status = "模拟模式：自检通过"
@@ -262,15 +348,6 @@ class HardwareWorker(QThread):
             status = "硬件自检通过" if ready else "硬件自检失败，请检查连接"
         self.status_message.emit(status)
         LOG.info("硬件自检完成 | ready=%s | 项目数=%s", ready, len(results))
-
-    def _release_hal_handles_for_self_check(self) -> None:
-        """Release HAL-held serial handles before HardwareCheckService opens COM ports."""
-        if not self.hal:
-            return
-        try:
-            self.hal.flush_logs()
-        except Exception:  # pragma: no cover - defensive
-            LOG.exception("HAL handle release before self-check failed")
 
     def _emit_breath_sample(self, timestamp: float) -> None:
         """Generate breath sample via HAL (mock or real)."""
@@ -288,6 +365,50 @@ class HardwareWorker(QThread):
         )
         self._ai_sample_count += 1
         self.breath_samples.emit(BreathSampleBatch.from_frames((frame,)))
+
+    def _emit_telemetry(self, timestamp: float) -> None:
+        airflow = self._read_flow(timestamp)
+        payload: dict[str, object] = {
+            "connected": self._connected,
+            "airflow": airflow,
+            "safety_state": "DATA_STALE",
+            "timestamp": timestamp,
+        }
+        current = self._publish_interlock(airflow, timestamp)
+        if current is not None:
+            payload["safety_state"] = current.safety_state
+        self.telemetry_ready.emit(payload)
+
+    def _publish_interlock(self, airflow: float, timestamp: float):
+        if self._interlock_ingress is None:
+            return None
+        current = self._interlock_ingress.read()[1]
+        self._interlock_ingress.publish_raw_telemetry(
+            airflow=airflow,
+            timestamp=timestamp,
+            hardware_state=None,
+            connected=bool(self._connected),
+            hardware_ready=bool(self._connected and not self._ai_error_latched),
+            flow_setpoints_ready=current.flow_setpoints_ready,
+            ttl_input_ready=self.ttl_input_ready,
+            has_protocol=current.has_protocol,
+            device_lease=current.device_lease,
+        )
+        current = self._interlock_ingress.read()[1]
+        if self._actuation_sink is not None:
+            # This owner-to-owner notification does not wait for the UI event
+            # loop. Unsafe transitions wake ActuationWorker directly.
+            self._actuation_sink.post_readiness_update(
+                readiness=ProtocolExecutionReadiness(
+                    connected=current.connected,
+                    hardware_ready=current.hardware_ready,
+                    flow_setpoints_ready=current.flow_setpoints_ready,
+                    safety_state=current.safety_state,
+                    ttl_input_ready=current.ttl_input_ready,
+                ),
+                timestamp=timestamp,
+            )
+        return current
 
     def _emit_ai_frame(self, timestamp: float) -> None:
         attempt_started = time.monotonic()
@@ -352,12 +473,12 @@ class HardwareWorker(QThread):
                     if pulse is not None:
                         pulses.append(pulse)
 
+            restored = bool(getattr(self.hal, "ttl_input_ready", False))
+            if restored != self._ttl_runtime_ready:
+                self._ttl_runtime_ready = restored
+                self.ttl_readiness_changed.emit(restored)
             if self._ai_error_latched:
                 self._ai_error_latched = False
-                restored = bool(getattr(self.hal, "ttl_input_ready", False))
-                if restored != self._ttl_runtime_ready:
-                    self._ttl_runtime_ready = restored
-                    self.ttl_readiness_changed.emit(restored)
             if breath_frames:
                 batch = BreathSampleBatch.from_frames(tuple(breath_frames))
                 if self._actuation_sink is not None:
@@ -371,10 +492,8 @@ class HardwareWorker(QThread):
             first_failure = not self._ai_error_latched
             self._ai_error_latched = True
             self._ai_retry_not_before = attempt_started + self._ai_error_backoff_s
-            try:
-                self.hal.reset_ai_input()
-            except Exception:  # pragma: no cover - defensive
-                LOG.exception("释放失效的共享 AI task 失败")
+            if not self._release_ai_owned_resources(final=False):
+                LOG.error("释放失效的共享 AI task 失败，保持安全阻断")
             if self._ttl_runtime_ready:
                 self._ttl_runtime_ready = False
                 self.ttl_readiness_changed.emit(False)
@@ -394,14 +513,32 @@ class HardwareWorker(QThread):
             LOG.exception(message)
             self.ttl_input_error.emit(message)
 
-    def _read_flow(self) -> float:
-        if not self.hal:
-            return 0.0
+    def _release_ai_owned_resources(self, *, final: bool) -> bool:
         try:
-            return float(self.hal.read_flow())
+            result = self.hal.reset_ai_input()
+            success = result is True
         except Exception:  # pragma: no cover - defensive
-            LOG.exception("HAL read_flow failed")
-            return 0.0
+            LOG.exception("HardwareWorker 线程释放 AI 资源失败")
+            success = False
+        if final:
+            self._ai_release_attempted = True
+            self._ai_release_success = success
+        return success
+
+    def _read_flow(self, timestamp: float | None = None) -> float:
+        """Read the serial owner's cached sample; never access HAL serial here."""
+        now = time.time() if timestamp is None else float(timestamp)
+        with self._flow_sample_lock:
+            sample = self._flow_sample
+        if sample is None:
+            return float("nan")
+        airflow, sampled_at = sample
+        age = now - sampled_at
+        if not math.isfinite(airflow) or not math.isfinite(age):
+            return float("nan")
+        if age < 0 or age > self._flow_sample_stale_after_s:
+            return float("nan")
+        return airflow
 
     @staticmethod
     def _compute_interval_ms(telemetry_hz: int) -> int:

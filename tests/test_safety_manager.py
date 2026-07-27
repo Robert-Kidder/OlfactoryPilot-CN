@@ -4,24 +4,24 @@ from app.models.safety_state import SafetyState
 from app.services import SafetyManager
 
 
-def test_idle_zero_flow_is_safe_for_alicat_model():
+def test_finite_airflow_below_threshold_is_low_flow():
     manager = SafetyManager(low_flow_threshold=0.5, recovery_margin=0.1)
 
     state = manager.evaluate_state(airflow=0.0, timestamp=1.0)
 
-    assert state.state == "SAFE"
-    assert "Alicat" in state.reason
+    assert state.state == "LOW_FLOW"
+    assert state.airflow == 0.0
 
 
-def test_valid_flow_does_not_need_threshold_margin():
+def test_low_flow_hysteresis_requires_recovery_margin():
     manager = SafetyManager(low_flow_threshold=0.5, recovery_margin=0.1)
 
     idle = manager.evaluate_state(airflow=0.0, timestamp=1.0)
     mid = manager.evaluate_state(airflow=0.2, timestamp=1.1, previous=idle)
     target = manager.evaluate_state(airflow=0.65, timestamp=1.2, previous=mid)
 
-    assert idle.state == "SAFE"
-    assert mid.state == "SAFE"
+    assert idle.state == "LOW_FLOW"
+    assert mid.state == "LOW_FLOW"
     assert target.state == "SAFE"
 
 
@@ -83,7 +83,7 @@ def test_evaluate_retains_string_api():
 
     result = manager.evaluate(airflow=0.2, timestamp=1.0, previous_state="SAFE")
 
-    assert result == "SAFE"
+    assert result == "LOW_FLOW"
 
 
 def test_validate_threshold_rules():

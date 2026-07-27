@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -37,13 +38,14 @@ def _document(mode: TriggerMode = TriggerMode.MANUAL) -> ProtocolDocument:
 
 def _controller(mode: TriggerMode = TriggerMode.MANUAL) -> MainController:
     state = AppState(simulation_mode=True)
+    state.valve_variants = {"20-channel": {1: "Dev1/P0.0", 2: "Dev1/P0.1"}}
     state.loaded_protocol = _document(mode)
     state.hardware_ready = True
     state.flow_setpoints_ready = True
     state.telemetry.connected = True
     state.telemetry.safety_state = "SAFE"
     worker = HardwareWorker(hal=MockHAL(), simulation=True)
-    controller = MainController(state, worker)
+    controller = MainController(state, worker, allow_test_actuation_bridge=True)
     controller.protocol_executor.reset(state.loaded_protocol)
     return controller
 
@@ -67,6 +69,18 @@ def test_manual_handler_uses_common_readiness_even_when_ai6_not_ready() -> None:
 
     assert controller.protocol_executor.state.status == ProtocolExecutionStatus.WAITING_EXHALE
     assert controller.protocol_executor.state.current_mode == TriggerMode.MANUAL
+
+
+def test_protocol_start_is_blocked_while_manual_valve_is_open() -> None:
+    controller = _controller()
+    controller.valve_service._states[1] = True
+    previous_epoch = controller.protocol_executor.state.execution_epoch
+
+    controller.handle_protocol_start_requested()
+
+    assert controller.protocol_executor.state.execution_epoch == previous_epoch
+    assert controller.protocol_executor.state.status == ProtocolExecutionStatus.READY
+    assert "阀" in controller.state.status_message
 
 
 def test_ttl_handler_forwards_immutable_payload_without_relabeling_epoch() -> None:
@@ -175,7 +189,7 @@ def test_runtime_read_error_keeps_ttl_rearm_rejected_until_a_frame_recovers() ->
     assert controller.worker.ttl_input_ready is False
     assert controller.protocol_executor.state.status == ProtocolExecutionStatus.BLOCKED
     assert controller.protocol_executor.state.recent_event.event == "rearm_rejected"
-    assert "AI6" in controller.protocol_executor.state.recent_event.message
+    assert "AI0" in controller.protocol_executor.state.recent_event.message
 
 
 def test_breath_sample_blocks_on_fresh_readiness_loss_before_opening_valve() -> None:
@@ -240,3 +254,141 @@ def test_protocol_replacement_close_failure_keeps_old_document_and_active_valve(
     assert controller.protocol_executor.state.document is old_document
     assert controller.protocol_executor.state.status == ProtocolExecutionStatus.BLOCKED
     assert controller.protocol_executor.state.active_valve == 1
+
+
+def test_telemetry_cannot_release_pending_protocol_start_lease() -> None:
+    controller = _controller()
+    controller.actuation_worker.post_start = MagicMock()
+    controller.handle_protocol_start_requested()
+
+    assert controller._protocol_start_pending is True
+    assert controller.flow_worker.execution_context[1] == "protocol"
+
+    controller.handle_telemetry(
+        {
+            "timestamp": 10.0,
+            "connected": True,
+            "airflow": 1.0,
+            "safety_state": "SAFE",
+        }
+    )
+
+    assert controller._protocol_start_pending is True
+    assert controller.actuation_interlock.read()[1].device_lease == "protocol"
+    assert controller.flow_worker.execution_context[1] == "protocol"
+
+
+def test_rejected_start_releases_pending_flow_lease() -> None:
+    controller = _controller()
+    controller.state.telemetry.connected = False
+    controller.actuation_interlock.update(connected=False, safety_state="DATA_STALE")
+
+    controller.handle_protocol_start_requested()
+
+    assert controller.protocol_executor.state.status == ProtocolExecutionStatus.READY
+    assert controller._protocol_start_pending is False
+    assert controller._protocol_lease_epoch is None
+    assert controller.flow_worker.execution_context[1] == "idle"
+
+
+def test_rejected_start_from_blocked_state_does_not_retain_flow_lease() -> None:
+    controller = _controller()
+    controller.protocol_executor.state.status = ProtocolExecutionStatus.BLOCKED
+
+    controller.handle_protocol_start_requested()
+
+    assert controller.protocol_executor.state.status == ProtocolExecutionStatus.BLOCKED
+    assert controller._protocol_start_pending is False
+    assert controller._protocol_lease_epoch is None
+    assert controller.flow_worker.execution_context[1] == "idle"
+
+
+def test_start_epoch_resync_failure_releases_flow_lease_and_stops() -> None:
+    controller = _controller()
+    original_acquire = controller.flow_worker.acquire_protocol_lease
+    calls = 0
+
+    def fail_second_acquire(epoch: int) -> bool:
+        nonlocal calls
+        calls += 1
+        return original_acquire(epoch) if calls == 1 else False
+
+    controller.flow_worker.acquire_protocol_lease = fail_second_acquire
+
+    controller.handle_protocol_start_requested()
+    controller._drain_actuation_if_not_running()
+
+    assert calls == 2
+    assert controller._protocol_lease_epoch is None
+    assert controller._protocol_start_pending is False
+    assert controller.flow_worker.execution_context[1] == "idle"
+    assert controller.actuation_interlock.read()[1].connected is False
+    assert controller.protocol_executor.state.status == ProtocolExecutionStatus.STOPPED
+
+
+def test_production_controller_rejects_start_when_owner_workers_are_stopped() -> None:
+    state = AppState(simulation_mode=True)
+    state.loaded_protocol = _document()
+    state.hardware_ready = True
+    state.flow_setpoints_ready = True
+    state.telemetry.connected = True
+    state.telemetry.safety_state = "SAFE"
+    controller = MainController(state, HardwareWorker(hal=MockHAL(), simulation=True))
+    controller.protocol_executor.reset(state.loaded_protocol)
+
+    controller.handle_protocol_start_requested()
+
+    assert controller.protocol_executor.state.status == ProtocolExecutionStatus.READY
+    assert controller.flow_worker.execution_context[1] == "idle"
+    assert "worker" in controller.state.status_message
+
+
+def test_active_epoch_drift_keeps_exact_flow_token_until_terminal_release() -> None:
+    controller = _controller()
+    controller.handle_protocol_start_requested()
+    held_epoch = controller._protocol_lease_epoch
+    assert held_epoch is not None
+
+    active = replace(
+        controller._protocol_snapshot,
+        status=ProtocolExecutionStatus.BLOCKED,
+        execution_epoch=held_epoch + 1,
+    )
+    controller._handle_protocol_snapshot(active)
+
+    assert controller._protocol_lease_epoch == held_epoch
+    assert controller.flow_worker.execution_context[:2] == (held_epoch, "protocol")
+
+    terminal = replace(
+        active,
+        status=ProtocolExecutionStatus.STOPPED,
+        execution_epoch=held_epoch + 2,
+    )
+    controller._handle_protocol_snapshot(terminal)
+
+    assert controller._protocol_lease_epoch is None
+    assert controller.flow_worker.execution_context[:2] == (
+        held_epoch + 2,
+        "idle",
+    )
+
+
+def test_failed_terminal_flow_release_keeps_fail_closed_lease_token() -> None:
+    controller = _controller()
+    controller.handle_protocol_start_requested()
+    held_epoch = controller._protocol_lease_epoch
+    assert held_epoch is not None
+    controller.flow_worker.release_protocol_lease = MagicMock(return_value=False)
+    terminal = replace(
+        controller._protocol_snapshot,
+        status=ProtocolExecutionStatus.STOPPED,
+        execution_epoch=held_epoch + 1,
+    )
+
+    controller._handle_protocol_snapshot(terminal)
+
+    assert controller._protocol_lease_epoch == held_epoch
+    interlock = controller.actuation_interlock.read()[1]
+    assert interlock.device_lease == "protocol"
+    assert interlock.connected is False
+    assert "租约释放失败" in controller.state.status_message

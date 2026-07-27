@@ -40,7 +40,10 @@ def duration_ms_to_ns(duration_ms: float) -> int:
         raise ValueError("duration_ms 必须是有限且大于 0 的数值。") from exc
     if not math.isfinite(value) or value <= 0:
         raise ValueError("duration_ms 必须是有限且大于 0 的数值。")
-    duration_ns = int(round(value * 1_000_000))
+    try:
+        duration_ns = int(round(value * 1_000_000))
+    except (OverflowError, ValueError) as exc:
+        raise ValueError("duration_ms 转换后的纳秒值超出有效范围。") from exc
     if duration_ns <= 0 or duration_ns > MAX_DURATION_NS:
         raise ValueError("duration_ms 转换后的纳秒值超出有效范围。")
     return duration_ns

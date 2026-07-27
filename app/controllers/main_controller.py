@@ -10,7 +10,7 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from PySide6.QtCore import QObject, QTimer, Signal, Slot
+from PySide6.QtCore import QObject, Qt, QThread, QTimer, Signal, Slot
 
 from app.models import (
     ActuationCategory,
@@ -22,6 +22,7 @@ from app.models import (
 )
 from app.services import (
     ActuationDOAdapter,
+    ActuationMetrics,
     AnalogInputFrame,
     BreathSampleBatch,
     CalibrationSession,
@@ -63,13 +64,17 @@ class MainController(QObject):
         worker: HardwareWorker,
         safety_manager=None,
         config: dict | None = None,
+        *,
+        allow_test_actuation_bridge: bool = False,
     ) -> None:
         super().__init__()
+        self.config = dict(config or {})
+        self._allow_test_actuation_bridge = bool(allow_test_actuation_bridge)
         self.state = state
         self.simulation_mode = state.simulation_mode
         self.worker = worker
         self.safety_manager = safety_manager or SafetyManager()
-        shutdown_cfg = config or {}
+        shutdown_cfg = dict(self.config)
         if "shutdown_record_path" not in shutdown_cfg:
             shutdown_cfg["shutdown_record_path"] = str(
                 Path.cwd() / "logs" / "last_shutdown_event.json"
@@ -125,7 +130,15 @@ class MainController(QObject):
             master_target=state.master_valve_line or None,
             master_writer=None,
         )
-        self.flow_worker = FlowWorker(self.flow_service, parent=self)
+        telemetry_hz = max(0.1, float(self.config.get("telemetry_hz", 5.0)))
+        self.flow_worker = FlowWorker(
+            self.flow_service,
+            parent=self,
+            airflow_poll_interval_s=1.0 / telemetry_hz,
+        )
+        airflow_sink = getattr(worker, "consume_airflow_sample", None)
+        if callable(airflow_sink):
+            self.flow_worker.set_airflow_sink(airflow_sink)
         self.actuation_worker = ActuationWorker(
             protocol_executor=self.protocol_executor,
             writer=self.actuation_adapter.execute,
@@ -134,6 +147,7 @@ class MainController(QObject):
             sample_transform=state.apply_calibration,
             normal_queue_capacity=int((config or {}).get("actuation_normal_queue_capacity", 256)),
             flow_submitter=self.flow_worker.submit,
+            metrics=ActuationMetrics(self.config),
             parent=self,
         )
         self.shutdown_service.actuation_worker = self.actuation_worker
@@ -141,10 +155,18 @@ class MainController(QObject):
         self.shutdown_service.actuation_timeout_ms = int(
             (config or {}).get("actuation_shutdown_timeout_ms", 2000)
         )
+        self.shutdown_service.emergency_close_timeout_ms = int(
+            (config or {}).get("actuation_emergency_close_timeout_ms", 500)
+        )
         if hasattr(worker, "set_actuation_sink"):
             worker.set_actuation_sink(
                 self.actuation_worker,
                 interlock_ingress=self.actuation_interlock,
+            )
+        if hasattr(worker, "set_self_check_coordinator"):
+            worker.set_self_check_coordinator(
+                before=self._pause_flow_owner_for_self_check,
+                after=self._resume_flow_owner_after_self_check,
             )
         self.calibration_session = CalibrationSession() # Story 2.6
         self._last_safety_state: SafetyState | None = None
@@ -155,6 +177,15 @@ class MainController(QObject):
         self._pending_plan_ui: dict[str, dict] = {}
         self._pending_flow_context: dict[str, dict] = {}
         self._last_flow_result: FlowApplyResult | None = None
+        self._pending_protocol_load = None
+        self._last_document_load_success: bool | None = None
+        self._protocol_lease_epoch: int | None = None
+        self._protocol_start_pending = False
+        self._protocol_master_prepare_pending = False
+        previous_shutdown = state.last_shutdown_event or {}
+        self._unsafe_shutdown_latched = bool(
+            previous_shutdown and previous_shutdown.get("result") != "success"
+        )
         self.view: MainWindow | None = None
         self.worker.telemetry_ready.connect(self.handle_telemetry)
         self.worker.status_message.connect(self.handle_status)
@@ -165,13 +196,16 @@ class MainController(QObject):
             self.worker.ttl_pulse.connect(self.handle_ttl_pulse)
         if hasattr(self.worker, "ttl_input_error"):
             self.worker.ttl_input_error.connect(self.handle_ttl_input_error)
-        if hasattr(self.worker, "ttl_arm_ack"):
-            self.worker.ttl_arm_ack.connect(self.actuation_worker.consume_ttl_arm_ack)
         self.actuation_worker.ttl_arm_requested.connect(
-            lambda epoch: self.worker.arm_ttl(arm_epoch=epoch)
+            self.worker.post_ttl_arm,
+            Qt.ConnectionType.DirectConnection,
         )
-        self.actuation_worker.ttl_disarm_requested.connect(self.worker.disarm_ttl)
+        self.actuation_worker.ttl_disarm_requested.connect(
+            self.worker.post_ttl_disarm,
+            Qt.ConnectionType.DirectConnection,
+        )
         self.actuation_worker.executor_result_ready.connect(self._publish_protocol_result)
+        self.actuation_worker.start_result_ready.connect(self._handle_protocol_start_result)
         self.actuation_worker.receipt_ready.connect(self._handle_actuation_receipt)
         self.actuation_worker.plan_result_ready.connect(self._handle_actuation_plan_result)
         self.flow_worker.result_ready.connect(self.actuation_worker.post_flow_result)
@@ -217,6 +251,9 @@ class MainController(QObject):
             self.view.calibration_view.threshold_changed.connect(self.update_breath_threshold)
             self.view.calibration_view.calibration_requested.connect(self.handle_calibration_request)
         if hasattr(self.view, "protocol_view"):
+            self.view.protocol_view.set_quality_target_ms(
+                float(self.config.get("actuation_jitter_target_ms", 20.0))
+            )
             self._render_protocol_execution_state()
         if not self._protocol_tick_timer.isActive():
             self._protocol_tick_timer.start()
@@ -226,18 +263,49 @@ class MainController(QObject):
                 self.state.hardware_variant,
             )
 
-    def start_worker(self) -> None:
-        if not self.flow_worker.isRunning():
+    def start_worker(self) -> bool:
+        if self._unsafe_shutdown_latched:
+            self._block_for_unsafe_shutdown(
+                "检测到未经人工确认的关闭失败；请点击连接以明确重试。"
+            )
+            return False
+        restart_epoch = int(self.actuation_worker.protocol_state.execution_epoch)
+        start_flow = not self.flow_worker.isRunning()
+        start_actuation = not self.actuation_worker.isRunning()
+        if start_flow:
+            if not self.flow_worker.prepare_restart(execution_epoch=restart_epoch):
+                self._latch_restart_failure("流量 owner 无法安全重绑定 execution epoch。")
+                return False
+        if start_actuation and not self.actuation_worker.prepare_restart():
+            if start_flow:
+                self.flow_worker.shutdown(timeout_ms=1)
+            self._latch_restart_failure(
+                "动作 owner 未完成 DO session 交接，已阻止硬件重启。"
+            )
+            return False
+        if start_flow:
             LOG.info("Starting serial flow worker thread")
-            self.flow_worker.prepare_restart()
             self.flow_worker.start()
-        if not self.actuation_worker.isRunning():
+        if start_actuation:
             LOG.info("Starting actuation worker thread")
-            self.actuation_worker.prepare_restart()
-            self.actuation_worker.start()
+            self.actuation_worker.start(QThread.Priority.HighPriority)
         if not self.worker.isRunning():
             LOG.info("Starting hardware worker thread")
-            self.worker.start()
+            self.worker.start(QThread.Priority.HighPriority)
+        return True
+
+    def _pause_flow_owner_for_self_check(self) -> bool:
+        """Give hardware self-check exclusive, bounded access to the serial port."""
+        timeout_ms = int(self.config.get("actuation_shutdown_timeout_ms", 2000))
+        return self.flow_worker.shutdown(timeout_ms)
+
+    def _resume_flow_owner_after_self_check(self) -> bool:
+        restart_epoch = int(self.actuation_worker.protocol_state.execution_epoch)
+        if not self.flow_worker.prepare_restart(execution_epoch=restart_epoch):
+            return False
+        if not self.flow_worker.isRunning():
+            self.flow_worker.start()
+        return True
 
     def shutdown(self) -> None:
         LOG.info("Shutting down worker thread")
@@ -692,6 +760,9 @@ class MainController(QObject):
 
     @Slot(list, bool)
     def handle_self_check(self, results: list, hardware_ready: bool) -> None:
+        if hardware_ready and self._unsafe_shutdown_latched:
+            LOG.warning("Ignoring self-check ready while unsafe shutdown latch is set")
+            hardware_ready = False
         self.state.update_self_check(results, hardware_ready)
         self.state.telemetry.connected = hardware_ready
         if hardware_ready:
@@ -709,8 +780,25 @@ class MainController(QObject):
             self.view.update_status(status)
             self.view.render_self_check(self.state.self_check_results, hardware_ready)
         if hardware_ready:
+            self.actuation_interlock.update(
+                connected=True,
+                hardware_ready=True,
+                safety_state=self.state.telemetry.safety_state,
+                ttl_input_ready=bool(getattr(self.worker, "ttl_input_ready", False)),
+            )
+            self._publish_interlock_from_state()
+            self.actuation_worker.post_readiness_update(
+                readiness=self._execution_readiness(),
+                timestamp=time.time(),
+            )
+            self._drain_actuation_if_not_running()
             self._reset_startup_flows_to_zero_async()
         else:
+            self.actuation_interlock.update(
+                connected=False,
+                hardware_ready=False,
+                ttl_input_ready=False,
+            )
             self._publish_interlock_from_state()
             self.actuation_worker.post_readiness_update(
                 readiness=self._execution_readiness(),
@@ -721,17 +809,23 @@ class MainController(QObject):
 
     def request_self_check(self) -> None:
         """Trigger self-check from UI, keep thread-safe."""
+        if self._unsafe_shutdown_latched:
+            self._unsafe_shutdown_latched = False
         self.state.update_status("正在重新自检...")
         if self.view:
             self.view.update_status(self.state.status_message)
         if not self.worker.isRunning():
-            self.start_worker()
+            if not self.start_worker():
+                return
         self.worker.request_self_check()
 
     def connect_hardware(self) -> None:
         if self._connect_in_progress:
             return
 
+        if self._unsafe_shutdown_latched:
+            # Clicking Connect is the explicit operator confirmation/retry.
+            self._unsafe_shutdown_latched = False
         self._connect_in_progress = True
         self.state.update_status("正在连接硬件并执行自检...")
         if self.view:
@@ -753,32 +847,144 @@ class MainController(QObject):
             LOG.warning("Protocol parse failed | path=%s | error=%s", path, exc)
             return False
 
+        if not self.actuation_worker.isRunning() and not self._allow_test_actuation_bridge:
+            message = "动作 worker 未运行，协议未加载。"
+            self.state.update_status(message)
+            if self.view:
+                self.view.update_status(message)
+            LOG.error("ActuationWorker unavailable; refusing protocol load")
+            return False
+
+        if self._pending_protocol_load is not None:
+            message = "已有协议正在等待安全清理确认，请稍后再加载。"
+            self.state.update_status(message)
+            if self.view:
+                self.view.update_status(message)
+            return False
+        self._pending_protocol_load = document
+        self._last_document_load_success = None
         self.actuation_worker.post_load(document)
         self._drain_actuation_if_not_running()
-        if self.state.loaded_protocol is not document and not self.actuation_worker.isRunning():
-            return False
-        self._publish_interlock_from_state()
-        message = f"协议加载成功：{document.source_name}，共 {len(document.trials)} 个 trial"
+        if self._last_document_load_success is not None:
+            return self._last_document_load_success
+        message = f"协议已解析，正在等待安全清理后加载：{document.source_name}"
         self.state.update_status(message)
         if self.view:
             self.view.update_status(message)
-            if hasattr(self.view, "protocol_view"):
-                self.view.protocol_view.render_protocol(document)
-                self._render_protocol_execution_state()
-        LOG.info("Protocol loaded | path=%s | trials=%d", path, len(document.trials))
         return True
 
     @Slot()
     def handle_protocol_start_requested(self) -> None:
+        if self._unsafe_shutdown_latched:
+            self._block_for_unsafe_shutdown(
+                "上次关闭失败尚未人工确认；禁止预备主阀或启动协议。"
+            )
+            return
+        if not self.actuation_worker.isRunning() and not self._allow_test_actuation_bridge:
+            message = "动作 worker 未运行，已保守阻止协议开始。"
+            self.state.update_status(message)
+            if self.view:
+                self.view.update_status(message)
+            LOG.error("ActuationWorker unavailable; refusing protocol start")
+            return
+        if not self.flow_worker.isRunning() and not self._allow_test_actuation_bridge:
+            message = "流量 worker 未运行，已保守阻止协议开始。"
+            self.state.update_status(message)
+            if self.view:
+                self.view.update_status(message)
+            LOG.error("FlowWorker unavailable; refusing protocol start")
+            return
+        if self._protocol_start_pending or self._protocol_master_prepare_pending:
+            message = "协议启动或主阀预备仍在等待硬件确认，请勿重复提交。"
+            self.state.update_status(message)
+            if self.view:
+                self.view.update_status(message)
+            return
+        open_channels = [
+            channel
+            for channel in self.valve_service.active_map()
+            if self.valve_service.is_open(channel)
+        ]
+        if open_channels:
+            message = (
+                "检测到手动/预检阀仍处于开启状态，已阻止协议开始；"
+                f"请先安全关闭阀门：{open_channels}"
+            )
+            self.state.update_status(message)
+            if self.view:
+                self.view.update_status(message)
+            LOG.warning("Protocol start blocked by open manual valves: %s", open_channels)
+            return
         document = (
             self.state.loaded_protocol
             if not self._protocol_snapshot.has_protocol
             else None
         )
+        readiness = self._execution_readiness()
+        reason = readiness.rejection_reason(
+            has_protocol=bool(document or self._protocol_snapshot.has_protocol)
+        )
+        if reason:
+            self.state.update_status(reason)
+            if self.view:
+                self.view.update_status(reason)
+            return
+        if (
+            self.actuation_worker.protocol_state.active_valve is None
+            and not self.actuation_worker.protocol_state.possibly_open_valves
+        ):
+            self.actuation_interlock.clear_unsafe_latch()
+        ok, plan_or_message = self.valve_service.plan_master_prepare(
+            safety_state=self._build_current_safety_state()
+        )
+        if not ok:
+            message = str(plan_or_message)
+            self.state.update_status(message)
+            if self.view:
+                self.view.update_status(message)
+            LOG.warning("Protocol start blocked by master preparation guard: %s", message)
+            return
+        assert isinstance(plan_or_message, ValveWritePlan)
+        if plan_or_message.steps:
+            self._protocol_master_prepare_pending = True
+            message = "正在预备主阀；仅在硬件成功回执后布防协议。"
+            self.state.update_status(message)
+            if self.view:
+                self.view.update_status(message)
+            self._submit_valve_plan(
+                plan_or_message,
+                category=ActuationCategory.WARMUP,
+                ui_context={"kind": "protocol_master_prepare", "document": document},
+            )
+            return
+        self._begin_protocol_start(document=document)
+
+    def _begin_protocol_start(self, *, document) -> None:
+        """Acquire the serial lease and arm only after master preparation is confirmed."""
+        readiness = self._execution_readiness()
+        reason = readiness.rejection_reason(
+            has_protocol=bool(document or self._protocol_snapshot.has_protocol)
+        )
+        if reason:
+            self.state.update_status(reason)
+            if self.view:
+                self.view.update_status(reason)
+            return
+        lease_epoch = int(self._protocol_snapshot.execution_epoch)
+        if not self.flow_worker.acquire_protocol_lease(lease_epoch):
+            message = "仍有流量命令正在写入硬件，已阻止协议开始；请等待串口确认后重试。"
+            self.state.update_status(message)
+            if self.view:
+                self.view.update_status(message)
+            LOG.warning("Protocol start blocked by in-flight flow command")
+            return
+        self._protocol_lease_epoch = lease_epoch
+        self._protocol_start_pending = True
         self._publish_interlock_from_state(device_lease="protocol")
         self.actuation_worker.post_start(
             document=document,
             readiness=self._execution_readiness(),
+            lease_epoch=lease_epoch,
         )
         self._drain_actuation_if_not_running()
 
@@ -864,6 +1070,13 @@ class MainController(QObject):
         )
         self._handle_shutdown_event(event, success_message="重置完成：阀门关闭，准备重新自检")
 
+        if event.get("result") != "success":
+            self._block_for_unsafe_shutdown(
+                "重置关闭失败，物理阀状态未知；请人工检查后点击连接明确重试。"
+            )
+            self._refresh_toolbar_state()
+            return
+
         if hasattr(self, "valve_service"):
             self.valve_service.reset_cached_state()
         if self.view and hasattr(self.view, "pretest_view"):
@@ -882,7 +1095,10 @@ class MainController(QObject):
 
     def _start_or_request_self_check(self) -> None:
         was_running = self.worker.isRunning()
-        self.start_worker()
+        if not self.start_worker():
+            self._connect_in_progress = False
+            self._refresh_toolbar_state()
+            return
         if was_running:
             self.worker.request_self_check()
 
@@ -1008,8 +1224,8 @@ class MainController(QObject):
                         "monotonic_ns": transition.monotonic_ns,
                         "sample_value": transition.sample_value,
                         "gate_state": transition.state,
-                        "inhale": self.gating_service.inhale_threshold,
-                        "exhale": self.gating_service.exhale_threshold,
+                        "inhale": self.state.inhale_threshold,
+                        "exhale": self.state.exhale_threshold,
                         "safety_state": transition.safety_state,
                     }
                 )
@@ -1029,6 +1245,55 @@ class MainController(QObject):
             self._render_protocol_execution_state()
         self._publish_interlock_from_state()
 
+    @Slot(object)
+    def _handle_protocol_start_result(self, ack) -> None:
+        """Settle only the explicit start acknowledgement, never unrelated results."""
+        if not self._protocol_start_pending or self._protocol_lease_epoch is None:
+            return
+        if ack.lease_epoch != self._protocol_lease_epoch:
+            LOG.warning(
+                "Ignoring stale protocol start ack: held=%s ack_lease=%s",
+                self._protocol_lease_epoch,
+                ack.lease_epoch,
+            )
+            return
+        if (
+            bool(ack.accepted)
+            and ack.execution_epoch > self._protocol_lease_epoch
+        ):
+            if self.flow_worker.acquire_protocol_lease(ack.execution_epoch):
+                self._protocol_lease_epoch = ack.execution_epoch
+            else:
+                message = "流量 owner 无法同步协议 execution epoch；协议已请求安全停止。"
+                LOG.critical(
+                    "%s target=%s",
+                    message,
+                    ack.execution_epoch,
+                )
+                self.state.update_status(message)
+                released = self.flow_worker.release_protocol_lease(
+                    self._protocol_lease_epoch,
+                    next_execution_epoch=ack.execution_epoch,
+                )
+                if not released:
+                    LOG.critical("Failed to release the unsynchronized FlowWorker lease")
+                self._protocol_lease_epoch = None
+                self.actuation_interlock.update(
+                    connected=False,
+                    flow_setpoints_ready=False,
+                    device_lease="idle" if released else "protocol",
+                )
+                self.actuation_worker.post_interlock_changed(timestamp=time.time())
+                self.actuation_worker.post_stop(message=message)
+        else:
+            self.flow_worker.release_protocol_lease(
+                self._protocol_lease_epoch,
+                next_execution_epoch=ack.execution_epoch,
+            )
+            self._protocol_lease_epoch = None
+        self._protocol_start_pending = False
+        self._publish_interlock_from_state()
+
     def _execution_readiness(self) -> ProtocolExecutionReadiness:
         return ProtocolExecutionReadiness(
             connected=bool(self.state.telemetry.connected),
@@ -1040,30 +1305,27 @@ class MainController(QObject):
 
     def _publish_interlock_from_state(self, *, device_lease: str | None = None) -> None:
         current = self.actuation_interlock.read()[1]
-        lease = device_lease
-        if lease is None:
-            lease = (
-                "protocol"
-                if self._protocol_snapshot.status.value
-                in {"waiting_trigger", "waiting_exhale", "triggered", "paused", "blocked"}
-                else "idle"
-            )
-        self.actuation_interlock.publish(
-            InterlockSnapshot(
-                connected=bool(self.state.telemetry.connected),
-                hardware_ready=bool(self.state.hardware_ready),
-                flow_setpoints_ready=bool(self.state.flow_setpoints_ready),
-                safety_state=self.state.telemetry.safety_state,
-                ttl_input_ready=bool(getattr(self.worker, "ttl_input_ready", False)),
-                has_protocol=bool(
-                    self.state.loaded_protocol or self._protocol_snapshot.has_protocol
-                ),
-                device_lease=lease or current.device_lease,
-            )
+        lease = device_lease or (
+            "protocol" if self._protocol_lease_epoch is not None else "idle"
+        )
+        self.actuation_interlock.update(
+            has_protocol=bool(
+                self.state.loaded_protocol or self._protocol_snapshot.has_protocol
+            ),
+            device_lease=lease or current.device_lease,
         )
 
     def _drain_actuation_if_not_running(self) -> None:
-        if not self.actuation_worker.isRunning():
+        if self.actuation_worker.isRunning():
+            return
+        if self.worker.isRunning():
+            message = "动作 worker 未运行，已保守阻止请求；请停止并重新连接硬件。"
+            self.state.update_status(message)
+            if self.view:
+                self.view.update_status(message)
+            LOG.error("ActuationWorker unavailable; refusing UI-thread DO ownership")
+            return
+        if self._allow_test_actuation_bridge:
             self.actuation_worker.process_ready_with_do_ownership()
 
     def _submit_flow_intent(
@@ -1086,9 +1348,19 @@ class MainController(QObject):
             source=source,
         )
         self._drain_actuation_if_not_running()
-        if not self.flow_worker.isRunning():
+        if not self.flow_worker.isRunning() and self._allow_test_actuation_bridge:
             self.flow_worker.process_ready()
             self._drain_actuation_if_not_running()
+        elif not self.flow_worker.isRunning():
+            return FlowApplyResult(
+                False,
+                "流量 worker 未运行，已保守阻止串口命令。",
+                float(a),
+                float(b),
+                effective_c,
+                float(a) + (effective_c if mode in {"rest", "zero"} else 0.0),
+                "worker_unavailable",
+            )
         if self._last_flow_result is not None:
             return self._last_flow_result
         return FlowApplyResult(
@@ -1121,10 +1393,33 @@ class MainController(QObject):
     @Slot(object)
     def _handle_flow_command_result(self, wrapped) -> None:
         result = wrapped.result
-        self._last_flow_result = result
-        self.state.flow_setpoints_ready = bool(result.success)
         context = self._pending_flow_context.pop(wrapped.command.source, {})
         kind = context.get("kind")
+        if getattr(wrapped, "stale", False):
+            message = result.message or "旧 execution epoch 的流量命令已取消。"
+            if kind == "startup_zero" and result.success:
+                # A confirmed zero-flow write remains a valid conservative
+                # startup outcome even if protocol readiness advanced while
+                # the serial device was completing the bounded write.
+                self._startup_zero_completed.emit(result)
+                return
+            self.state.update_status(message)
+            if self.view:
+                self.view.update_status(message)
+            if kind == "apply" and self.view and hasattr(self.view, "pretest_view"):
+                self.view.pretest_view.set_applying(False)
+                self.view.pretest_view.set_flow_message(message)
+            elif kind == "pretest":
+                self._pretest_sequence_completed.emit(
+                    str(context.get("mode", "")),
+                    list(context.get("channels", [])),
+                    result,
+                    False,
+                    message,
+                )
+            return
+        self._last_flow_result = result
+        self.state.flow_setpoints_ready = bool(result.success)
         if kind == "startup_zero":
             self._startup_zero_completed.emit(result)
             return
@@ -1233,6 +1528,27 @@ class MainController(QObject):
                 bool(result.get("success")),
                 message,
             )
+        elif context.get("kind") == "protocol_master_prepare":
+            self._protocol_master_prepare_pending = False
+            if bool(result.get("success")):
+                self._begin_protocol_start(document=context.get("document"))
+            else:
+                message = message or "主阀预备失败，协议未布防。"
+        elif context.get("kind") in {"manual", "sequence"}:
+            pretest = (
+                self.view.pretest_view
+                if self.view and hasattr(self.view, "pretest_view")
+                else None
+            )
+            if pretest is not None:
+                for channel in context.get("channels", []):
+                    channel_id = int(channel)
+                    pretest.set_valve_state(
+                        channel_id,
+                        self.valve_service.is_open(channel_id),
+                    )
+                pretest.set_master_state(self.valve_service.master_is_open())
+                pretest.show_warning("" if bool(result.get("success")) else message)
         if message:
             self.state.update_status(message)
             if self.view:
@@ -1241,14 +1557,75 @@ class MainController(QObject):
     @Slot(object)
     def _handle_protocol_snapshot(self, snapshot) -> None:
         self._protocol_snapshot = snapshot
+        active = snapshot.status.value in {
+            "waiting_trigger",
+            "waiting_exhale",
+            "triggered",
+            "paused",
+            "blocked",
+        }
+        if active:
+            # The controller token names the epoch actually held by FlowWorker.
+            # A later protocol snapshot cannot transfer that lease by itself.
+            pass
+        elif (
+            self._protocol_lease_epoch is not None
+            and not self._protocol_start_pending
+            and snapshot.execution_epoch >= self._protocol_lease_epoch
+        ):
+            released = self.flow_worker.release_protocol_lease(
+                self._protocol_lease_epoch,
+                next_execution_epoch=snapshot.execution_epoch,
+            )
+            if released:
+                self._protocol_lease_epoch = None
+            else:
+                message = "流量 owner 租约释放失败；设备保持保守阻断。"
+                LOG.critical(
+                    "%s held=%s terminal=%s",
+                    message,
+                    self._protocol_lease_epoch,
+                    snapshot.execution_epoch,
+                )
+                self.state.update_status(message)
+                self.actuation_interlock.update(
+                    connected=False,
+                    flow_setpoints_ready=False,
+                    device_lease="protocol",
+                )
+        self._publish_interlock_from_state()
         if self.view and hasattr(self.view, "protocol_view"):
             self.view.protocol_view.render_execution_state(snapshot)
 
     @Slot(object)
     def _handle_document_result(self, result: dict) -> None:
-        if result.get("success"):
-            self.state.loaded_protocol = result.get("document")
+        document = result.get("document")
+        success = bool(result.get("success"))
+        self._last_document_load_success = success
+        self._pending_protocol_load = None
+        if success:
+            self.state.loaded_protocol = document
             self._publish_interlock_from_state()
+            message = f"协议加载成功：{document.source_name}，共 {len(document.trials)} 个 trial"
+            self.state.update_status(message)
+            if self.view:
+                self.view.update_status(message)
+                if hasattr(self.view, "protocol_view"):
+                    self.view.protocol_view.render_protocol(document)
+                    self._render_protocol_execution_state()
+            LOG.info(
+                "Protocol loaded | path=%s | trials=%d",
+                document.source_path,
+                len(document.trials),
+            )
+            return
+        message = str(result.get("message") or "安全清理未确认，协议未替换。")
+        self.state.update_status(message)
+        if self.view:
+            self.view.update_status(message)
+            if hasattr(self.view, "render_actuation_alert"):
+                self.view.render_actuation_alert(message, severe=True)
+        LOG.error("Protocol load rejected after cleanup failure: %s", message)
 
     def _render_protocol_execution_state(self) -> None:
         if self.view and hasattr(self.view, "protocol_view"):
@@ -1454,6 +1831,7 @@ class MainController(QObject):
         if ts:
             self.state.telemetry.timestamp = ts
         if result and result != "success":
+            self._unsafe_shutdown_latched = True
             self.state.hardware_ready = False
             self.state.telemetry.connected = False
             message = f"上次关闭未完成（{source}）：{reason or '请重新自检确认安全'}"
@@ -1463,6 +1841,7 @@ class MainController(QObject):
 
     def _handle_shutdown_event(self, event: dict, *, success_message: str) -> None:
         success = event.get("result") == "success"
+        self._unsafe_shutdown_latched = not success
         self.state.flow_setpoints_ready = False
         message = (
             success_message
@@ -1474,6 +1853,31 @@ class MainController(QObject):
             self.view.update_status(message)
             self.view.render_telemetry(self.state.telemetry)
             self.view.render_last_shutdown(event)
+
+    def _latch_restart_failure(self, reason: str) -> None:
+        self._unsafe_shutdown_latched = True
+        self._block_for_unsafe_shutdown(reason)
+        LOG.critical(reason)
+
+    def _block_for_unsafe_shutdown(self, message: str) -> None:
+        self.state.hardware_ready = False
+        self.state.telemetry.connected = False
+        self.state.flow_setpoints_ready = False
+        self._connect_in_progress = False
+        self.actuation_interlock.update(
+            connected=False,
+            hardware_ready=False,
+            flow_setpoints_ready=False,
+            ttl_input_ready=False,
+        )
+        self.actuation_worker.post_readiness_update(
+            readiness=self._execution_readiness(),
+            timestamp=time.time(),
+        )
+        self.state.update_status(message)
+        if self.view:
+            self.view.update_status(message)
+            self.view.render_telemetry(self.state.telemetry)
 
     def update_breath_threshold(self, name: str, value: float) -> None:
         old_val = 0.0
@@ -1488,11 +1892,12 @@ class MainController(QObject):
         else:
             return
 
-        # Update service
-        self.gating_service.set_thresholds(
-            self.state.inhale_threshold,
-            self.state.exhale_threshold
+        # GatingService belongs to ActuationWorker; update it through an owner intent.
+        self.actuation_worker.post_gating_thresholds(
+            inhale_threshold=self.state.inhale_threshold,
+            exhale_threshold=self.state.exhale_threshold,
         )
+        self._drain_actuation_if_not_running()
 
         # Log event (AC5)
         log_entry = {
@@ -1699,7 +2104,9 @@ class MainController(QObject):
 
     def _update_pretest_view_safety(self, safety_state: SafetyState) -> None:
         if self.view and hasattr(self.view, "pretest_view"):
-            disabled = safety_state.state != "SAFE"
+            # LOW_FLOW must still permit an idle MFC recovery write.  Valve
+            # OPEN remains independently blocked by ActuationWorker/ValveService.
+            disabled = safety_state.state not in {"SAFE", "LOW_FLOW"}
             self.view.pretest_view.apply_safety_state(
                 safety_state.state,
                 safety_state.reason,

@@ -129,6 +129,7 @@ def test_controller_load_failure_keeps_previous_protocol(qt_app) -> None:
         state,
         worker,
         safety_manager=SafetyManager(low_flow_threshold=0.2),
+        allow_test_actuation_bridge=True,
     )
 
     assert controller.handle_protocol_file_selected(FIXTURES / "valid_protocol.csv") is True

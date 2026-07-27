@@ -62,11 +62,12 @@ def test_worker_uses_hal_for_signal_generation(qt_app):
     assert captured == [0.42]
     hal.read_ai0.assert_called_once_with(1.23)
 
-    worker.write_digital(device=None, line="L0", state=True)
-    hal.write_digital.assert_called_once_with(device=None, line="L0", state=True)
+    assert worker.write_digital(device=None, line="L0", state=True) is False
+    hal.write_digital.assert_not_called()
 
-    assert worker._read_flow() == 123.0
-    hal.read_flow.assert_called_once()
+    worker.consume_airflow_sample(123.0, 1.23)
+    assert worker._read_flow(1.23) == 123.0
+    hal.read_flow.assert_not_called()
 
     worker._run_self_check()
     hal.self_check.assert_called_once()

@@ -103,7 +103,12 @@ class ActuationInterlockIngress:
     def update(self, **changes) -> int:
         with self._lock:
             candidate = replace(self._snapshot, **changes)
-        return self.publish(candidate)
+            if candidate != self._snapshot:
+                self._snapshot = candidate
+                self._generation += 1
+            if candidate.unsafe_reason():
+                self._unsafe_latched = True
+            return self._generation
 
     def publish_raw_telemetry(
         self,
@@ -119,24 +124,53 @@ class ActuationInterlockIngress:
         device_lease: str,
     ) -> int:
         with self._lock:
-            previous = self._snapshot.safety_state
-        safety_state = self._safety_manager.evaluate(
-            airflow,
-            timestamp=timestamp,
-            previous_state=previous,
-            hardware_state=hardware_state,
-        )
-        return self.publish(
-            InterlockSnapshot(
+            safety_state = self._safety_manager.evaluate(
+                airflow,
+                timestamp=timestamp,
+                previous_state=self._snapshot.safety_state,
+                hardware_state=hardware_state,
+            )
+            candidate = InterlockSnapshot(
                 connected=bool(connected),
                 hardware_ready=bool(hardware_ready),
-                flow_setpoints_ready=bool(flow_setpoints_ready),
+                # These fields are owned by flow/protocol producers.  Preserve
+                # their latest values even if the telemetry caller read an
+                # older snapshot before entering this atomic publication.
+                flow_setpoints_ready=self._snapshot.flow_setpoints_ready,
                 safety_state=safety_state,
                 ttl_input_ready=bool(ttl_input_ready),
-                has_protocol=bool(has_protocol),
-                device_lease=str(device_lease),
+                has_protocol=self._snapshot.has_protocol,
+                device_lease=self._snapshot.device_lease,
             )
-        )
+            if candidate != self._snapshot:
+                self._snapshot = candidate
+                self._generation += 1
+            if candidate.unsafe_reason():
+                self._unsafe_latched = True
+            return self._generation
+
+    def publish_airflow(
+        self,
+        *,
+        airflow: float,
+        timestamp: float,
+        hardware_state: str | None = None,
+    ) -> int:
+        """Atomically update only airflow-derived safety, preserving other owners."""
+        with self._lock:
+            safety_state = self._safety_manager.evaluate(
+                airflow,
+                timestamp=timestamp,
+                previous_state=self._snapshot.safety_state,
+                hardware_state=hardware_state,
+            )
+            candidate = replace(self._snapshot, safety_state=safety_state)
+            if candidate != self._snapshot:
+                self._snapshot = candidate
+                self._generation += 1
+            if candidate.unsafe_reason():
+                self._unsafe_latched = True
+            return self._generation
 
     def read(self) -> tuple[int, InterlockSnapshot, bool]:
         with self._lock:
@@ -153,6 +187,16 @@ class ActuationInterlockIngress:
 Writer = Callable[[ActuationCommand], ActuationReceipt]
 
 
+@dataclass(frozen=True, slots=True)
+class ProtocolStartAck:
+    accepted: bool
+    lease_epoch: int
+    previous_epoch: int
+    execution_epoch: int
+    status: ProtocolExecutionStatus
+    message: str = ""
+
+
 class ActuationWorker(QThread):
     """Single owner for protocol actuation state, quality metrics and DO scheduling."""
 
@@ -160,6 +204,7 @@ class ActuationWorker(QThread):
     snapshot_ready = Signal(object)
     status_message = Signal(str)
     executor_result_ready = Signal(object)
+    start_result_ready = Signal(object)
     plan_result_ready = Signal(object)
     flow_result_ready = Signal(object)
     document_result_ready = Signal(object)
@@ -211,12 +256,14 @@ class ActuationWorker(QThread):
         self._messages: deque[tuple[str, dict[str, Any]]] = deque()
         self._deadline_heap: list[tuple[int, int, int, str, dict[str, Any]]] = []
         self._emergency: deque[ActuationCommand] = deque()
-        self._emergency_channels: set[int] = set()
         self._sequence = 1_000_000
         self._running = False
         self._accepting = True
         self._pending_ttl_arm_epoch: int | None = None
+        self._ttl_hardware_armed_epoch: int | None = None
         self._seen_receipts: set[str] = set()
+        self._seen_receipt_order: deque[tuple[str, int]] = deque()
+        self._receipt_history_limit = max(1024, self._normal_capacity * 8)
         self._commands_by_id: dict[str, ActuationCommand] = {}
         self._plan_contexts: dict[str, dict[str, Any]] = {}
         self._plan_by_command: dict[str, str] = {}
@@ -225,6 +272,8 @@ class ActuationWorker(QThread):
         self._shutdown_close_started = False
         self._do_handed_off = True
         self._pending_safe_transition: tuple[str, dict[str, Any]] | None = None
+        self._safe_transition_close_pending: set[str] = set()
+        self._unsafe_close_generation: int | None = None
 
     @property
     def emergency_queue_size(self) -> int:
@@ -240,6 +289,16 @@ class ActuationWorker(QThread):
         """Owner-side enqueue. External producers should post intents, not mutate state."""
         with self._condition:
             if not self._accepting and command.category != ActuationCategory.SAFETY:
+                if (
+                    command.category == ActuationCategory.NORMAL
+                    and command.action == ActuationAction.CLOSE
+                ):
+                    self.protocol_state.possibly_open_valves.add(command.valve)
+                    self._clear_cancelled_pending(command)
+                    self.submit_emergency_close(
+                        command.valve,
+                        reason="普通关闭在停止接单后被拒绝，已升级为紧急关闭。",
+                    )
                 return False
             if command.category == ActuationCategory.SAFETY:
                 self._commands_by_id[command.command_id] = command
@@ -247,7 +306,24 @@ class ActuationWorker(QThread):
                 self._condition.notify_all()
                 return True
             if len(self._normal_heap) >= self._normal_capacity:
-                self._block("动作队列已满，已阻断新的阀门打开；请停止并检查系统负载。")
+                reason = "动作队列已满，已取消普通动作并阻断协议；请停止并检查系统负载。"
+                if command.category == ActuationCategory.NORMAL:
+                    if command.action == ActuationAction.CLOSE:
+                        self.protocol_state.possibly_open_valves.add(command.valve)
+                    self.invalidate_execution(reason=reason)
+                    self.receipt_ready.emit(
+                        ActuationReceipt.from_write(
+                            command=command,
+                            started_ns=None,
+                            actual_ns=None,
+                            wall_timestamp=self._wall_clock(),
+                            result=ActuationResult.CANCELLED,
+                            message=reason,
+                            stale=True,
+                        )
+                    )
+                else:
+                    self._block(reason)
                 return False
             if command.category == ActuationCategory.NORMAL:
                 if command.action == ActuationAction.OPEN:
@@ -272,8 +348,15 @@ class ActuationWorker(QThread):
             self._condition.notify_all()
             return True
 
-    def post_start(self, *, document, readiness) -> None:
-        self._post_message("start", {"document": document, "readiness": readiness})
+    def post_start(self, *, document, readiness, lease_epoch: int | None = None) -> None:
+        self._post_message(
+            "start",
+            {
+                "document": document,
+                "readiness": readiness,
+                "lease_epoch": lease_epoch,
+            },
+        )
 
     def post_load(self, document) -> None:
         self._post_message("load", {"document": document})
@@ -314,6 +397,24 @@ class ActuationWorker(QThread):
             {"readiness": readiness, "timestamp": timestamp},
         )
 
+    def post_interlock_changed(self, *, timestamp: float | None = None) -> None:
+        """Wake the owner after a producer published raw interlock state."""
+        self._post_message("interlock_changed", {"timestamp": timestamp})
+
+    def post_gating_thresholds(
+        self,
+        *,
+        inhale_threshold: float,
+        exhale_threshold: float,
+    ) -> None:
+        self._post_message(
+            "gating_thresholds",
+            {
+                "inhale_threshold": float(inhale_threshold),
+                "exhale_threshold": float(exhale_threshold),
+            },
+        )
+
     def post_snapshot_request(self) -> None:
         self._post_message("snapshot", {})
 
@@ -345,19 +446,103 @@ class ActuationWorker(QThread):
 
     def post_flow_result(self, result: FlowCommandResult) -> None:
         self._post_message("flow_result", {"flow_result": result})
-        if not self.isRunning():
-            self.process_ready_with_do_ownership()
+        if not self.isRunning() and self._writer_hal() is None:
+            self.process_ready()
 
     def _post_message(self, kind: str, payload: dict[str, Any]) -> None:
+        rejected = False
         with self._condition:
-            self._messages.append((kind, payload))
-            self._condition.notify_all()
+            if not self._accepting:
+                rejected = True
+            else:
+                self._messages.append((kind, payload))
+                self._condition.notify_all()
+        if rejected:
+            self._reject_stopped_message(kind, payload)
+
+    def _reject_stopped_message(self, kind: str, payload: dict[str, Any]) -> None:
+        """Give correlated intents a terminal result instead of replaying them after restart."""
+        message = "动作线程已停止接单，请在硬件恢复后重新发起请求。"
+        if kind == "start":
+            current_epoch = int(self.protocol_state.execution_epoch)
+            self.start_result_ready.emit(
+                ProtocolStartAck(
+                    accepted=False,
+                    lease_epoch=(
+                        current_epoch
+                        if payload.get("lease_epoch") is None
+                        else int(payload["lease_epoch"])
+                    ),
+                    previous_epoch=current_epoch,
+                    execution_epoch=current_epoch,
+                    status=self.protocol_state.status,
+                    message=message,
+                )
+            )
+        elif kind == "load":
+            self.document_result_ready.emit(
+                {
+                    "document": payload["document"],
+                    "success": False,
+                    "message": message,
+                }
+            )
+        elif kind == "valve_plan":
+            self.plan_result_ready.emit(
+                {
+                    "request_id": payload["request_id"],
+                    "success": False,
+                    "message": message,
+                }
+            )
+        elif kind == "flow_intent":
+            with self._condition:
+                self._sequence += 1
+                sequence = self._sequence
+            command = FlowCommand(
+                command_id=f"flow-{self.protocol_state.execution_epoch}-{sequence}",
+                execution_epoch=self.protocol_state.execution_epoch,
+                sequence=sequence,
+                mode=str(payload["mode"]),
+                a=float(payload["a"]),
+                b=float(payload["b"]),
+                c=float(payload["c"]),
+                source=str(payload["source"]),
+            )
+            result = FlowApplyResult(
+                False,
+                message,
+                command.a,
+                command.b,
+                command.c,
+                command.a + command.c,
+                "rejected",
+            )
+            self.flow_result_ready.emit(FlowCommandResult(command=command, result=result))
+        elif kind == "flow_result":
+            self.flow_result_ready.emit(replace(payload["flow_result"], stale=True))
 
     def submit_emergency_close(self, valve: int, *, reason: str) -> ActuationCommand:
+        return self._submit_emergency_close_target(
+            valve,
+            reason=reason,
+            target_device=None,
+            target_line=None,
+        )
+
+    def _submit_emergency_close_target(
+        self,
+        valve: int,
+        *,
+        reason: str,
+        target_device: str | None,
+        target_line: str | None,
+        prefix: str = "safety-close",
+    ) -> ActuationCommand:
         with self._condition:
             self._sequence += 1
             command = ActuationCommand(
-                command_id=f"safety-close-{valve}-{self._sequence}",
+                command_id=f"{prefix}-{valve}-{self._sequence}",
                 execution_epoch=self.protocol_state.execution_epoch,
                 arm_epoch=self.protocol_state.arm_epoch,
                 sequence=self._sequence,
@@ -374,11 +559,46 @@ class ActuationWorker(QThread):
                 duration_ns=None,
                 wall_timestamp=float(self._wall_clock()),
                 safety_generation=self.interlock.read()[0],
+                target_device=target_device,
+                target_line=target_line,
             )
+            self._commands_by_id[command.command_id] = command
             self._enqueue_emergency_locked(command)
             self.protocol_state.quality_block_reason = reason
             self._condition.notify_all()
             return command
+
+    def _submit_all_configured_closes(
+        self,
+        *,
+        reason: str,
+        prefix: str = "safety-close-all",
+    ) -> list[ActuationCommand]:
+        if self.valve_service is None:
+            valves = set(self.protocol_state.possibly_open_valves)
+            if self.protocol_state.active_valve is not None:
+                valves.add(self.protocol_state.active_valve)
+            return [self.submit_emergency_close(valve, reason=reason) for valve in sorted(valves)]
+        steps = self.valve_service.emergency_close_steps()
+        commands = [
+            self._submit_emergency_close_target(
+                step.logical_valve,
+                reason=reason,
+                target_device=step.device,
+                target_line=step.line,
+                prefix=prefix,
+            )
+            for step in steps
+        ]
+        covered = {step.logical_valve for step in steps}
+        conservative = set(self.protocol_state.possibly_open_valves)
+        if self.protocol_state.active_valve is not None:
+            conservative.add(self.protocol_state.active_valve)
+        commands.extend(
+            self.submit_emergency_close(valve, reason=reason)
+            for valve in sorted(conservative - covered)
+        )
+        return commands
 
     def process_ready(self, *, max_items: int | None = None) -> int:
         processed = 0
@@ -401,21 +621,27 @@ class ActuationWorker(QThread):
         hal = self._writer_hal()
         if hal is not None and not hal.prepare_do_output():
             return 0
+        if hal is not None:
+            self._do_handed_off = False
+        processed = 0
         try:
-            return self.process_ready(max_items=max_items)
+            processed = self.process_ready(max_items=max_items)
         finally:
             if hal is not None:
-                hal.release_do_output()
+                self._do_handed_off = hal.release_do_output() is True
+        return processed
 
     def consume_receipt(self, receipt: ActuationReceipt) -> None:
         if receipt.command_id in self._seen_receipts:
             if receipt.action == ActuationAction.CLOSE and receipt.result == ActuationResult.SUCCESS:
                 self._confirm_closed(receipt.valve)
             return
-        self._seen_receipts.add(receipt.command_id)
+        self._remember_receipt(receipt)
         source_command = self._commands_by_id.get(receipt.command_id)
 
         if receipt.category == ActuationCategory.SAFETY:
+            if self.valve_service is not None:
+                self.valve_service.commit_receipt(receipt)
             if receipt.result == ActuationResult.SUCCESS:
                 self._confirm_closed(receipt.valve)
             else:
@@ -430,14 +656,17 @@ class ActuationWorker(QThread):
                     if receipt.result != ActuationResult.SUCCESS:
                         self._shutdown_close_failed = True
                     self._condition.notify_all()
+                self._safe_transition_close_pending.discard(receipt.command_id)
             self._handle_plan_receipt(receipt)
             self.receipt_ready.emit(receipt)
             self._maybe_finalize_safe_transition()
+            self._retire_command(receipt.command_id)
             return
 
         if receipt.category != ActuationCategory.NORMAL:
             self._handle_plan_receipt(receipt)
             self.receipt_ready.emit(receipt)
+            self._retire_command(receipt.command_id)
             return
 
         expected_identity = (
@@ -457,10 +686,12 @@ class ActuationWorker(QThread):
             elif receipt.action == ActuationAction.CLOSE and receipt.result == ActuationResult.SUCCESS:
                 self._confirm_closed(receipt.valve)
             self.receipt_ready.emit(replace(receipt, stale=True))
+            self._retire_command(receipt.command_id)
             return
 
         if self.protocol_executor is not None:
             self._consume_executor_receipt(receipt, source_command=source_command)
+            self._retire_command(receipt.command_id)
             return
 
         if receipt.action == ActuationAction.OPEN:
@@ -480,9 +711,9 @@ class ActuationWorker(QThread):
                         "请检查系统负载和设备状态，确认所有阀门关闭后重新布防。"
                     )
                     self.protocol_state.possibly_open_valves.add(receipt.valve)
-                    self.submit_emergency_close(
-                        receipt.valve,
+                    self._submit_all_configured_closes(
                         reason=self.protocol_state.quality_block_reason,
+                        prefix="severe-close",
                     )
                 else:
                     self._schedule_normal_close(receipt, source_command=source_command)
@@ -490,6 +721,10 @@ class ActuationWorker(QThread):
             if receipt.result != ActuationResult.SUCCESS:
                 self._block("定时关闭写入失败，保留活动阀状态并等待安全重试。")
                 self.protocol_state.possibly_open_valves.add(receipt.valve)
+                self.submit_emergency_close(
+                    receipt.valve,
+                    reason=self.protocol_state.quality_block_reason,
+                )
             else:
                 self.protocol_state.pending_close_command_id = None
                 self._confirm_closed(receipt.valve)
@@ -498,27 +733,27 @@ class ActuationWorker(QThread):
                 if update.severe:
                     self._block("关闭动作时序严重超限；阀门已确认关闭，请显式重新布防。")
         self.receipt_ready.emit(receipt)
+        self._retire_command(receipt.command_id)
 
-    def invalidate_execution(self, *, reason: str) -> None:
+    def invalidate_execution(self, *, reason: str, close_all_configured: bool = False) -> None:
         with self._condition:
             self.protocol_state.execution_epoch += 1
             self.protocol_state.arm_epoch += 1
             self.protocol_state.pending_open_command_id = None
             self.protocol_state.pending_close_command_id = None
-            self._normal_heap = [
-                item for item in self._normal_heap if item[3].category != ActuationCategory.NORMAL
-            ]
-            heapq.heapify(self._normal_heap)
-            self.protocol_state.ttl_armed = False
-            self._pending_ttl_arm_epoch = None
-            self.ttl_disarm_requested.emit()
-            valves = set(self.protocol_state.possibly_open_valves)
-            if self.protocol_state.active_valve is not None:
-                valves.add(self.protocol_state.active_valve)
-            for valve in valves:
-                self.submit_emergency_close(valve, reason=reason)
+            cancelled = self._cancel_non_safety_commands_locked(reason=reason)
+            self.request_ttl_disarm()
+            if close_all_configured:
+                self._submit_all_configured_closes(reason=reason)
+            else:
+                valves = set(self.protocol_state.possibly_open_valves)
+                if self.protocol_state.active_valve is not None:
+                    valves.add(self.protocol_state.active_valve)
+                for valve in valves:
+                    self.submit_emergency_close(valve, reason=reason)
             self._block(reason)
             self._condition.notify_all()
+        self._settle_cancelled_receipts(cancelled)
 
     def request_ttl_arm(self, *, arm_epoch: int) -> None:
         self.protocol_state.ttl_armed = False
@@ -530,15 +765,32 @@ class ActuationWorker(QThread):
             "ttl_arm_ack",
             {"arm_epoch": int(arm_epoch), "armed": bool(armed)},
         )
-        if not self.isRunning():
-            self.process_ready_with_do_ownership()
+        if not self.isRunning() and self._writer_hal() is None:
+            self.process_ready()
 
     def _apply_ttl_arm_ack(self, *, arm_epoch: int, armed: bool) -> None:
-        if armed and arm_epoch == self._pending_ttl_arm_epoch == self.protocol_state.arm_epoch:
+        if arm_epoch != self._pending_ttl_arm_epoch or arm_epoch != self.protocol_state.arm_epoch:
+            return
+        self._pending_ttl_arm_epoch = None
+        if armed:
             self.protocol_state.ttl_armed = True
+            self._ttl_hardware_armed_epoch = arm_epoch
+            return
+        self.invalidate_execution(reason="TTL 输入布防失败，协议已阻断。")
+        if self.protocol_executor is not None:
+            event = self.protocol_executor._event(
+                "ttl_arm_failed",
+                self._wall_clock(),
+                safety_state=self._current_readiness().safety_state,
+                result="blocked",
+                message="TTL 输入布防返回失败，已失效当前布防并阻断协议。",
+            )
+            result = self.protocol_executor._result_with_events([event])
+            self.executor_result_ready.emit(result)
 
     def request_ttl_disarm(self) -> None:
         self._pending_ttl_arm_epoch = None
+        self._ttl_hardware_armed_epoch = None
         self.protocol_state.ttl_armed = False
         self.ttl_disarm_requested.emit()
 
@@ -550,6 +802,11 @@ class ActuationWorker(QThread):
                 return
         hal = self._writer_hal()
         if hal is not None and not hal.prepare_do_output():
+            with self._condition:
+                self._accepting = False
+                self._block("DO session 准备失败，动作 owner 已阻断。")
+                self._do_handed_off = True
+                self._condition.notify_all()
             self.status_message.emit("DO session 准备失败，动作线程未启动；请检查 NI 资源占用。")
             return
         self._do_handed_off = False
@@ -572,10 +829,11 @@ class ActuationWorker(QThread):
                         timeout = max(0.0, remaining_ns / 1_000_000_000)
                     self._condition.wait(timeout=timeout)
         finally:
+            released = True
             if hal is not None:
-                hal.release_do_output()
+                released = hal.release_do_output() is True
             with self._condition:
-                self._do_handed_off = True
+                self._do_handed_off = released
                 self._condition.notify_all()
 
     def emergency_close_all(self, timeout_ms: int = 500) -> bool:
@@ -609,8 +867,12 @@ class ActuationWorker(QThread):
             self.protocol_state.arm_epoch += 1
             self.protocol_state.pending_open_command_id = None
             self.protocol_state.pending_close_command_id = None
-            self._normal_heap.clear()
+            cancelled = self._cancel_non_safety_commands_locked(
+                reason="紧急关闭已取消尚未执行的普通动作。"
+            )
             self._deadline_heap.clear()
+            queued_messages = list(self._messages)
+            self._messages.clear()
             self.request_ttl_disarm()
             self._shutdown_close_pending.clear()
             self._shutdown_close_started = True
@@ -637,6 +899,8 @@ class ActuationWorker(QThread):
                 self._shutdown_close_pending.add(command.command_id)
                 self._enqueue_emergency_locked(command)
             self._condition.notify_all()
+        self._settle_cancelled_receipts(cancelled)
+        self._reject_queued_messages(queued_messages)
 
     def fallback_close_all_after_handoff(self) -> bool:
         """Rebuild a DO session only after the previous owner has fully released it."""
@@ -646,6 +910,7 @@ class ActuationWorker(QThread):
         if hal is None or not hal.prepare_do_output():
             return False
         success = True
+        released = False
         try:
             for step in self.valve_service.emergency_close_steps():
                 self._sequence += 1
@@ -672,8 +937,9 @@ class ActuationWorker(QThread):
                     self._confirm_closed(receipt.valve)
                     self.valve_service.commit_receipt(receipt)
         finally:
-            hal.release_do_output()
-        return success
+            released = hal.release_do_output() is True
+            self._do_handed_off = released
+        return success and released
 
     def _writer_hal(self):
         hal = getattr(self.writer, "hal", None)
@@ -686,32 +952,53 @@ class ActuationWorker(QThread):
         with self._condition:
             self._accepting = False
             self._running = False
+            cancelled = self._cancel_non_safety_commands_locked(
+                reason="动作线程关闭已取消尚未执行的普通动作。"
+            )
+            self._deadline_heap.clear()
+            queued_messages = list(self._messages)
+            self._messages.clear()
             self._condition.notify_all()
+        self._settle_cancelled_receipts(cancelled)
+        self._reject_queued_messages(queued_messages)
         if self.isRunning():
-            return bool(self.wait(max(1, int(timeout_ms))))
-        return True
+            joined = bool(self.wait(max(1, int(timeout_ms))))
+            return joined and self._do_handed_off
+        return self._do_handed_off
 
     def prepare_restart(self) -> bool:
         if self.isRunning() or not self._do_handed_off:
             return False
         with self._condition:
+            # A restart is a fresh admission epoch; stopped-run intents must
+            # never cross this boundary.
+            queued_messages = list(self._messages)
+            self._messages.clear()
+            cancelled = self._cancel_non_safety_commands_locked(
+                reason="动作线程重启已取消上一运行周期的普通动作。"
+            )
+            self._deadline_heap.clear()
             self._accepting = True
+        self._settle_cancelled_receipts(cancelled)
+        self._reject_queued_messages(queued_messages)
         return True
 
     def _pop_ready(self) -> ActuationCommand | tuple[str, dict[str, Any]] | None:
         with self._condition:
             if self._emergency:
                 command = self._emergency.popleft()
-                self._emergency_channels.discard(command.valve)
                 return command
             priority_message_kinds = {
                 "emergency_close_all",
                 "flow_result",
                 "input_error",
+                "interlock_changed",
                 "load",
+                "manual_trigger",
                 "mode",
                 "pause",
                 "readiness",
+                "start",
                 "stop",
             }
             for index, message in enumerate(self._messages):
@@ -729,7 +1016,24 @@ class ActuationWorker(QThread):
             if self._normal_heap and self._normal_heap[0][0] <= now_ns:
                 return heapq.heappop(self._normal_heap)[3]
             if self._messages:
-                return self._messages.popleft()
+                kind, payload = self._messages.popleft()
+                if kind != "ai_batch":
+                    return kind, payload
+                samples = list(payload["batch"].samples)
+                while (
+                    self._messages
+                    and self._messages[0][0] == "ai_batch"
+                    and self._messages[0][1].get("readiness")
+                    == payload.get("readiness")
+                ):
+                    _, next_payload = self._messages.popleft()
+                    samples.extend(next_payload["batch"].samples)
+                if len(samples) != len(payload["batch"].samples):
+                    payload = {
+                        **payload,
+                        "batch": replace(payload["batch"], samples=tuple(samples)),
+                    }
+                return kind, payload
             return None
 
     def _handle_message(self, kind: str, payload: dict[str, Any]) -> None:
@@ -745,6 +1049,14 @@ class ActuationWorker(QThread):
         if kind == "snapshot":
             self._emit_snapshot()
             return
+        if kind == "gating_thresholds":
+            if self.gating_service is not None:
+                self.gating_service.set_thresholds(
+                    payload["inhale_threshold"],
+                    payload["exhale_threshold"],
+                )
+            self._emit_snapshot()
+            return
         if kind == "ttl_arm_ack":
             self._apply_ttl_arm_ack(**payload)
             self._emit_snapshot()
@@ -752,10 +1064,21 @@ class ActuationWorker(QThread):
         if kind == "emergency_close_all":
             self._begin_emergency_close_all()
             return
+        if kind == "interlock_changed" and self.protocol_executor is None:
+            reason = self.interlock.read()[1].unsafe_reason()
+            if reason:
+                self.invalidate_execution(reason=reason)
+            return
         if self.protocol_executor is None:
             return
         executor = self.protocol_executor
         readiness = payload.get("readiness") or self._current_readiness()
+        if kind == "interlock_changed":
+            kind = "readiness"
+            payload = {
+                "readiness": readiness,
+                "timestamp": payload.get("timestamp"),
+            }
         if kind in {"stop", "pause", "mode", "load"}:
             self._begin_safe_transition(kind, payload)
             return
@@ -777,13 +1100,15 @@ class ActuationWorker(QThread):
                 and executor.state.status == ProtocolExecutionStatus.WAITING_TRIGGER
             ):
                 self.metrics.reset()
+                executor.state.quality = self.metrics.snapshot()
         elif kind == "manual_trigger":
             result = executor.accept_trigger(
                 "manual",
                 readiness=readiness,
                 timestamp=self._wall_clock(),
             )
-            self._schedule_breath_timeout(readiness)
+            if any(event.event == "trigger_accepted" for event in result.events):
+                self._schedule_breath_timeout(readiness)
         elif kind == "ttl_pulse":
             pulse = payload["pulse"]
             result = executor.accept_trigger(
@@ -793,7 +1118,15 @@ class ActuationWorker(QThread):
                 captured_epoch=pulse.arm_epoch,
                 sequence=pulse.sequence,
             )
-            self._schedule_breath_timeout(readiness)
+            if any(event.event == "trigger_accepted" for event in result.events):
+                self._schedule_breath_timeout(
+                    readiness,
+                    origin_ns=(
+                        int(pulse.monotonic_ns)
+                        if int(pulse.monotonic_ns) > 0
+                        else None
+                    ),
+                )
         elif kind == "ai_batch":
             generation = self.interlock.read()[0]
             batch = payload["batch"].map_values(self._sample_transform)
@@ -814,12 +1147,13 @@ class ActuationWorker(QThread):
                     and executor.state.current_mode.value == "ttl"
                 ),
             )
-            if reason and executor.state.status in {
-                ProtocolExecutionStatus.WAITING_TRIGGER,
-                ProtocolExecutionStatus.WAITING_EXHALE,
-                ProtocolExecutionStatus.TRIGGERED,
-            }:
-                self.invalidate_execution(reason=f"运行就绪条件丢失：{reason}")
+            generation = self.interlock.read()[0]
+            if reason and self._unsafe_close_generation != generation:
+                self._unsafe_close_generation = generation
+                self.invalidate_execution(
+                    reason=f"运行就绪条件丢失：{reason}",
+                    close_all_configured=True,
+                )
                 event = executor._event(
                     "blocked",
                     payload.get("timestamp") or self._wall_clock(),
@@ -829,17 +1163,24 @@ class ActuationWorker(QThread):
                 )
                 result = executor._result_with_events([event])
             else:
+                if not reason:
+                    self._unsafe_close_generation = None
                 result = executor.handle_readiness_lost(
                     readiness,
                     timestamp=payload.get("timestamp") or self._wall_clock(),
                 )
         elif kind == "breath_timeout":
-            if payload["execution_epoch"] != executor.state.execution_epoch:
-                return
             result = executor.handle_breath_timeout_deadline(
                 readiness=payload["readiness"],
                 timestamp=self._wall_clock(),
+                execution_epoch=payload["execution_epoch"],
+                arm_epoch=payload["arm_epoch"],
+                trial_index=payload["trial_index"],
+                trial_id=payload["trial_id"],
+                waiting_started_at=payload["waiting_started_at"],
             )
+            if any(event.event == "retry" for event in result.events):
+                self._schedule_breath_timeout(readiness)
         elif kind == "input_error":
             if executor.state.status in {
                 ProtocolExecutionStatus.WAITING_TRIGGER,
@@ -915,37 +1256,94 @@ class ActuationWorker(QThread):
             return
         self.protocol_state = executor.state
         self._sync_ttl_request()
+        if kind == "start":
+            self.start_result_ready.emit(
+                ProtocolStartAck(
+                    accepted=bool(
+                        self.protocol_state.status
+                        == ProtocolExecutionStatus.WAITING_TRIGGER
+                        and self.protocol_state.execution_epoch > previous_epoch
+                    ),
+                    lease_epoch=(
+                        previous_epoch
+                        if payload.get("lease_epoch") is None
+                        else int(payload["lease_epoch"])
+                    ),
+                    previous_epoch=previous_epoch,
+                    execution_epoch=self.protocol_state.execution_epoch,
+                    status=self.protocol_state.status,
+                    message=(result.events[-1].message if result.events else ""),
+                )
+            )
         self.executor_result_ready.emit(result)
         self._emit_snapshot()
 
     def _begin_safe_transition(self, kind: str, payload: dict[str, Any]) -> None:
-        if self.protocol_executor is None or self._pending_safe_transition is not None:
+        if self.protocol_executor is None:
+            return
+        if self._pending_safe_transition is not None:
+            previous_kind, previous_payload = self._pending_safe_transition
+            if kind == "stop":
+                if previous_kind == "load":
+                    self.document_result_ready.emit(
+                        {
+                            "document": previous_payload["document"],
+                            "success": False,
+                            "message": "停止请求已取代待完成的协议加载。",
+                        }
+                    )
+                self._pending_safe_transition = (kind, payload)
+                self._maybe_finalize_safe_transition()
+                return
+            if kind == "load":
+                self.document_result_ready.emit(
+                    {
+                        "document": payload["document"],
+                        "success": False,
+                        "message": "另一安全状态转换尚未完成，协议未加载。",
+                    }
+                )
+            elif kind in {"pause", "mode"}:
+                event = self.protocol_executor._event(
+                    f"{kind}_rejected",
+                    self._wall_clock(),
+                    safety_state=self._current_readiness().safety_state,
+                    result="rejected",
+                    message="另一安全状态转换尚未完成，该请求已拒绝。",
+                )
+                self.executor_result_ready.emit(
+                    self.protocol_executor._result_with_events([event])
+                )
+                self._emit_snapshot()
             return
         state = self.protocol_state
         state.execution_epoch += 1
         state.arm_epoch += 1
         state.pending_open_command_id = None
         state.pending_close_command_id = None
-        state.ttl_armed = False
-        self._pending_ttl_arm_epoch = None
-        self.ttl_disarm_requested.emit()
+        self.request_ttl_disarm()
         with self._condition:
-            self._normal_heap = [item for item in self._normal_heap if item[3].category != ActuationCategory.NORMAL]
-            heapq.heapify(self._normal_heap)
+            cancelled = self._cancel_non_safety_commands_locked(
+                reason=f"{kind} 请求已取消尚未执行的普通动作。"
+            )
+        self._settle_cancelled_receipts(cancelled)
         self._pending_safe_transition = (kind, payload)
-        valves = set(state.possibly_open_valves)
-        if state.active_valve is not None:
-            valves.add(state.active_valve)
-        if valves:
+        commands = self._submit_all_configured_closes(
+            reason=f"{kind} 请求正在等待所有配置阀门安全关闭确认。",
+            prefix=f"{kind}-close",
+        )
+        self._safe_transition_close_pending = {
+            command.command_id for command in commands
+        }
+        if commands:
             state.status = ProtocolExecutionStatus.BLOCKED
-            for valve in valves:
-                self.submit_emergency_close(valve, reason=f"{kind} 请求正在等待安全关闭确认。")
         else:
             self._finalize_safe_transition()
 
     def _maybe_finalize_safe_transition(self) -> None:
         if (
             self._pending_safe_transition is not None
+            and not self._safe_transition_close_pending
             and self.protocol_state.active_valve is None
             and not self.protocol_state.possibly_open_valves
         ):
@@ -957,6 +1355,7 @@ class ActuationWorker(QThread):
         if pending is None:
             return
         self._pending_safe_transition = None
+        self._safe_transition_close_pending.clear()
         kind, payload = pending
         if kind == "load":
             self.document_result_ready.emit(
@@ -995,7 +1394,9 @@ class ActuationWorker(QThread):
                 payload["mode"], readiness=readiness, timestamp=now
             )
         else:
+            retained_quality = self.metrics.snapshot()
             result = self.protocol_executor.reset(payload["document"], timestamp=now)
+            self.protocol_executor.state.quality = retained_quality
             self.document_result_ready.emit(
                 {
                     "document": payload["document"],
@@ -1040,14 +1441,17 @@ class ActuationWorker(QThread):
         )
         _, snapshot, _ = self.interlock.read()
         reason = ""
-        is_safety = source == "safety" or source.startswith("safety:")
-        if not is_safety and snapshot.device_lease == "protocol":
+        if snapshot.device_lease == "protocol":
             reason = "协议运行中设备租约已占用，已拒绝流量变更。"
-        elif not is_safety:
-            reason = snapshot.unsafe_reason()
-            # This command establishes MFC readiness, so that field cannot reject itself.
-            if reason.startswith("MFC"):
-                reason = ""
+        else:
+            # An idle MFC command is precisely how LOW_FLOW / setpoint-not-ready
+            # is recovered, so those two states must not reject themselves.
+            if not snapshot.connected:
+                reason = "硬件连接已断开，流量未更改。"
+            elif not snapshot.hardware_ready:
+                reason = "硬件自检状态已失效，流量未更改。"
+            elif snapshot.safety_state not in {"SAFE", "LOW_FLOW"}:
+                reason = f"安全状态为 {snapshot.safety_state}，流量未更改。"
         submitted = None if reason or self._flow_submitter is None else self._flow_submitter(command)
         if reason or self._flow_submitter is None or submitted is False:
             message = reason or "串口动作队列不可用，流量未更改。"
@@ -1056,6 +1460,10 @@ class ActuationWorker(QThread):
 
     def _consume_flow_result(self, wrapped: FlowCommandResult) -> None:
         if wrapped.command.execution_epoch != self.protocol_state.execution_epoch:
+            # The external correlation owner still needs the terminal result to
+            # retire its pending command.  A stale result must not mutate the
+            # current epoch's interlock or readiness.
+            self.flow_result_ready.emit(replace(wrapped, stale=True))
             return
         self.interlock.update(flow_setpoints_ready=bool(wrapped.result.success))
         if not wrapped.result.success:
@@ -1074,7 +1482,11 @@ class ActuationWorker(QThread):
         if should_arm:
             if self._pending_ttl_arm_epoch != state.arm_epoch and not state.ttl_armed:
                 self.request_ttl_arm(arm_epoch=state.arm_epoch)
-        elif self._pending_ttl_arm_epoch is not None or state.ttl_armed:
+        elif (
+            self._pending_ttl_arm_epoch is not None
+            or self._ttl_hardware_armed_epoch is not None
+            or state.ttl_armed
+        ):
             self.request_ttl_disarm()
 
     def _current_readiness(self):
@@ -1096,6 +1508,9 @@ class ActuationWorker(QThread):
             "plan": plan,
             "category": category,
             "next_index": 0,
+            "opened_commands": [],
+            "rolling_back": False,
+            "rollback_failed": False,
         }
         self._enqueue_next_plan_step(request_id)
 
@@ -1133,13 +1548,10 @@ class ActuationWorker(QThread):
         )
         self._plan_by_command[command.command_id] = request_id
         if not self.submit(command):
-            self._plan_contexts.pop(request_id, None)
-            self.plan_result_ready.emit(
-                {
-                    "request_id": request_id,
-                    "success": False,
-                    "message": "动作队列繁忙或设备租约冲突，阀门计划未执行。",
-                }
+            self._plan_by_command.pop(command.command_id, None)
+            self._fail_plan(
+                request_id,
+                "动作队列繁忙或设备租约冲突，阀门计划未执行。",
             )
 
     def _handle_plan_receipt(self, receipt: ActuationReceipt) -> None:
@@ -1148,26 +1560,114 @@ class ActuationWorker(QThread):
             return
         if self.valve_service is not None:
             self.valve_service.commit_receipt(receipt)
+        context = self._plan_contexts.get(request_id)
+        if context is None:
+            return
+        if context["rolling_back"]:
+            if receipt.result != ActuationResult.SUCCESS:
+                context["rollback_failed"] = True
+            self._enqueue_next_plan_rollback(request_id)
+            return
         if receipt.result != ActuationResult.SUCCESS:
-            self._plan_contexts.pop(request_id, None)
-            self.plan_result_ready.emit(
-                {
-                    "request_id": request_id,
-                    "success": False,
-                    "message": receipt.message or "阀门写入失败。",
-                }
+            self._fail_plan(
+                request_id,
+                receipt.message or "阀门写入失败。",
+                uncertain_command=(
+                    self._commands_by_id.get(receipt.command_id)
+                    if receipt.result
+                    in {
+                        ActuationResult.FAILED,
+                        ActuationResult.UNCERTAIN,
+                        ActuationResult.TIMEOUT,
+                        ActuationResult.MEASUREMENT_FAULT,
+                    }
+                    else None
+                ),
             )
             return
+        source = self._commands_by_id.get(receipt.command_id)
+        if source is not None and source.action == ActuationAction.OPEN:
+            context["opened_commands"].append(source)
+        elif source is not None and source.action == ActuationAction.CLOSE:
+            context["opened_commands"] = [
+                opened
+                for opened in context["opened_commands"]
+                if not (
+                    opened.valve == source.valve
+                    and opened.target_device == source.target_device
+                    and opened.target_line == source.target_line
+                )
+            ]
         self._enqueue_next_plan_step(request_id)
 
-    def _schedule_breath_timeout(self, readiness) -> None:
+    def _fail_plan(
+        self,
+        request_id: str,
+        message: str,
+        *,
+        uncertain_command: ActuationCommand | None = None,
+    ) -> None:
+        context = self._plan_contexts.get(request_id)
+        if context is None:
+            return
+        targets = list(context["opened_commands"])
+        if uncertain_command is not None and uncertain_command.action == ActuationAction.OPEN:
+            targets.append(uncertain_command)
+        unique_targets: dict[tuple[int, str | None, str | None], ActuationCommand] = {}
+        for command in targets:
+            unique_targets[(command.valve, command.target_device, command.target_line)] = command
+        context["rolling_back"] = True
+        context["failure_message"] = message
+        context["rollback_commands"] = list(reversed(unique_targets.values()))
+        self._enqueue_next_plan_rollback(request_id)
+
+    def _enqueue_next_plan_rollback(self, request_id: str) -> None:
+        context = self._plan_contexts.get(request_id)
+        if context is None:
+            return
+        pending = context["rollback_commands"]
+        if not pending:
+            self._plan_contexts.pop(request_id, None)
+            message = context["failure_message"]
+            if context["rollback_failed"]:
+                message = f"{message}；补偿关闭失败，阀门状态不确定，请立即人工确认。"
+            else:
+                message = f"{message}；此前已打开的阀门均已补偿关闭。"
+            self.plan_result_ready.emit(
+                {"request_id": request_id, "success": False, "message": message}
+            )
+            return
+        opened = pending.pop(0)
+        self._sequence += 1
+        command = replace(
+            opened,
+            command_id=f"{request_id}-rollback-{self._sequence}",
+            execution_epoch=self.protocol_state.execution_epoch,
+            arm_epoch=self.protocol_state.arm_epoch,
+            sequence=self._sequence,
+            action=ActuationAction.CLOSE,
+            category=ActuationCategory.SAFETY,
+            expected_ns=int(self._clock_ns()),
+            duration_ns=None,
+            wall_timestamp=float(self._wall_clock()),
+            safety_generation=self.interlock.read()[0],
+        )
+        self._plan_by_command[command.command_id] = request_id
+        self.submit(command)
+
+    def _schedule_breath_timeout(self, readiness, *, origin_ns: int | None = None) -> None:
         if (
             self.protocol_executor is None
             or self.protocol_executor.state.status != ProtocolExecutionStatus.WAITING_EXHALE
         ):
             return
+        state = self.protocol_executor.state
+        trial = state.current_trial
+        if trial is None or state.waiting_started_at is None:
+            return
         self._sequence += 1
-        deadline = int(self._clock_ns()) + (
+        deadline_origin = int(self._clock_ns()) if origin_ns is None else int(origin_ns)
+        deadline = deadline_origin + (
             self.protocol_executor.config.breath_gate_timeout_ms * 1_000_000
         )
         heapq.heappush(
@@ -1179,7 +1679,11 @@ class ActuationWorker(QThread):
                 "breath_timeout",
                 {
                     "readiness": readiness,
-                    "execution_epoch": self.protocol_executor.state.execution_epoch,
+                    "execution_epoch": state.execution_epoch,
+                    "arm_epoch": state.arm_epoch,
+                    "trial_index": state.trial_index,
+                    "trial_id": trial.trial_id,
+                    "waiting_started_at": state.waiting_started_at,
                 },
             ),
         )
@@ -1205,11 +1709,17 @@ class ActuationWorker(QThread):
 
         before_generation, snapshot, unsafe_latched = self.interlock.read()
         rejection = snapshot.command_rejection_reason(command)
-        if command.action == ActuationAction.OPEN and (
+        rejected_open = command.action == ActuationAction.OPEN and (
             command.safety_generation != before_generation
             or unsafe_latched
             or rejection
-        ):
+        )
+        rejected_manual_close = (
+            command.action == ActuationAction.CLOSE
+            and command.category in {ActuationCategory.MANUAL, ActuationCategory.PRETEST}
+            and bool(rejection)
+        )
+        if rejected_open or rejected_manual_close:
             self._clear_cancelled_pending(command)
             message = rejection or "安全联锁已锁存，取消开阀。"
             if command.category == ActuationCategory.NORMAL:
@@ -1246,9 +1756,23 @@ class ActuationWorker(QThread):
         ):
             self.protocol_state.possibly_open_valves.add(command.valve)
             self._block("开阀写入期间 safety/readiness 发生变化，已请求紧急关闭。")
-            self.submit_emergency_close(command.valve, reason=self.protocol_state.quality_block_reason)
             self._clear_cancelled_pending(command)
-            self.receipt_ready.emit(replace(receipt, stale=True))
+            uncertain = replace(
+                receipt,
+                result=ActuationResult.UNCERTAIN,
+                stale=True,
+                message="开阀写入期间 safety/readiness 发生变化，结果按不确定处理并回滚。",
+            )
+            if command.command_id in self._plan_by_command:
+                self._handle_plan_receipt(uncertain)
+            else:
+                self.submit_emergency_close(
+                    command.valve,
+                    reason=self.protocol_state.quality_block_reason,
+                )
+            self.receipt_ready.emit(uncertain)
+            self._remember_receipt(uncertain)
+            self._retire_command(command.command_id)
             return
         self.consume_receipt(receipt)
 
@@ -1266,7 +1790,8 @@ class ActuationWorker(QThread):
                 sequence=self._sequence,
                 safety_generation=self.interlock.read()[0],
             )
-            self.submit(close)
+            if not self.submit(close):
+                self.protocol_state.possibly_open_valves.add(open_receipt.valve)
             return
         duration_ns = source_command.duration_ns if source_command is not None else None
         if duration_ns is None:
@@ -1295,7 +1820,8 @@ class ActuationWorker(QThread):
             safety_generation=self.interlock.read()[0],
         )
         self.protocol_state.close_deadline_ns = deadline
-        self.submit(close)
+        if not self.submit(close):
+            self.protocol_state.possibly_open_valves.add(open_receipt.valve)
 
     def _consume_executor_receipt(
         self,
@@ -1351,9 +1877,9 @@ class ActuationWorker(QThread):
                     "请检查系统负载和设备状态，确认所有阀门关闭后重新布防。"
                 )
                 self.protocol_state.possibly_open_valves.add(receipt.valve)
-                self.submit_emergency_close(
-                    receipt.valve,
+                self._submit_all_configured_closes(
                     reason=self.protocol_state.quality_block_reason,
+                    prefix="severe-close",
                 )
             else:
                 self._schedule_normal_close(receipt, source_command=source_command)
@@ -1364,6 +1890,12 @@ class ActuationWorker(QThread):
                 self.protocol_state.executed_quality_failed_trials.add(trial_id)
             self.protocol_state.quality_resume_status = self.protocol_state.status
             self._block("关闭动作时序严重超限；阀门已确认关闭，请显式重新布防。")
+        elif receipt.action == ActuationAction.CLOSE and receipt.result != ActuationResult.SUCCESS:
+            self.submit_emergency_close(
+                receipt.valve,
+                reason="正常关闭失败或状态不确定，已立即请求补偿关闭。",
+            )
+        self._sync_ttl_request()
         self.executor_result_ready.emit(result)
         self.receipt_ready.emit(receipt)
 
@@ -1414,23 +1946,72 @@ class ActuationWorker(QThread):
         )
 
     def _enqueue_emergency_locked(self, command: ActuationCommand) -> None:
-        if command.valve in self._emergency_channels:
-            return
-        self._emergency_channels.add(command.valve)
+        # Every safety intent retains its own command identity and receipt.  Do
+        # not silently merge same-valve requests: callers and shutdown waiters
+        # must be able to account for each accepted close.
         self._emergency.append(command)
 
     def _confirm_closed(self, valve: int) -> None:
         self.protocol_state.possibly_open_valves.discard(valve)
         if self.protocol_state.active_valve == valve:
             self.protocol_state.active_valve = None
+        self.protocol_state.pending_close_command_id = None
         if not self.protocol_state.possibly_open_valves and self.protocol_state.active_valve is None:
             self.protocol_state.close_deadline_ns = None
+            self.protocol_state.actual_open_ns = None
 
     def _clear_cancelled_pending(self, command: ActuationCommand) -> None:
         if self.protocol_state.pending_open_command_id == command.command_id:
             self.protocol_state.pending_open_command_id = None
         if self.protocol_state.pending_close_command_id == command.command_id:
             self.protocol_state.pending_close_command_id = None
+
+    def _remember_receipt(self, receipt: ActuationReceipt) -> None:
+        """Keep an exact, bounded replay window while retiring full command payloads."""
+        self._seen_receipts.add(receipt.command_id)
+        self._seen_receipt_order.append((receipt.command_id, receipt.execution_epoch))
+        while len(self._seen_receipt_order) > self._receipt_history_limit:
+            command_id, _ = self._seen_receipt_order.popleft()
+            self._seen_receipts.discard(command_id)
+
+    def _retire_command(self, command_id: str) -> None:
+        self._commands_by_id.pop(command_id, None)
+
+    def _cancel_non_safety_commands_locked(self, *, reason: str) -> list[ActuationReceipt]:
+        cancelled = [
+            item[3]
+            for item in self._normal_heap
+            if item[3].category != ActuationCategory.SAFETY
+        ]
+        self._normal_heap = [
+            item for item in self._normal_heap if item[3].category == ActuationCategory.SAFETY
+        ]
+        heapq.heapify(self._normal_heap)
+        receipts = []
+        for command in cancelled:
+            self._clear_cancelled_pending(command)
+            receipts.append(
+                ActuationReceipt.from_write(
+                    command=command,
+                    started_ns=None,
+                    actual_ns=None,
+                    wall_timestamp=self._wall_clock(),
+                    result=ActuationResult.CANCELLED,
+                    message=reason,
+                    stale=True,
+                )
+            )
+        return receipts
+
+    def _settle_cancelled_receipts(self, receipts: list[ActuationReceipt]) -> None:
+        for receipt in receipts:
+            self._handle_plan_receipt(receipt)
+            self.receipt_ready.emit(receipt)
+            self._retire_command(receipt.command_id)
+
+    def _reject_queued_messages(self, messages: list[tuple[str, dict[str, Any]]]) -> None:
+        for kind, payload in messages:
+            self._reject_stopped_message(kind, payload)
 
     def _block(self, reason: str) -> None:
         self.protocol_state.status = ProtocolExecutionStatus.BLOCKED

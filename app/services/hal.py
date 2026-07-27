@@ -86,8 +86,8 @@ class HalInterface(Protocol):
     def read_ai_frames(self, timestamp: float | None = None) -> list[AnalogInputFrame]:
         """读取共享 AI task 当前可用的全部采样帧。"""
 
-    def reset_ai_input(self) -> None:
-        """释放失效的共享 AI task，使下一次读取重新创建采集资源。"""
+    def reset_ai_input(self) -> bool:
+        """释放失效的共享 AI task，并返回资源是否已确定释放。"""
 
     def read_ai0(self, timestamp: float | None = None) -> float:
         """读取模拟输入（呼吸波形）。"""
@@ -117,8 +117,8 @@ class HalInterface(Protocol):
     def prepare_do_output(self) -> bool:
         """由 ActuationWorker 线程预建并取得 DO session 所有权。"""
 
-    def release_do_output(self) -> None:
-        """由当前 DO owner 确定性释放 session。"""
+    def release_do_output(self) -> bool:
+        """由当前 DO owner 确定性释放 session，并确认 ownership handoff。"""
 
     def release_serial_resources(self) -> None:
         """由 serial owner 最后释放 MFC 串口。"""
@@ -185,5 +185,5 @@ class HalBase(abc.ABC):
         raise NotImplementedError
 
     @abc.abstractmethod
-    def reset_ai_input(self) -> None:  # pragma: no cover - interface
+    def reset_ai_input(self) -> bool:  # pragma: no cover - interface
         raise NotImplementedError

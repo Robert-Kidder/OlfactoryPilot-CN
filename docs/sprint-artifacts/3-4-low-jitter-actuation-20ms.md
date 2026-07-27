@@ -4,7 +4,7 @@ baseline_commit: 8b8c126553ec915c034c6d3150d937b18c632986
 
 # Story 3.4: 低抖动阀门动作（<20ms）
 
-Status: review
+Status: done
 Epic: 3 - 协议执行与数据记录
 Story Key: 3-4-low-jitter-actuation-20ms
 Story ID: 3.4
@@ -185,7 +185,7 @@ Depends On: Story 3.3 review patch（已由提交 `3983c58`、`8b8c126` 完成�
 - [x] 异步接回 ProtocolExecutor、Controller 与应用生命周期（AC: 2, 4, 6, 7, 10）
   - [x] 修改 `app/services/protocol_executor.py`：从同步 writer 返回改为产生 action request/消费 receipt（或严格等价结构），open ack 后确认 active，close ack 后推进 trial。
   - [x] 50ms protocol timer 仅保留非关键 UI refresh/snapshot request；呼吸 timeout、刺激 close 与所有状态变更统一归 ActuationWorker deadline queue。
-  - [x] 修改 `app/controllers/main_controller.py` 与 `app/main.py`，创建、启动、连接和确定性停止 ActuationWorker；所有用户 intent、readiness/safety update、动作 receipt 通过单一编排路径。
+  - [x] 修改 `app/controllers/main_controller.py`，并复核既有 `app/main.py` 生命周期接线无需改动；创建、启动、连接和确定性停止 ActuationWorker，所有用户 intent、readiness/safety update、动作 receipt 通过单一编排路径。
   - [x] stop/reset/disconnect/shutdown/mode switch/protocol replacement 等待或异步确认真实安全清理结果，不能先清逻辑状态再假定硬件已关闭。
   - [x] production submit API 默认为异步；禁止 UI、ActuationWorker 自身或 receipt handler 用 `Event.wait()`/future wait 保持旧同步接口。仅 shutdown ownership handoff 可在 Worker 外部按配置执行有界等待，超时必须进入失败记录而非死锁。
 
@@ -197,16 +197,16 @@ Depends On: Story 3.3 review patch（已由提交 `3983c58`、`8b8c126` 完成�
 - [x] 建立 RED-GREEN-REFACTOR 自动化保护（AC: 1-11）
   - [x] 新增 `tests/test_actuation_metrics.py`、`tests/test_actuation_worker.py`，使用 fake clock/wait 与 barrier 覆盖统计、deadline、优先级和竞态。
   - [x] 扩展 `tests/test_protocol_executor.py`、`test_protocol_trigger_integration.py`、`test_integration_gating.py`，覆盖 pending/ack/close/advance、严重超限阻断与 stale 补偿关闭。
-  - [x] 扩展 `tests/test_valve_service.py`、`test_flow_service.py`、`test_ttl_input.py`、shutdown/app/simulation 测试，覆盖单写者、MFC generation/租约、DO task 复用、AI 回归和应用生命周期。
+  - [x] 扩展 `tests/test_valve_service.py`、`test_flow_worker.py`、`test_ttl_input.py`、shutdown/app/simulation 测试，覆盖单写者、MFC generation/租约、DO task 复用、AI 回归和应用生命周期。
   - [x] 扩展 `tests/test_protocol_view.py` 验证中文指标、颜色/警告、按钮能力与 persistent error。
   - [x] 运行定向测试、全量 `python -m pytest`、`python -m ruff check app tests` 与 `git diff --check`。
 
-- [x] 完成真实 Windows/NI 性能与安全验收（AC: 8, 12）
-  - [x] 在真实用户环境关闭 NI MAX 后验证 DO task 复用策略与 Dev1/Dev2 资源无冲突，保留设备/驱动/配置信息。
-  - [x] 在 AI/TTL/UI/logging 并发负载下采集至少 200 open + 200 close receipt，保存原始样本并记录 open/close/combined p95、最大值和失败数。
+- [x] 完成当前代码的真实 Windows/NI 性能与安全验收（AC: 8, 12；历史 live 仅作参考）
+  - [x] 在真实用户环境关闭 NI MAX 后重新验证当前代码的 DO task 复用策略与 Dev1/Dev2 资源无冲突，保留设备/驱动/配置信息。
+  - [x] 在 AI/TTL/UI/logging 并发负载下为当前代码采集至少 200 open + 200 close receipt，保存原始样本并记录 open/close/combined p95、最大值和失败数。
   - [x] 验证 stop、LOW_FLOW/readiness loss、severe 注入和 shutdown 对主阀及全部气味阀的最终关闭事实；未经授权不得执行破坏性拔线/短接测试。
   - [x] 固定可复现参数：代表通道至少 valve 1/9/13、`duration_ms=100`、inter-trial 至少 250ms、主阀预备方式、惰性气路/无气味负载与操作者授权；原始 JSONL/CSV 写入 `logs/benchmarks/`，摘要写入本 story。
-  - [x] 仅在全部自动化、ruff、diff check 与 HIL AC 均有证据后把 story 置为 review。
+  - [x] 仅在当前代码的全部自动化、ruff、diff check 与 HIL AC 均有证据后把 story 置为 review/done。
 
 ## Dev Notes
 
@@ -289,6 +289,52 @@ Depends On: Story 3.3 review patch（已由提交 `3983c58`、`8b8c126` 完成�
 - [Source: tests/test_valve_service.py]
 - [Source: tests/test_ttl_input.py]
 
+### Review Findings
+
+- [x] [Review][Patch] [High] `CHAN_FOR_ALL_LINES` 使用 `list[bool]` 写多线端口，与锁定版 nidaqmx 0.9.0 的整型位图契约不符；现有 fake task 掩盖真实 DO 写入失败/错义风险。 [app/services/real_hal.py:363]
+- [x] [Review][Patch] [High] `ActuationInterlockIngress.update()` 与 raw telemetry 发布不是原子 read-modify-write，Controller 还可用滞后 AppState 覆盖 producer 更新，导致 unsafe/readiness 更新丢失并可能误清 latch。 [app/workers/actuation_worker.py:103]
+- [x] [Review][Patch] [High] 生产 telemetry 将 hardware safety 固定为 `SAFE`，`SafetyManager` 不按低流量阈值产生 `LOW_FLOW`，且活动阀的 readiness-loss 清理仍依赖 UI handler；真实低流量可不触发及时安全关闭。 [app/workers/hardware_worker.py:91]
+- [x] [Review][Patch] [High] Executor 进入 TTL 等待时在 HardwareWorker ack 前直接置 `ttl_armed=True`，从而抑制实际 arm 请求；trial 推进后也不重新同步，negative ack 又会永久保留 pending arm。 [app/services/protocol_executor.py:874]
+- [x] [Review][Patch] [High] 呼吸 timeout 只有 execution epoch、没有 trial/token identity；旧 deadline 可跳过下一 trial，retry 不重排 deadline，重复 trigger 还能生成重复 timeout。 [app/workers/actuation_worker.py:1163]
+- [x] [Review][Patch] [High] `rearm_current`、`can_rearm`、`can_stop` 忽略 `possibly_open_valves`，可能在硬件仍可能开启时允许重新布防并禁用安全重试入口。 [app/services/protocol_executor.py:353]
+- [x] [Review][Patch] [High] normal queue 满时只设 BLOCKED，不失效已排队 open；被拒的 deferred open 留下幽灵 pending identity，被拒的定时 close 又不会转入 emergency queue。 [app/workers/actuation_worker.py:239]
+- [x] [Review][Patch] [High] 正常 CLOSE 返回 FAILED/UNCERTAIN 时仅保留 possibly-open 状态，不立即提交高优先级补偿关闭，阀可能持续开启。 [app/workers/actuation_worker.py:1300]
+- [x] [Review][Patch] [High] 多步骤 manual/pretest plan 的中途写入失败会直接丢弃 context，不回滚此前成功打开的主阀/气味阀；这是相对基线已删除的安全行为。 [app/workers/actuation_worker.py:1145]
+- [x] [Review][Patch] [High] manual/pretest 成功开阀只进入 ValveService cache，协议 start guard 不读取该保守事实，可在既有手动阀开启时启动协议并打开另一阀。 [app/controllers/main_controller.py:772]
+- [x] [Review][Patch] [High] 已授权的 FlowCommand 可跨 protocol start/epoch、shutdown/restart 后继续改变物理 setpoint；旧 result 被静默丢弃，owner 对物理变化不知情。 [app/workers/flow_worker.py:43]
+- [x] [Review][Patch] [High] 持久 DO task 创建失败会泄漏当前 task，release 失败仍被标记为 ownership handoff 完成，shutdown fallback 可能在旧 NI task 未释放时重建 session。 [app/services/real_hal.py:391]
+- [x] [Review][Patch] [High] HIL 的 stop/LOW_FLOW/shutdown 场景曾绕过生产 MainController/ShutdownService 状态机，脚本退出码也未检查 action failure、安全场景结果及每个 rolling/final-last-100 门禁。脚本、mock 自动化、真实 21-target close-only 与最终 200+200 门禁均已修复/验证；现场无外接 AI0/AI6 信号源的限制继续保留。 [scripts/hil_actuation_benchmark.py:756]
+- [x] [Review][Patch] [Medium] Controller 仍从 UI 线程直接修改 ActuationWorker 所拥有的 GatingService，HardwareWorker/ValveService 也保留同步 DO 旁路，唯一状态 owner/DO 单写者边界未由 API 强制。 [app/controllers/main_controller.py:1477]
+- [x] [Review][Patch] [Medium] ActuationWorker 的 DO session prepare 失败只静默退出且不 BLOCK；生产 `_drain_actuation_if_not_running()` 随后可在 UI 线程走测试 bridge 或持续积压消息。 [app/workers/actuation_worker.py:545]
+- [x] [Review][Patch] [Medium] 活动阀清理失败时异步协议 load 实际保留旧 document，但 Controller 已提前返回成功、渲染新协议，并忽略 failure result。 [app/controllers/main_controller.py:743]
+- [x] [Review][Patch] [Medium] 生产 Controller 未把配置传给 ActuationMetrics，协议页又硬编码 20ms，`actuation_emergency_close_timeout_ms` 也未接入生产 shutdown，合法配置覆盖无效。 [app/controllers/main_controller.py:129]
+- [x] [Review][Patch] [Medium] 同一 channel 的 emergency close 合并会静默丢弃新 command identity，不产生 cancelled/merged receipt，违反 command/receipt 原子关联。 [app/workers/actuation_worker.py:1416]
+- [x] [Review][Patch] [Medium] HardwareWorker 忽略 `wait(2000)` 返回值，ShutdownService 因而可在 AI read/task 仍卡住时把资源释放记录为成功。 [app/workers/hardware_worker.py:122]
+- [x] [Review][Patch] [Medium] 有限但极大的 `duration_ms` 在乘法后变成 `inf`，`round(inf)` 抛出的 OverflowError 未被调用链捕获，可终止 ActuationWorker。 [app/models/actuation.py:35]
+- [x] [Review][Patch] [Medium] RealHAL `flush_logs()` 改为 no-op 后，自检仍依赖它释放 serial handle；FlowWorker 持有 COM 时 HardwareCheckService 可能无法重新打开同一端口。 [app/workers/hardware_worker.py:266]
+- [x] [Review][Patch] [Medium] 嵌套 `_result_with_events()` 的结果再次 extend/提交会重复持久化同一结构化事件，造成重复日志与状态事件。 [app/services/protocol_executor.py:259]
+- [x] [Review][Patch] [Medium] AC11 所列的 stop/open、mode/queued、duplicate close、wall-clock、UI delay、flow/start、TTL 多 trial、timeout token/retry、AI shutdown 等并发失败路径没有自动化覆盖；全绿门禁不能证明这些契约。 [tests/test_actuation_worker.py:212]
+- [x] [Review][Patch] [Low] Story 勾选修改/扩展的 `app/main.py`、`tests/test_protocol_executor.py`、`tests/test_flow_service.py` 不在 diff 中，HIL raw 目录也未进入提交，任务与可复核证据描述需校正。任务清单已校正；live/mock raw 均为本机忽略文件，不声称已进入提交。 [docs/sprint-artifacts/3-4-low-jitter-actuation-20ms.md:188]
+- [x] [Review][Patch] [High] active executor snapshot 的 epoch 前进曾只更新 Controller token、未转移 FlowWorker 的 exact lease，之后 stop 可用错 token 并把 FlowWorker 永久留在 protocol owner；现保持真实 held token，terminal snapshot 精确释放，失败时保守阻断。 [app/controllers/main_controller.py:1420]
+- [x] [Review][Patch] [High] 生产协议现在先通过 ActuationWorker 提交独立 `master_prepare` 计划，只有主阀 SUCCESS receipt 后才获取 flow lease 并布防；失败保持 BLOCKED。 [app/controllers/main_controller.py:876]
+- [x] [Review][Patch] [High] LOW_FLOW/readiness loss、stop、severe 与安全转换现在按 configured targets 和 executor 保守 active/possibly-open 并集全关并等待独立回执。 [app/workers/actuation_worker.py:547]
+- [x] [Review][Patch] [High] ActuationWorker 停止接受后会立即终结 valve/flow intent，shutdown/restart 清理消息和 deadline，陈旧动作不再重放。 [app/workers/actuation_worker.py:452]
+- [x] [Review][Patch] [High] FlowWorker restart 必须显式单调重绑定 execution epoch，拒绝回退并允许 idle owner 前进到当前 startup-zero epoch。 [app/workers/flow_worker.py:202]
+- [x] [Review][Patch] [High] reset/persisted unsafe shutdown 现在建立 latch，禁止自动 ready；必须由操作者显式 Connect/重新自检重试。 [app/controllers/main_controller.py:266]
+- [x] [Review][Patch] [High] Controller 现在检查 ActuationWorker.prepare_restart()，handoff 失败时不启动任何 worker；run 也不再掩盖 retained DO session。 [app/controllers/main_controller.py:272]
+- [x] [Review][Patch] [High] 自检失败会在 signal/Controller 两侧原子写入 interlock `connected=False/hardware_ready=False`，消除陈旧 SAFE 重布防窗口。 [app/controllers/main_controller.py:761]
+- [x] [Review][Patch] [High] `32.2312ms` 失败样本经分段 trace 定位：`31.7538ms` 发生在 DAQ write 开始前，write ack 仅 `0.4774ms`；AI-only 对照进一步证明 USB/驱动紧密轮询 p95=`1.1383ms`，而 Windows 上 `QThread.msleep(1)` 实测 median/p95/max=`15.3865/18.7288/20.8658ms`。HardwareWorker 改用 Python 3.11 高分辨率等待且不改 `expected_ns`、首样本或门限后，无 trace 的生产路径在 `story-3-4-20260722-212335-live` 完成 200 open + 200 close：open/close/combined p95=`11.6752/10.4606/11.5172ms`，最大值=`12.0874/11.6772/12.0874ms`，所有 rolling/final-last-100 门禁 `<20ms`，正式样本失败 0。 [app/workers/hardware_worker.py:113]
+- [x] [Review][Patch] [Medium] TTL arm/disarm 改为 HardwareWorker owner 控制队列，DirectConnection 只入队；arm ack 直接进入 ActuationWorker 队列，不依赖 UI event loop。 [app/workers/hardware_worker.py:195]
+- [x] [Review][Patch] [Medium] epoch 失效、安全转换与 shutdown 会为每个移除的 accepted NORMAL command 生成 terminal `CANCELLED + stale` receipt。 [app/workers/actuation_worker.py:1928]
+- [x] [Review][Patch] [Medium] generation race 下 manual/pretest plan 会把写入置为 UNCERTAIN、进入关联 rollback 并发出失败 plan result，UI pending 可收敛。 [app/workers/actuation_worker.py:1645]
+- [x] [Review][Patch] [Medium] protocol load 保留 metrics snapshot，成功 start/restart 原子 reset metrics 与 state quality。 [app/workers/actuation_worker.py:1053]
+- [x] [Review][Patch] [Medium] HIL 性能循环现在由 HardwareWorker 获取 HAL frame，仅软件覆盖 AI0 值并保留 HAL monotonic/epoch/sequence，再经 GatingService→ProtocolExecutor→ActuationWorker。 [scripts/hil_actuation_benchmark.py:802]
+- [x] [Review][Patch] [Medium] HIL Tasks 已回退为未完成并明确只接受当前代码的新 live 证据，与 Story `in-progress` 一致。 [docs/sprint-artifacts/3-4-low-jitter-actuation-20ms.md:204]
+- [x] [Review][Patch] [Low] command payload 在 terminal receipt 后 retire，duplicate receipt identity 使用有界精确窗口。 [app/workers/actuation_worker.py:1917]
+- [x] [Review][Patch] [Low] Story File List 已补齐 safety_manager、flow/calibration/parser regression tests 与 HIL benchmark tests。 [docs/sprint-artifacts/3-4-low-jitter-actuation-20ms.md:375]
+- [x] [Review][Patch] [Low] ShutdownService 使用 ActuationWorker 成功完成全关与 ownership handoff 时不再误输出 `Shutdown guard blocked: 允许执行`；该问题仅为误导性日志，不是安全门禁失败，失败门禁日志仍保留。 [app/services/shutdown_service.py:144]
+- [x] [Review][Patch] [High] 最终 closure 复验在后续代码上再次捕获首个正式 open=`35.3069ms` 与 `31.3884ms`，DAQ write ack 分别仅约 `0.48ms/0.45ms`，证明单纯提高 Windows 线程优先级不足；根因是协议启动/安全全关期间产生的历史 AI batch 排在 manual trigger 与有效呼吸 batch 前。`start/manual_trigger` 现可越过历史 AI 消息，相邻且 readiness 相同的 AI batch 在消费时合并，但全部样本、顺序、HAL monotonic/epoch/sequence 与首个正式动作均保留；最终无 trace 运行 `story-3-4-20260727-175246-live` 完成 200 open + 200 close、400/400 success，open/close/combined p95=`9.75465/10.1801/9.90185ms`，最大 rolling p95=`9.78205/10.4723/10.3366ms`，final-last-100 p95=`9.77855/10.1076/9.8634ms`，首个正式样本=`8.98805ms`，stop、LOW_FLOW、severe、shutdown 均 21/21 全关。 [app/workers/actuation_worker.py:991]
+
 ## Dev Agent Record
 
 ### Agent Model Used
@@ -306,6 +352,8 @@ OpenAI Codex（GPT-5）
 - 2026-07-21 RED：安全暂停 close 失败后第二次 pause 被 pending transition 吞掉；GREEN：保留 `BLOCKED + active/possibly_open`，清除未提交转换并允许显式安全重试。
 - 2026-07-22 RED：真实 HIL 首轮在第 56 次 open 测得 `30.4293ms`，severe latch 立即补偿关闭 Valve 9 并在 shutdown 全关；分析发现普通 AI/UI message 可排在已到期 action 前。GREEN：新增 backlog starvation 用例并将已到期 action 提升到普通消息之前，同时保留 safety/readiness message 抢占；全量增至 288 passed。
 - 2026-07-22 HIL：修复后在两台 USB-6001（Dev1 序列号 34887710、Dev2 序列号 34887797）与 COM6/MFC 约 499.6 sccm 环境完成 200 open + 200 close。open/close/combined p95=`16.3064/16.4634/16.3589ms`，最大值=`25.0354/19.4961/25.0354ms`，正式样本失败数 0；stop、LOW_FLOW、44.3513ms severe 注入和 shutdown 均获得成功安全关闭回执。
+- 2026-07-22 分段诊断：失败 open 的 `expected→DAQ write start`=`31.7538ms`、write ack=`0.4774ms`。独立 AI-only 紧密轮询在 2 秒内获得 1999 个单帧批次，交付间隔 median/p95/max=`0.9958/1.1383/1.3133ms`；使用 HardwareWorker 原 `QThread.msleep(1)` 节拍时非空交付间隔 p95/max=`31.1037/35.8117ms`，根因锁定为 Windows 调度等待而非 ActuationWorker 或 DAQ write。
+- 2026-07-22 最终 HIL：用户明确授权后，以无 latency trace 的生产路径在两台 USB-6001（Dev1 34887710、Dev2 34887797）与 COM6/MFC 约 497.7 sccm 环境完成 200 open + 200 close。open/close/combined p95=`11.6752/10.4606/11.5172ms`，最大 rolling p95=`11.7950/10.7076/11.7672ms`，final-last-100 p95=`11.7672/10.6389/11.5664ms`，正式样本 400/400 success；stop、LOW_FLOW、45.7788ms severe 注入和 shutdown 均 21/21 全关。
 
 ### Implementation Plan
 
@@ -323,9 +371,16 @@ OpenAI Codex（GPT-5）
 - 已迁移生产协议、手动阀、预检、flow 与 shutdown 动作到 ActuationWorker/FlowWorker 所有权边界；HardwareWorker 保持 AI owner，ActuationWorker 为 DO 单写者。
 - 已实现持久 per-device/port DO task、真实 DAQ write ack、分离 AI/DO/serial 生命周期、关闭失败保守事实与可重试安全转换；真实 NI 已验证 Dev1/Dev2 的 port0/port1 四个持久资源组可与 continuous AI 并存。
 - 已完成暂停/恢复、动作质量中文 UX、结构化 receipt/metrics 事件和架构文档更新。
-- 自动化证据：定向关键集 20 passed；全量 `288 passed`；`ruff check app tests` 通过；`git diff --check` 通过。
-- 真实 HIL 原始证据位于 `logs/benchmarks/story-3-4-20260722-165645-live/`：`receipts.jsonl`、`receipts.csv`、`metadata.json`、`summary.json`。正式 400 个动作样本全部成功且三类 p95 均 `<20ms`；额外 66 个 safety close 覆盖初始全关、stop、LOW_FLOW、severe、预 shutdown 与 shutdown。
+- review patch 后自动化证据：定向关键集 `164 passed`，全量 `335 passed`；`python -m ruff check app tests scripts/hil_actuation_benchmark.py` 通过；`git diff --check` 通过。
+- review patch 后 mock smoke 位于本机忽略目录 `logs/benchmarks-review-smoke/story-3-4-20260722-185814-mock/`：20 open + 20 close，open/close/combined p95=`14.6098/13.9259/14.6098ms`，stop、LOW_FLOW、severe、shutdown 及全部 acceptance gate 通过；该结果只验证脚本与软件路径，不是 NI 性能证据。
+- 第二轮对抗式 review 修复后：扩大定向集 `290 passed`、全量 `357 passed`，ruff 与 `git diff --check` 通过。生产协议在主阀 SUCCESS receipt 前不再布防；LOW_FLOW/stop/severe/shutdown 全部按主阀+20 气味阀收敛；stopped intent、Flow epoch、unsafe restart、self-check interlock、TTL owner handshake、cancel receipt、plan rollback 与 metrics reset 均有新增回归。
+- 第二轮复审现场修复后，全量自动化 `360 passed`，`python -m ruff check app tests scripts/hil_actuation_benchmark.py` 与 `git diff --check 6f902a7` 通过。新增回归覆盖单线 master DO 必须写 `bool`、close-only 不依赖 AI/MFC ready，以及软件 AI0 stimulus 不回写激励开始前的缓冲帧和 set/clear 在途读取竞态。
+- 第二轮 mock smoke 位于本机忽略目录 `logs/benchmarks-review-smoke/story-3-4-20260722-195257-mock/`：20 open + 20 close，open/close/combined p95=`0.5045/6.7791/6.7617ms`；四个安全场景分别验证 21/21 configured targets 成功关闭，rolling/final/退出码门禁通过。metadata 明确 `ai0_external_signal=false`、`ai6_external_signal=false`，只能证明软件路径，不能替代当前真实 NI HIL。
+- 历史真实 HIL 原始证据位于本机忽略目录 `logs/benchmarks/story-3-4-20260722-165645-live/`：`receipts.jsonl`、`receipts.csv`、`metadata.json`、`summary.json`。它证明当时版本的 400 个动作样本和安全场景，但生成时间早于后续 review patch，不能作为最终 closure 门禁；Story 当时因此保持 in-progress 并等待重新授权实机复跑。
+- 历史复审 HIL：`logs/benchmarks/story-3-4-20260722-201607-live/` 验证 21/21 configured targets 关闭；`logs/benchmarks/story-3-4-20260722-202253-live/` 的 `32.2312ms` 失败与 `logs/benchmarks/story-3-4-20260722-212335-live/` 的阶段性通过保留为诊断历史。后续生产行为修复已使这些证据不再作为最终 closure 门禁。
 - HIL 限制：现场无外接 AI0 呼吸信号或 AI6 TTL 源；两通道 continuous AI task、TTL 采集管线和 UI/logging 负载保持并发，但本次证据不声称验证了真实呼吸波形或外部 TTL 边沿识别。
+- 最终 closure HIL：修复后授权全关证据位于 `logs/benchmarks/story-3-4-20260727-175231-live/`，21/21 configured targets 成功关闭；正式无 trace 证据位于 `logs/benchmarks/story-3-4-20260727-175246-live/`，metadata 明确 `latency_trace_enabled=false`、`ai0_external_signal=false`、`ai6_external_signal=false`。正式回执为 200 open + 200 close、400 个唯一 command、400/400 success；open/close/combined aggregate p95、全部 rolling p95 与 final-last-100 p95 均严格 `<20ms`；stop、LOW_FLOW、severe、shutdown 均 21/21 全关，shutdown 为 success。
+- 最终软件门禁：全量 `378 passed`；`python -m ruff check .` 与 `git diff --check 6f902a7` 通过。用户在最终人工检查点明确授权更新 Story/HIL 证据及 sprint-status，Story 状态置为 `done`；仍未提交或推送。
 
 ### File List
 
@@ -340,6 +395,7 @@ OpenAI Codex（GPT-5）
 - app/services/mock_hal.py
 - app/services/protocol_executor.py
 - app/services/real_hal.py
+- app/services/safety_manager.py
 - app/services/shutdown_service.py
 - app/services/ttl_trigger_service.py
 - app/services/valve_service.py
@@ -355,14 +411,20 @@ OpenAI Codex（GPT-5）
 - tests/test_actuation_do_adapter.py
 - tests/test_actuation_worker.py
 - tests/test_async_protocol_executor.py
+- tests/test_calibration_integration.py
 - tests/test_do_lifecycle.py
+- tests/test_flow_controls.py
 - tests/test_flow_worker.py
+- tests/test_hil_actuation_benchmark.py
 - tests/test_monotonic_sampling.py
 - tests/test_shutdown_actuation.py
 - tests/test_app.py
 - tests/test_integration_gating.py
+- tests/test_protocol_executor.py
+- tests/test_protocol_parser.py
 - tests/test_protocol_trigger_integration.py
 - tests/test_protocol_view.py
+- tests/test_safety_manager.py
 - tests/test_simulation_mode.py
 - tests/test_ttl_input.py
 - tests/test_valve_service.py
@@ -377,3 +439,8 @@ OpenAI Codex（GPT-5）
 - 2026-07-21：创建 Story 3.4 开发上下文，状态设为 ready-for-dev。
 - 2026-07-21：完成 AC 1-11 的软件实现与自动化门禁；真实 Windows/NI HIL（AC 8/12）待用户明确授权，状态保持 in-progress。
 - 2026-07-22：经用户明确授权完成真实 Windows/NI HIL；修复 message backlog 对 deadline 的饥饿后，200+200 正式样本 p95 全部 `<20ms`，安全场景与最终全关通过，状态置为 review。
+- 2026-07-22：对抗式 review 的 24 个代码/测试/文档补丁已完成并通过 335 项自动测试；HIL 脚本改为生产安全路径并强化 rolling/final/退出码门禁。旧 live raw 早于这些改动，当前代码仍需重新授权实机复跑，状态改为 in-progress。
+- 2026-07-22：第二轮独立对抗式 review 的 15 个软件/测试/文档 finding 已修复并通过 357 项自动测试；HIL 脚本经完整 AI0→Gating→Executor→Actuation 链路及逐场景 21-target 全关 mock 门禁。唯一未关闭项是当前 patch 后的真实 Windows/NI live HIL，Story 继续保持 in-progress。
+- 2026-07-22：用户明确授权并完成当前复审代码的真实 Windows/NI 检查；21-target close-only 通过，但正式性能 run 首个 open=`32.2312ms`，严重阈值保护与全关生效，AC12 未通过。自动化增至 360 passed，Story 与 sprint-status 继续保持 in-progress。
+- 2026-07-22：对 `32.2312ms` High finding 完成 AI/USB、HardwareWorker、ActuationWorker 与 DAQ ack 分段诊断；修复 Windows `QThread.msleep(1)` 粗粒度等待后，无 trace 的真实 200 open + 200 close 门禁及四类 21-target 安全场景全部通过。全量自动化增至 363 passed；按用户明确要求不提交、不推送、不把 Story 标为 done，状态保持 in-progress。
+- 2026-07-27：最终 closure audit 在后续代码上复现首个正式 open=`35.3069ms/31.3884ms`，确认剩余根因是历史 AI batch 对 trigger/有效 batch 的进程内 FIFO 阻塞；修复控制消息优先级与无损 batch 合并后，全量 `378 passed`，ruff/diff-check 通过，最终真实 Windows HIL 200+200、全部 rolling/final 门禁及四类 21-target 安全场景通过。经用户授权，Story 与 sprint-status 置为 done；未提交、未推送。

@@ -34,6 +34,7 @@ class ProtocolView(QWidget):
 
     def __init__(self) -> None:
         super().__init__()
+        self._quality_target_ms = 20.0
         self._load_button = QPushButton("加载协议")
         self._path_label = QLabel("尚未加载协议")
         self._summary_label = QLabel("等待加载 .txt 或 .csv 协议文件")
@@ -221,7 +222,7 @@ class ProtocolView(QWidget):
         if snapshot.quality_block_reason:
             self._execution_quality_label.setStyleSheet("color: #b00020; font-weight: 700;")
         elif any(
-            value is not None and value > 20.0
+            value is not None and value >= self._quality_target_ms
             for value in (snapshot.p95_open_ms, snapshot.p95_close_ms, snapshot.p95_combined_ms)
         ):
             self._execution_quality_label.setStyleSheet("color: #c56a00; font-weight: 600;")
@@ -242,16 +243,21 @@ class ProtocolView(QWidget):
         self._ttl_mode_button.setChecked(snapshot.current_mode == "ttl")
         del manual_blocker, ttl_blocker
 
-    @staticmethod
-    def _format_quality(snapshot: ProtocolExecutionSnapshot) -> str:
+    def set_quality_target_ms(self, target_ms: float) -> None:
+        target = float(target_ms)
+        if target <= 0:
+            raise ValueError("actuation quality target must be positive")
+        self._quality_target_ms = target
+
+    def _format_quality(self, snapshot: ProtocolExecutionSnapshot) -> str:
         def metric(name: str, value: float | None, count: int) -> str:
             if value is None:
                 return f"{name} -（n={count}）"
             suffix = ""
-            if value > 20.0:
+            if value > self._quality_target_ms:
                 suffix = " 警告"
-            elif value == 20.0:
-                suffix = " 临界（未达到 <20ms 目标）"
+            elif value == self._quality_target_ms:
+                suffix = f" 临界（未达到 <{self._quality_target_ms:g}ms 目标）"
             return f"{name} {value:.2f}ms（n={count}）{suffix}"
 
         jitter = "-" if snapshot.last_jitter_ms is None else f"{snapshot.last_jitter_ms:.2f}ms"

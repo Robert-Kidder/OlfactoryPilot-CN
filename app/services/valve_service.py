@@ -96,6 +96,33 @@ class ValveService:
             )
         return tuple(steps)
 
+    def plan_master_prepare(
+        self,
+        *,
+        safety_state: SafetyState | None = None,
+    ) -> tuple[bool, ValveWritePlan | str]:
+        """Build the owner-thread plan that must complete before protocol arming."""
+        if not self.master_valve_line or self.master_is_open():
+            return True, ValveWritePlan(0, True, False, ())
+        if not self.state.flow_setpoints_ready:
+            return False, "MFC 流量设定尚未建立，已阻止主阀预备"
+        safety = safety_state or self._build_safety_state()
+        allowed, reason = self.safety_manager.guard_command(
+            safety_state=safety,
+            hardware_ready=self._is_hardware_ready(),
+            action="master-prepare",
+            source="protocol-start",
+        )
+        if not allowed:
+            return False, reason
+        device, line = self._split_target(self.master_valve_line)
+        return True, ValveWritePlan(
+            requested_valve=0,
+            requested_state=True,
+            safety_close=False,
+            steps=(ValvePlanStep(0, device, line, True, "master_prepare"),),
+        )
+
     def plan_valve(
         self,
         channel_id: int,

@@ -9,6 +9,7 @@ from app.models import (
     ProtocolExecutionStatus,
     ProtocolTrial,
     TriggerMode,
+    duration_ms_to_ns,
 )
 from app.services.gating_service import GatingService
 from app.services.hal import AnalogInputFrame, BreathSampleBatch
@@ -141,3 +142,69 @@ def test_stale_successful_open_does_not_set_active_or_advance() -> None:
     assert result.state.active_valve is None
     assert result.state.trial_index == 0
     assert result.events[-1].result == "stale"
+
+
+def test_extreme_finite_duration_is_rejected_as_value_error() -> None:
+    try:
+        duration_ms_to_ns(1e308)
+    except ValueError as exc:
+        assert "纳秒值超出有效范围" in str(exc)
+    else:  # pragma: no cover - regression guard
+        raise AssertionError("extreme duration must not leak OverflowError")
+
+
+def test_possibly_open_valve_blocks_rearm_and_snapshot_reports_stop_only() -> None:
+    executor = _executor()
+    executor.state.status = ProtocolExecutionStatus.BLOCKED
+    executor.state.active_valve = None
+    executor.state.possibly_open_valves.add(3)
+
+    result = executor.rearm_current(readiness=_readiness(), timestamp=11.0)
+    snapshot = executor.snapshot(11.0, readiness=_readiness())
+
+    assert result.events[-1].event == "rearm_rejected"
+    assert snapshot.can_rearm is False
+    assert snapshot.can_stop is True
+
+
+def test_timeout_identity_cannot_skip_a_later_trial() -> None:
+    executor = _executor()
+    first_identity = {
+        "execution_epoch": executor.state.execution_epoch,
+        "arm_epoch": executor.state.arm_epoch,
+        "trial_index": executor.state.trial_index,
+        "trial_id": executor.state.current_trial.trial_id,
+        "waiting_started_at": executor.state.waiting_started_at,
+    }
+    executor.skip_current(
+        safety_state="SAFE",
+        readiness=_readiness(),
+        timestamp=10.5,
+    )
+    executor.accept_trigger(
+        TriggerMode.MANUAL,
+        readiness=_readiness(),
+        timestamp=10.6,
+    )
+
+    stale = executor.handle_breath_timeout_deadline(
+        readiness=_readiness(),
+        timestamp=11.0,
+        **first_identity,
+    )
+
+    assert stale.events == []
+    assert executor.state.trial_index == 1
+    assert executor.state.status == ProtocolExecutionStatus.WAITING_EXHALE
+
+
+def test_nested_results_do_not_duplicate_structured_events() -> None:
+    executor = _executor()
+    result = executor.skip_current(
+        safety_state="SAFE",
+        readiness=_readiness(),
+        timestamp=10.5,
+    )
+
+    for event in result.events:
+        assert sum(recorded is event for recorded in executor.state.events) == 1

@@ -327,7 +327,7 @@ def test_ready_mode_override_does_not_mutate_frozen_trial_and_start_preserves_it
     assert started.state.current_mode == TriggerMode.TTL
     assert started.state.mode_override == TriggerMode.TTL
     assert document.trials[0].trigger == TriggerMode.MANUAL
-    assert started.state.ttl_armed is True
+    assert started.state.ttl_armed is False
 
 
 def test_running_mode_switch_clears_waits_retry_and_invalidates_epoch() -> None:
@@ -344,7 +344,7 @@ def test_running_mode_switch_clears_waits_retry_and_invalidates_epoch() -> None:
     assert result.state.waiting_trigger_started_at == 10.2
     assert result.state.waiting_started_at is None
     assert result.state.retry_count == 0
-    assert result.state.ttl_armed is True
+    assert result.state.ttl_armed is False
 
 
 @pytest.mark.parametrize(
@@ -478,6 +478,7 @@ def test_valid_ttl_pulse_preserves_capture_timestamp_and_identity() -> None:
     executor.reset(_document())
     executor.set_trigger_mode(TriggerMode.TTL, readiness=_readiness(), timestamp=9.0)
     executor.start(readiness=_readiness(), timestamp=10.0)
+    executor.state.ttl_armed = True
 
     result = executor.accept_trigger(
         TriggerMode.TTL,
@@ -494,6 +495,25 @@ def test_valid_ttl_pulse_preserves_capture_timestamp_and_identity() -> None:
     assert event.arm_epoch == result.state.arm_epoch
     assert event.pulse_sequence == 42
     assert event.trigger_source == "ttl"
+
+
+def test_matching_ttl_pulse_before_hardware_arm_ack_is_ignored() -> None:
+    executor = _executor()
+    executor.reset(_document())
+    executor.set_trigger_mode(TriggerMode.TTL, readiness=_readiness(), timestamp=9.0)
+    executor.start(readiness=_readiness(), timestamp=10.0)
+
+    result = executor.accept_trigger(
+        TriggerMode.TTL,
+        readiness=_readiness(),
+        timestamp=10.1,
+        captured_epoch=executor.state.arm_epoch,
+        sequence=1,
+    )
+
+    assert result.events[-1].event == "ttl_pulse_ignored"
+    assert "尚未确认布防" in result.events[-1].message
+    assert executor.state.status == ProtocolExecutionStatus.WAITING_TRIGGER
 
 
 def test_close_failed_blocks_start_reset_and_rearm_until_stop_recovers() -> None:

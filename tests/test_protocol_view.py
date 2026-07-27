@@ -239,3 +239,24 @@ def test_protocol_view_renders_actuation_quality_remaining_and_pause_resume(qt_a
     )
     view._resume_button.click()
     assert resumed == [True]
+
+
+def test_protocol_view_uses_configured_quality_target(qt_app, qtbot) -> None:
+    view = ProtocolView()
+    qtbot.addWidget(view)
+    view.set_quality_target_ms(15.0)
+
+    snapshot = ProtocolExecutionSnapshot(
+        status=ProtocolExecutionStatus.READY,
+        status_text="ready",
+        has_protocol=True,
+        can_start=True,
+        can_stop=False,
+        can_advance=False,
+        p95_open_ms=15.0,
+        sample_count_open=20,
+    )
+    view.render_execution_state(snapshot)
+
+    assert "<15ms" in view._execution_quality_label.text()
+    assert "font-weight: 600" in view._execution_quality_label.styleSheet()

@@ -34,6 +34,7 @@ class ShutdownService:
         actuation_worker=None,
         flow_worker=None,
         actuation_timeout_ms: int = 2000,
+        emergency_close_timeout_ms: int = 500,
     ) -> None:
         self.state = state
         self.worker = worker
@@ -46,6 +47,7 @@ class ShutdownService:
         self.actuation_worker = actuation_worker
         self.flow_worker = flow_worker
         self.actuation_timeout_ms = max(1, int(actuation_timeout_ms))
+        self.emergency_close_timeout_ms = max(1, int(emergency_close_timeout_ms))
 
     def shutdown(
         self,
@@ -139,10 +141,11 @@ class ShutdownService:
             event["error"],
         )
 
-        if (guard_allowed or force) and self.actuation_worker is None:
-            self.worker.stop()
-        else:
-            LOG.warning("Shutdown guard blocked: %s", guard_reason)
+        if self.actuation_worker is None:
+            if guard_allowed or force:
+                self.worker.stop()
+            else:
+                LOG.warning("Shutdown guard blocked: %s", guard_reason)
 
         return event
 
@@ -152,7 +155,9 @@ class ShutdownService:
             valves_closed = self._call_bool(self.worker.close_all_channels, "关闭阀门", errors)
         else:
             valves_closed = self._call_bool(
-                lambda: self.actuation_worker.emergency_close_all(self.actuation_timeout_ms),
+                lambda: self.actuation_worker.emergency_close_all(
+                    self.emergency_close_timeout_ms
+                ),
                 "ActuationWorker 紧急全关",
                 errors,
             )
@@ -172,9 +177,21 @@ class ShutdownService:
         heaters_off = self._call_bool(self.worker.stop_heaters, "停止加热", errors)
         self._call_optional(self.worker.flush_logs, "flush 日志", errors)
         if self.actuation_worker is None:
-            self._call_optional(self.worker.release_resources, "释放NI/RS232", errors)
+            resources_released = self._call_bool(
+                self.worker.release_resources,
+                "释放 HardwareWorker AI 资源",
+                errors,
+            )
+            if not resources_released:
+                errors.append("HardwareWorker AI 资源未在超时内释放。")
         else:
-            self._call_optional(self.worker.release_ai_resources, "释放 AI", errors)
+            ai_released = self._call_bool(
+                self.worker.release_ai_resources,
+                "释放 AI",
+                errors,
+            )
+            if not ai_released:
+                errors.append("HardwareWorker AI 资源未在超时内释放。")
             if self.flow_worker is not None:
                 serial_stopped = self._call_bool(
                     lambda: self.flow_worker.shutdown(self.actuation_timeout_ms),

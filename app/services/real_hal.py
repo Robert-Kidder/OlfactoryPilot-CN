@@ -95,6 +95,7 @@ class RealHAL(HalBase):
         self._serial_lock = threading.Lock()
         self._serial = None
         self._ai_task = None
+        self._ai_release_failed = False
         self._monotonic_ns_clock = monotonic_ns_clock or time.perf_counter_ns
         self._wall_clock = wall_clock or time.time
         self._ai_epoch = 0
@@ -113,11 +114,21 @@ class RealHAL(HalBase):
         self._digital_lines = list(valve_lines or [])
         self._do_sessions: dict[tuple[str, str], _DOPortSession] = {}
         self._do_owner_thread_id: int | None = None
+        self._do_prepare_failed = False
         # HardwareWorker lazily creates the AI task on its own thread.
+
+    @property
+    def serial_resources_in_use(self) -> bool:
+        """Whether the serial owner currently holds an open COM connection."""
+        with self._serial_lock:
+            return bool(self._serial is not None and getattr(self._serial, "is_open", True))
 
     @classmethod
     def from_config(cls, config: dict) -> RealHAL:
-        valve_lines = _collect_valve_lines(config.get("valve_mapping") or {})
+        valve_lines = _collect_valve_lines(
+            config.get("valve_mapping") or {},
+            hardware_variant=str(config.get("hardware_variant", "20-channel")),
+        )
         ttl_config = TtlTriggerConfig.from_mapping(config)
         return cls(
             ai0_channel=str(config.get("ai0_channel", "Dev1/ai0")),
@@ -186,17 +197,26 @@ class RealHAL(HalBase):
         ai0_values = list(values) if isinstance(values, list | tuple) else [values]
         return self._build_ai_frames(ai0_values, None)
 
-    def reset_ai_input(self) -> None:
+    def reset_ai_input(self) -> bool:
         task = self._ai_task
-        self._ai_task = None
-        self._ttl_input_ready = False
-        self._ai_sequence = 0
         if task is None:
-            return
+            self._ttl_input_ready = False
+            self._ai_sequence = 0
+            return True
         try:
             task.close()
         except Exception:  # pragma: no cover - defensive
             LOG.exception("Failed to reset NI-DAQmx AI task")
+            # Keep the reference: the driver may still reserve the device and
+            # shutdown must not report a successful ownership handoff.
+            self._ttl_input_ready = False
+            self._ai_release_failed = True
+            return False
+        self._ai_task = None
+        self._ai_release_failed = False
+        self._ttl_input_ready = False
+        self._ai_sequence = 0
+        return True
 
     def _build_ai_frames(
         self,
@@ -362,14 +382,24 @@ class RealHAL(HalBase):
             )
         candidate = list(session.states)
         candidate[bit - session.first_line] = bool(state)
+        # CHAN_FOR_ALL_LINES expects a packed integer for a multi-line port
+        # channel, but nidaqmx's single-line writer accepts only a scalar bool.
+        # A list[bool] is samples, not the simultaneous port state.
+        packed_state = sum(1 << index for index, enabled in enumerate(candidate) if enabled)
+        write_value: bool | int = bool(candidate[0]) if len(candidate) == 1 else packed_state
         started_ns = int(self._monotonic_ns_clock())
         try:
             session.task.write(
-                candidate,
+                write_value,
                 auto_start=False,
                 timeout=max(0.001, int(timeout_ms) / 1000),
             )
         except Exception as exc:
+            # A failed close is physically uncertain.  Keeping the previous
+            # cached True bit could reassert that valve on the next packed-port
+            # write, so fail the target's software intent toward the safe state.
+            if not state:
+                session.states[bit - session.first_line] = False
             return DigitalWriteAck(
                 success=False,
                 started_ns=started_ns,
@@ -391,6 +421,8 @@ class RealHAL(HalBase):
     def prepare_do_output(self) -> bool:
         owner = threading.get_ident()
         if self._do_sessions:
+            if self._do_prepare_failed:
+                return False
             return self._do_owner_thread_id == owner
         if LineGrouping is None or not hasattr(LineGrouping, "CHAN_FOR_ALL_LINES"):
             return False
@@ -403,6 +435,17 @@ class RealHAL(HalBase):
                 return False
             port, bit = parsed
             groups.setdefault((device, port), set()).add(bit)
+        for (device, port), bits in sorted(groups.items()):
+            first = min(bits)
+            last = max(bits)
+            if bits != set(range(first, last + 1)):
+                LOG.error(
+                    "DO 映射 %s/%s 必须连续；拒绝隐式占用未配置线路：%s",
+                    device,
+                    port,
+                    sorted(bits),
+                )
+                return False
         created: list[_DOPortSession] = []
         try:
             for (device, port), bits in sorted(groups.items()):
@@ -410,46 +453,63 @@ class RealHAL(HalBase):
                 last = max(bits)
                 suffix = f"line{first}" if first == last else f"line{first}:{last}"
                 task = nidaqmx.Task()
+                session = _DOPortSession(
+                    task=task,
+                    device=device,
+                    port=port,
+                    first_line=first,
+                    last_line=last,
+                    states=[False] * (last - first + 1),
+                )
+                # Track the task immediately so add_do_chan/start failures also
+                # participate in rollback.
+                created.append(session)
                 task.do_channels.add_do_chan(
                     f"{device}/{port}/{suffix}",
                     line_grouping=LineGrouping.CHAN_FOR_ALL_LINES,
                 )
                 if hasattr(task, "start"):
                     task.start()
-                created.append(
-                    _DOPortSession(
-                        task=task,
-                        device=device,
-                        port=port,
-                        first_line=first,
-                        last_line=last,
-                        states=[False] * (last - first + 1),
-                    )
-                )
         except Exception:
             LOG.exception("预建 NI-DAQmx DO task 失败")
+            failed: list[_DOPortSession] = []
             for session in created:
                 try:
                     session.task.close()
                 except Exception:
                     LOG.exception("回滚 DO task 失败")
+                    failed.append(session)
+            if failed:
+                self._do_sessions = {(item.device, item.port): item for item in failed}
+                self._do_owner_thread_id = owner
+                self._do_prepare_failed = True
             return False
         self._do_sessions = {(item.device, item.port): item for item in created}
         self._do_owner_thread_id = owner
+        self._do_prepare_failed = False
         return True
 
-    def release_do_output(self) -> None:
+    def release_do_output(self) -> bool:
         owner = threading.get_ident()
         if self._do_sessions and self._do_owner_thread_id != owner:
             raise RuntimeError("DO task 所有权不属于当前线程，不能跨线程释放。")
         sessions = list(self._do_sessions.values())
-        self._do_sessions.clear()
-        self._do_owner_thread_id = None
+        failed: list[_DOPortSession] = []
         for session in sessions:
             try:
                 session.task.close()
             except Exception:
                 LOG.exception("释放 NI-DAQmx DO task 失败")
+                failed.append(session)
+        self._do_sessions = {(item.device, item.port): item for item in failed}
+        if failed:
+            # Preserve ownership: another thread must not create a replacement
+            # task while NI-DAQmx may still hold the original reservation.
+            self._do_prepare_failed = True
+            return False
+        self._do_owner_thread_id = None
+        self._do_prepare_failed = False
+        return True
 
     def close_all(self) -> bool:
         if self._digital_lines and not self._do_sessions and not self.prepare_do_output():
@@ -526,6 +586,8 @@ class RealHAL(HalBase):
         return results, ready
 
     def _ensure_ai_task(self):
+        if self._ai_release_failed:
+            raise RuntimeError("previous NI-DAQmx AI task release failed; refusing task reuse")
         if self._ai_task is None:
             task = nidaqmx.Task()
             try:
@@ -566,6 +628,7 @@ class RealHAL(HalBase):
                 self._start_ai_task(fallback)
                 self._ai_task = fallback
                 self._ttl_input_ready = False
+            self._ai_release_failed = False
         return self._ai_task
 
     def _start_ai_task(self, task) -> None:
@@ -677,16 +740,20 @@ class RealHAL(HalBase):
         return float(values[index])
 
 
-def _collect_valve_lines(valve_mapping: dict) -> list[str]:
+def _collect_valve_lines(
+    valve_mapping: dict, *, hardware_variant: str = "20-channel"
+) -> list[str]:
     lines: set[str] = set()
     master = valve_mapping.get("master_valve")
     if master:
         lines.add(str(master))
     variants = valve_mapping.get("variants") or {}
     if isinstance(variants, dict):
-        for mapping in variants.values():
-            if not isinstance(mapping, dict):
-                continue
+        selected_variant = hardware_variant
+        if selected_variant not in variants and "20-channel" in variants:
+            selected_variant = "20-channel"
+        mapping = variants.get(selected_variant)
+        if isinstance(mapping, dict):
             for line in mapping.values():
                 if line:
                     lines.add(str(line))

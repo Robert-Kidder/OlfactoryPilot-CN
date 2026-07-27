@@ -9,7 +9,8 @@ import statistics
 import sys
 import threading
 import time
-from dataclasses import asdict
+from collections.abc import Callable
+from dataclasses import asdict, replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -17,6 +18,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from PySide6.QtCore import QThread
 from PySide6.QtWidgets import QApplication
 
 from app.main import load_effective_config
@@ -27,25 +29,47 @@ from app.models import (
     ActuationReceipt,
     ActuationResult,
     AppState,
+    ProtocolDocument,
+    ProtocolExecutionReadiness,
     ProtocolExecutionSnapshot,
     ProtocolExecutionState,
     ProtocolExecutionStatus,
+    ProtocolTrial,
     SelfCheckResult,
+    TriggerMode,
 )
-from app.services import ActuationDOAdapter, ActuationMetrics, MockHAL, RealHAL, SafetyManager
+from app.services import (
+    ActuationDOAdapter,
+    ActuationMetrics,
+    FlowService,
+    GatingService,
+    MockHAL,
+    ProtocolExecutor,
+    RealHAL,
+    SafetyManager,
+    ShutdownService,
+)
 from app.services.hardware_check_service import HardwareCheckService
 from app.services.valve_service import ValveService
 from app.views.protocol_view import ProtocolView
-from app.workers import ActuationInterlockIngress, ActuationWorker, HardwareWorker, InterlockSnapshot
+from app.workers import (
+    ActuationInterlockIngress,
+    ActuationWorker,
+    FlowCommand,
+    FlowWorker,
+    HardwareWorker,
+    InterlockSnapshot,
+)
 
 LIVE_CONFIRMATION = "I_AUTHORIZE_LIVE_NI_HIL"
 
 
 class ReceiptCollector:
-    def __init__(self, jsonl_path: Path) -> None:
+    def __init__(self, jsonl_path: Path, *, latency_trace=None) -> None:
         self._condition = threading.Condition()
         self._receipts: list[ActuationReceipt] = []
         self._jsonl_path = jsonl_path
+        self._latency_trace = latency_trace
         self.inject_delay_ms = 0.0
 
     @property
@@ -55,59 +79,375 @@ class ReceiptCollector:
 
     def wrap(self, adapter: ActuationDOAdapter):
         def writer(command: ActuationCommand) -> ActuationReceipt:
+            tracing = (
+                self._latency_trace is not None
+                and self._latency_trace.trial_label is not None
+            )
+            entered_ns = time.perf_counter_ns() if tracing else None
+            if tracing:
+                self._latency_trace.record(
+                    "writer_enter",
+                    at_ns=entered_ns,
+                    command_id=command.command_id,
+                    expected_ns=command.expected_ns,
+                    action=command.action.value,
+                    category=command.category.value,
+                )
             delay_ms = self.inject_delay_ms
             if delay_ms and command.category == ActuationCategory.NORMAL:
                 self.inject_delay_ms = 0.0
                 time.sleep(delay_ms / 1000.0)
             receipt = adapter.execute(command)
-            payload = asdict(receipt)
-            payload["action"] = receipt.action.value
-            payload["category"] = receipt.category.value
-            payload["result"] = receipt.result.value
-            with self._jsonl_path.open("a", encoding="utf-8") as handle:
-                handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
-            with self._condition:
-                self._receipts.append(receipt)
-                self._condition.notify_all()
+            if tracing:
+                self._latency_trace.record(
+                    "writer_return",
+                    command_id=command.command_id,
+                    expected_ns=command.expected_ns,
+                    writer_enter_ns=entered_ns,
+                    hal_started_ns=receipt.started_ns,
+                    hal_actual_ns=receipt.actual_ns,
+                    result=receipt.result.value,
+                )
             return receipt
 
         writer.hal = adapter.hal
         return writer
 
-    def wait_for(self, predicate, timeout_s: float, pump) -> ActuationReceipt:
+    def record(self, receipt: ActuationReceipt) -> None:
+        payload = asdict(receipt)
+        payload["action"] = receipt.action.value
+        payload["category"] = receipt.category.value
+        payload["result"] = receipt.result.value
+        with self._jsonl_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
+        with self._condition:
+            self._receipts.append(receipt)
+            self._condition.notify_all()
+
+    def wait_for(
+        self,
+        predicate,
+        timeout_s: float,
+        pump,
+        *,
+        after_index: int = 0,
+    ) -> ActuationReceipt:
         deadline = time.monotonic() + timeout_s
         while time.monotonic() < deadline:
             pump()
             with self._condition:
-                match = next((item for item in self._receipts if predicate(item)), None)
+                match = next(
+                    (item for item in self._receipts[after_index:] if predicate(item)),
+                    None,
+                )
                 if match is not None:
                     return match
                 self._condition.wait(min(0.01, max(0.0, deadline - time.monotonic())))
         raise TimeoutError("等待动作回执超时")
 
 
+class LatencyTrace:
+    """Optional in-memory side trace; never changes production timestamps."""
+
+    def __init__(
+        self,
+        *,
+        enabled: bool = False,
+        run_id: str = "",
+        max_events: int = 50_000,
+    ) -> None:
+        self.enabled = bool(enabled)
+        self.run_id = str(run_id)
+        self.max_events = max(1, int(max_events))
+        self._lock = threading.Lock()
+        self._events: list[dict[str, object]] = []
+        self._trial_label: str | None = None
+        self._dropped_events = 0
+
+    @property
+    def trial_label(self) -> str | None:
+        if not self.enabled:
+            return None
+        with self._lock:
+            return self._trial_label
+
+    @property
+    def events(self) -> list[dict[str, object]]:
+        with self._lock:
+            return list(self._events)
+
+    def begin_trial(self, label: str) -> None:
+        if not self.enabled:
+            return
+        with self._lock:
+            self._trial_label = str(label)
+        self.record("trial_trace_begin")
+
+    def end_trial(self) -> None:
+        if not self.enabled:
+            return
+        self.record("trial_trace_end")
+        with self._lock:
+            self._trial_label = None
+
+    def record(self, event: str, *, at_ns: int | None = None, **fields) -> None:
+        if not self.enabled:
+            return
+        event_ns = time.perf_counter_ns() if at_ns is None else int(at_ns)
+        with self._lock:
+            if self._trial_label is None:
+                return
+            if len(self._events) >= self.max_events:
+                self._dropped_events += 1
+                return
+            self._events.append(
+                {
+                    "schema": "story-3.4.hil-latency.v1",
+                    "run_id": self.run_id,
+                    "event": str(event),
+                    "at_ns": event_ns,
+                    "trial_label": self._trial_label,
+                    "thread_id": threading.get_ident(),
+                    **fields,
+                }
+            )
+
+    def write_jsonl(self, path: Path) -> None:
+        if not self.enabled:
+            return
+        with self._lock:
+            events = list(self._events)
+            dropped_events = self._dropped_events
+        with path.open("w", encoding="utf-8") as handle:
+            for event in events:
+                handle.write(json.dumps(event, ensure_ascii=False) + "\n")
+            handle.write(
+                json.dumps(
+                    {
+                        "schema": "story-3.4.hil-latency.v1",
+                        "run_id": self.run_id,
+                        "event": "trace_complete",
+                        "event_count": len(events),
+                        "dropped_events": dropped_events,
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
+
+
 class AIOnlyHal:
     """Expose only HardwareWorker-owned AI calls; serial and DO stay elsewhere."""
 
-    def __init__(self, hal, airflow: float) -> None:
+    def __init__(
+        self,
+        hal,
+        airflow: float,
+        *,
+        monotonic_ns_clock: Callable[[], int] = time.perf_counter_ns,
+        latency_trace: LatencyTrace | None = None,
+    ) -> None:
         self._hal = hal
         self._airflow = float(airflow)
+        self._monotonic_ns_clock = monotonic_ns_clock
+        self._latency_trace = latency_trace
+        self._override_lock = threading.Lock()
+        self._ai0_override: float | None = None
+        self._ai0_override_started_ns: int | None = None
 
     @property
     def ttl_input_ready(self) -> bool:
         return bool(getattr(self._hal, "ttl_input_ready", False))
 
     def read_ai_frames(self, timestamp=None):
-        return self._hal.read_ai_frames(timestamp)
+        tracing = (
+            self._latency_trace is not None
+            and self._latency_trace.trial_label is not None
+        )
+        read_started_ns = time.perf_counter_ns() if tracing else 0
+        frames = self._hal.read_ai_frames(timestamp)
+        read_returned_ns = time.perf_counter_ns() if tracing else 0
+        with self._override_lock:
+            override = self._ai0_override
+            override_started_ns = self._ai0_override_started_ns
+        overridden = []
+        if override is None or override_started_ns is None:
+            if tracing:
+                self._trace_ai_read(
+                    frames,
+                    read_started_ns=read_started_ns,
+                    read_returned_ns=read_returned_ns,
+                    override_started_ns=None,
+                    overridden=overridden,
+                )
+            return frames
+        # A continuous NI task may return buffered frames acquired before the
+        # software stimulus began.  Never rewrite those historical samples or
+        # the benchmark would backdate its expected actuation timestamp.
+        result = [
+            replace(frame, ai0=override)
+            if frame.monotonic_ns >= override_started_ns
+            else frame
+            for frame in frames
+        ]
+        overridden = [
+            frame.sample_sequence
+            for frame in frames
+            if frame.monotonic_ns >= override_started_ns
+        ]
+        if self._latency_trace is not None and overridden:
+            self._latency_trace.record(
+                "software_override_applied",
+                external_signal=False,
+                override_started_ns=override_started_ns,
+                frame_sequences=overridden,
+                frame_monotonic_ns=[
+                    int(frame.monotonic_ns)
+                    for frame in frames
+                    if frame.monotonic_ns >= override_started_ns
+                ],
+            )
+        if tracing:
+            self._trace_ai_read(
+                frames,
+                read_started_ns=read_started_ns,
+                read_returned_ns=read_returned_ns,
+                override_started_ns=override_started_ns,
+                overridden=overridden,
+            )
+        return result
 
-    def reset_ai_input(self) -> None:
-        self._hal.reset_ai_input()
+    def set_ai0_software_stimulus(self, value: float | None) -> None:
+        """Apply an explicit non-external AI0 stimulus at the HAL read boundary."""
+        changed_ns = self._monotonic_ns_clock()
+        with self._override_lock:
+            if value is None:
+                self._ai0_override = None
+                self._ai0_override_started_ns = None
+            else:
+                self._ai0_override = float(value)
+                self._ai0_override_started_ns = changed_ns
+        if self._latency_trace is not None:
+            self._latency_trace.record(
+                "stimulus_clear" if value is None else "stimulus_set",
+                at_ns=changed_ns,
+                external_signal=False,
+                stimulus_value=None if value is None else float(value),
+            )
+
+    def _trace_ai_read(
+        self,
+        frames,
+        *,
+        read_started_ns: int,
+        read_returned_ns: int,
+        override_started_ns: int | None,
+        overridden: list[int],
+    ) -> None:
+        trace = self._latency_trace
+        if trace is None or trace.trial_label is None:
+            return
+        trace.record(
+            "ai_read_return",
+            at_ns=read_returned_ns,
+            read_started_ns=read_started_ns,
+            read_returned_ns=read_returned_ns,
+            frame_count=len(frames),
+            frame_monotonic_ns=[int(frame.monotonic_ns) for frame in frames],
+            frame_sequences=[int(frame.sample_sequence) for frame in frames],
+            frame_epochs=[int(frame.ai_epoch) for frame in frames],
+            frame_origin_uncertainty_ns=[
+                int(frame.origin_uncertainty_ns) for frame in frames
+            ],
+            override_started_ns=override_started_ns,
+            overridden_sequences=overridden,
+            oldest_frame_delivery_age_ms=(
+                None
+                if not frames
+                else (read_returned_ns - int(frames[0].monotonic_ns)) / 1_000_000
+            ),
+            newest_frame_delivery_age_ms=(
+                None
+                if not frames
+                else (read_returned_ns - int(frames[-1].monotonic_ns)) / 1_000_000
+            ),
+        )
+
+    def reset_ai_input(self) -> bool:
+        return self._hal.reset_ai_input() is True
 
     def read_flow(self) -> float:
-        return self._airflow
+        raise AssertionError("HardwareWorker must not access the serial airflow owner")
 
     def flush_logs(self) -> None:
         return None
+
+    def stop_heaters(self) -> bool:
+        return bool(self._hal.stop_heaters())
+
+
+class TracingActuationWorker(ActuationWorker):
+    """HIL-only side tracing around the unchanged ActuationWorker behavior."""
+
+    def __init__(self, *args, latency_trace: LatencyTrace, **kwargs) -> None:
+        self._latency_trace = latency_trace
+        super().__init__(*args, **kwargs)
+
+    @staticmethod
+    def _batch_identity(batch) -> dict[str, object]:
+        samples = tuple(getattr(batch, "samples", ()))
+        return {
+            "sample_count": len(samples),
+            "sample_monotonic_ns": [int(sample.monotonic_ns) for sample in samples],
+            "sample_sequences": [int(sample.sample_sequence) for sample in samples],
+            "sample_epochs": [int(sample.ai_epoch) for sample in samples],
+        }
+
+    def post_ai_batch(self, batch, *, readiness=None) -> None:
+        entered_ns = time.perf_counter_ns()
+        self._latency_trace.record(
+            "hardware_post_ai_batch_enter",
+            at_ns=entered_ns,
+            **self._batch_identity(batch),
+        )
+        super().post_ai_batch(batch, readiness=readiness)
+        self._latency_trace.record(
+            "hardware_post_ai_batch_return",
+            entered_ns=entered_ns,
+            **self._batch_identity(batch),
+        )
+
+    def _handle_message(self, kind: str, payload: dict) -> None:
+        if kind == "ai_batch":
+            self._latency_trace.record(
+                "actuation_dequeue_ai_batch",
+                **self._batch_identity(payload["batch"]),
+            )
+        super()._handle_message(kind, payload)
+
+    def submit(self, command: ActuationCommand) -> bool:
+        entered_ns = time.perf_counter_ns()
+        accepted = super().submit(command)
+        self._latency_trace.record(
+            "actuation_submit_return",
+            command_id=command.command_id,
+            expected_ns=command.expected_ns,
+            action=command.action.value,
+            category=command.category.value,
+            entered_ns=entered_ns,
+            accepted=accepted,
+        )
+        return accepted
+
+    def _execute(self, command: ActuationCommand) -> None:
+        self._latency_trace.record(
+            "actuation_execute_enter",
+            command_id=command.command_id,
+            expected_ns=command.expected_ns,
+            action=command.action.value,
+            category=command.category.value,
+        )
+        super()._execute(command)
 
 
 class PassingCheck:
@@ -154,7 +494,7 @@ def enumerate_devices() -> list[dict]:
     ]
 
 
-def preflight(config: dict, live: bool):
+def preflight(config: dict, live: bool, *, require_flow: bool = True):
     if not live:
         return MockHAL(), [{"name": "mock", "product_type": "MockHAL"}], 1000.0, []
     checks, ready = HardwareCheckService.from_config(config).run_checks()
@@ -166,25 +506,50 @@ def preflight(config: dict, live: bool):
     if not {"Dev1", "Dev2"}.issubset(names):
         raise RuntimeError(f"NI 映射不完整，实际设备为：{sorted(names)}")
     hal = RealHAL.from_config(config)
-    airflow = float(hal.read_flow())
-    if not math.isfinite(airflow):
-        raise RuntimeError("MFC 返回了非有限气流读数")
-    hal.release_serial_resources()
+    airflow = 0.0
+    try:
+        if require_flow:
+            airflow = float(hal.read_flow())
+            threshold = float(config.get("low_flow_threshold", 0.2))
+            if not math.isfinite(airflow):
+                raise RuntimeError("MFC 返回了非有限气流读数")
+            if not math.isfinite(threshold) or airflow <= threshold:
+                raise RuntimeError(
+                    f"MFC 气流未达到安全阈值：{airflow:.6g} <= {threshold:.6g}"
+                )
+    finally:
+        hal.release_serial_resources()
     return hal, devices, airflow, [asdict(item) for item in checks]
 
 
 class Runtime:
-    def __init__(self, *, config: dict, hal, airflow: float, output_dir: Path) -> None:
+    def __init__(
+        self,
+        *,
+        config: dict,
+        hal,
+        airflow: float,
+        output_dir: Path,
+        protocol_mode: bool = False,
+        collector: ReceiptCollector | None = None,
+        latency_trace: bool = False,
+    ) -> None:
         self.config = config
+        self.protocol_mode = bool(protocol_mode)
+        self.airflow = float(airflow)
         self.hal = hal
         self.output_dir = output_dir
+        self.latency_trace = LatencyTrace(
+            enabled=latency_trace,
+            run_id=output_dir.name,
+        )
         self.app = QApplication.instance() or QApplication([])
         self.view = ProtocolView()
         self.state = AppState.from_config(config)
         self.state.hardware_ready = True
         self.state.flow_setpoints_ready = True
         self.state.telemetry.connected = True
-        self.state.telemetry.safety_state = "SAFE"
+        self.state.telemetry.safety_state = "DATA_STALE"
         self.state.telemetry.airflow = airflow
         self.state.telemetry.timestamp = time.time()
         self.safety = SafetyManager(float(config.get("low_flow_threshold", 0.2)))
@@ -201,58 +566,142 @@ class Runtime:
                 connected=True,
                 hardware_ready=True,
                 flow_setpoints_ready=True,
-                safety_state="SAFE",
+                safety_state="DATA_STALE",
                 ttl_input_ready=False,
                 has_protocol=True,
                 device_lease="protocol",
             ),
             safety_manager=self.safety,
         )
-        self.protocol_state = ProtocolExecutionState(
-            status=ProtocolExecutionStatus.WAITING_TRIGGER,
-            execution_epoch=1,
-            arm_epoch=1,
-        )
+        self.executor = None
+        if protocol_mode:
+            self.executor = ProtocolExecutor(
+                gating_service=GatingService(
+                    inhale_threshold=float(config.get("inhale_threshold", 0.47)),
+                    exhale_threshold=float(config.get("exhale_threshold", -0.44)),
+                ),
+                valve_writer=lambda *_: (_ for _ in ()).throw(
+                    AssertionError("synchronous protocol DO is forbidden")
+                ),
+                config=config,
+                deferred_actuation=True,
+            )
+            self.protocol_state = self.executor.state
+        else:
+            self.protocol_state = ProtocolExecutionState(
+                status=ProtocolExecutionStatus.WAITING_TRIGGER,
+                execution_epoch=1,
+                arm_epoch=1,
+            )
         self.metrics = ActuationMetrics(config)
-        self.collector = ReceiptCollector(output_dir / "receipts.jsonl")
+        self.collector = collector or ReceiptCollector(
+            output_dir / "receipts.jsonl",
+            latency_trace=self.latency_trace if latency_trace else None,
+        )
         self.adapter = ActuationDOAdapter(
             hal=hal,
             target_resolver=self.valves.resolve_target,
             write_timeout_ms=int(config.get("actuation_write_timeout_ms", 100)),
         )
-        self.actuation = ActuationWorker(
-            protocol_state=self.protocol_state,
-            writer=self.collector.wrap(self.adapter),
-            interlock=self.ingress,
-            metrics=self.metrics,
-            valve_service=self.valves,
-            normal_queue_capacity=int(config.get("actuation_normal_queue_capacity", 256)),
+        self.flow_service = FlowService(hal, master_target=None, master_writer=None)
+        self.flow = FlowWorker(
+            self.flow_service,
+            airflow_poll_interval_s=1.0 / max(1.0, float(config.get("telemetry_hz", 5))),
+        )
+        actuation_type = TracingActuationWorker if latency_trace else ActuationWorker
+        actuation_kwargs = {
+            "protocol_state": None if self.executor is not None else self.protocol_state,
+            "protocol_executor": self.executor,
+            "writer": self.collector.wrap(self.adapter),
+            "interlock": self.ingress,
+            "metrics": self.metrics,
+            "valve_service": self.valves,
+            "flow_submitter": self.flow.submit,
+            "normal_queue_capacity": int(
+                config.get("actuation_normal_queue_capacity", 256)
+            ),
+        }
+        if latency_trace:
+            actuation_kwargs["latency_trace"] = self.latency_trace
+        self.actuation = actuation_type(
+            **actuation_kwargs,
+        )
+        self.actuation.receipt_ready.connect(self.collector.record)
+        self.ai_hal = AIOnlyHal(
+            hal,
+            airflow,
+            latency_trace=self.latency_trace if latency_trace else None,
         )
         self.hardware = HardwareWorker(
             telemetry_hz=5,
             breath_hz=100,
             ttl_config=config,
             check_service=PassingCheck(),
-            hal=AIOnlyHal(hal, airflow),
+            hal=self.ai_hal,
             simulation=False,
         )
+        self.hardware.telemetry_ready.connect(self.state.update_telemetry)
         self.hardware.set_actuation_sink(self.actuation, interlock_ingress=self.ingress)
+        self.flow.set_airflow_sink(self.hardware.consume_airflow_sample)
+        self._flow_restore_confirmed = not self.protocol_mode
+        self._hil_flow_results = {}
+        self.flow.result_ready.connect(self._handle_hil_flow_result)
+        self.flow.result_ready.connect(self.actuation.post_flow_result)
+        self.actuation.flow_result_ready.connect(self._handle_hil_flow_result)
         self.sequence = 0
         self._last_ui_ns = 0
+        self._shutdown_completed = False
+
+    def _handle_hil_flow_result(self, wrapped) -> None:
+        self._hil_flow_results[wrapped.command.source] = wrapped
+        if wrapped.command.source == "safety:hil-restore" and wrapped.result.success:
+            self._flow_restore_confirmed = True
 
     def start(self) -> None:
-        self.actuation.start()
-        self.hardware.start()
+        self.actuation.start(QThread.Priority.HighPriority)
+        self.flow.start()
+        self.hardware.start(QThread.Priority.HighPriority)
         deadline = time.monotonic() + 8.0
+        flow_restored = not self.protocol_mode
+        stable_since = None
         while time.monotonic() < deadline:
             self.pump()
+            if (
+                not flow_restored
+                and self.flow.isRunning()
+                and bool(getattr(self.hardware, "_connected", False))
+            ):
+                self.sequence += 1
+                flow_restored = self.flow.submit(
+                    FlowCommand(
+                        command_id=f"hil-restore-flow-{self.sequence}",
+                        execution_epoch=0,
+                        sequence=self.sequence,
+                        mode="rest",
+                        a=self.airflow,
+                        b=0.0,
+                        c=0.0,
+                        source="safety:hil-restore",
+                    )
+                )
+            interlock_snapshot = self.ingress.read()[1]
             if (
                 self.actuation.isRunning()
                 and not self.actuation._do_handed_off
                 and self.hardware.isRunning()
+                and self.flow.isRunning()
                 and getattr(self.hal, "_ai_epoch", 1) >= 1
+                and not interlock_snapshot.unsafe_reason()
+                and flow_restored
+                and self._flow_restore_confirmed
             ):
-                return
+                stable_since = stable_since or time.monotonic()
+                if time.monotonic() - stable_since >= 0.3:
+                    if not self.ingress.clear_unsafe_latch():
+                        raise RuntimeError("preflight SAFE snapshot could not clear the interlock latch")
+                    return
+            else:
+                stable_since = None
             time.sleep(0.01)
         raise RuntimeError("AI/DO owner threads did not become ready")
 
@@ -289,6 +738,173 @@ class Runtime:
         while time.monotonic() < deadline:
             self.pump()
             time.sleep(min(0.005, max(0.0, deadline - time.monotonic())))
+
+    def readiness(self) -> ProtocolExecutionReadiness:
+        snapshot = self.ingress.read()[1]
+        return ProtocolExecutionReadiness(
+            connected=snapshot.connected,
+            hardware_ready=snapshot.hardware_ready,
+            flow_setpoints_ready=snapshot.flow_setpoints_ready,
+            safety_state=snapshot.safety_state,
+            ttl_input_ready=snapshot.ttl_input_ready,
+        )
+
+    def wait_status(
+        self,
+        statuses: set[ProtocolExecutionStatus],
+        timeout_s: float = 2.0,
+    ) -> None:
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            self.pump()
+            self.protocol_state = self.actuation.protocol_state
+            if self.protocol_state.status in statuses:
+                return
+            time.sleep(0.005)
+        raise TimeoutError(
+            f"等待协议状态超时：current={self.actuation.protocol_state.status.value}, "
+            f"expected={[item.value for item in statuses]}, "
+            f"recent={getattr(self.actuation.protocol_state.recent_event, 'message', '')}, "
+            f"events={[event.message for event in self.actuation.protocol_state.events[-3:]]}"
+        )
+
+    def recover_low_flow_via_owner(self, timeout_s: float = 3.0) -> None:
+        """Restore MFC/readiness through the production serial and actuation owners."""
+        close_deadline = time.monotonic() + timeout_s
+        while time.monotonic() < close_deadline:
+            self.pump()
+            if (
+                self.actuation.protocol_state.active_valve is None
+                and not self.actuation.protocol_state.possibly_open_valves
+            ):
+                break
+            time.sleep(0.01)
+        else:
+            raise TimeoutError("LOW_FLOW recovery did not first reach physically closed state")
+
+        # MFC recovery is forbidden while a protocol owns the device lease.
+        self.actuation.post_stop(message="HIL LOW_FLOW closed; release protocol flow lease")
+        self.wait_status({ProtocolExecutionStatus.STOPPED}, timeout_s=timeout_s)
+        epoch = self.actuation.protocol_state.execution_epoch
+        held_epoch = self.flow.execution_context[0]
+        if held_epoch is None or not self.flow.release_protocol_lease(
+            held_epoch,
+            next_execution_epoch=epoch,
+        ):
+            raise RuntimeError(
+                "LOW_FLOW recovery could not release FlowWorker lease: "
+                f"context={self.flow.execution_context}, epoch={epoch}"
+            )
+        self.ingress.update(device_lease="idle")
+        source = f"safety:hil-low-recovery-{self.sequence + 1}"
+        self._hil_flow_results.pop(source, None)
+        self.actuation.post_flow_intent(
+            mode="rest",
+            a=self.airflow,
+            b=0.0,
+            c=0.0,
+            source=source,
+        )
+        deadline = time.monotonic() + timeout_s
+        stable_since = None
+        while time.monotonic() < deadline:
+            self.pump()
+            wrapped = self._hil_flow_results.get(source)
+            snapshot = self.ingress.read()[1]
+            physically_closed = (
+                self.actuation.protocol_state.active_valve is None
+                and not self.actuation.protocol_state.possibly_open_valves
+            )
+            if wrapped is not None and not wrapped.result.success:
+                raise RuntimeError(f"LOW_FLOW owner recovery failed: {wrapped.result.message}")
+            if (
+                wrapped is not None
+                and wrapped.result.success
+                and not snapshot.unsafe_reason()
+                and physically_closed
+            ):
+                stable_since = stable_since or time.monotonic()
+                if time.monotonic() - stable_since >= 0.3:
+                    break
+            else:
+                stable_since = None
+            time.sleep(0.01)
+        else:
+            raise TimeoutError(
+                "LOW_FLOW owner recovery did not reach stable SAFE/closed state: "
+                f"interlock={self.ingress.read()[1]}, "
+                f"status={self.actuation.protocol_state.status.value}, "
+                f"active={self.actuation.protocol_state.active_valve}, "
+                f"possibly_open={sorted(self.actuation.protocol_state.possibly_open_valves)}, "
+                f"flow_result={self._hil_flow_results.get(source)}"
+            )
+
+        # The next scenario must explicitly start a fresh protocol epoch.
+
+    def start_protocol_document(self, document: ProtocolDocument) -> None:
+        if self.executor is None:
+            raise RuntimeError("production HIL requires ProtocolExecutor")
+        self.ingress.update(has_protocol=True, device_lease="idle")
+        self.actuation.post_load(document)
+        self.wait_status({ProtocolExecutionStatus.READY})
+        recovery_deadline = time.monotonic() + 2.0
+        while (
+            time.monotonic() < recovery_deadline
+            and self.ingress.read()[1].safety_state != "SAFE"
+        ):
+            self.pump()
+            time.sleep(0.01)
+        if not self.ingress.clear_unsafe_latch():
+            raise RuntimeError("protocol trial could not clear a SAFE interlock latch")
+        lease_epoch = self.actuation.protocol_state.execution_epoch
+        if not self.flow.acquire_protocol_lease(lease_epoch):
+            raise RuntimeError("protocol trial could not acquire FlowWorker device lease")
+        self.ingress.update(device_lease="protocol")
+        self.actuation.post_start(document=None, readiness=self.readiness())
+        self.wait_status({ProtocolExecutionStatus.WAITING_TRIGGER})
+        if not self.flow.acquire_protocol_lease(
+            self.actuation.protocol_state.execution_epoch
+        ):
+            raise RuntimeError("FlowWorker lease epoch did not synchronize after protocol start")
+
+    def trigger_current_trial_via_ai0(self, *, label: str) -> ActuationReceipt:
+        """Trigger through HardwareWorker's acquired monotonic AI0 frame pipeline."""
+        marker = len(self.collector.receipts)
+        exhale = float(self.config.get("exhale_threshold", -0.44)) - 0.5
+        self.latency_trace.begin_trial(label)
+        self.ai_hal.set_ai0_software_stimulus(exhale)
+        try:
+            self.actuation.post_manual_trigger(readiness=self.readiness())
+            return self.collector.wait_for(
+                lambda item: (
+                    item.trial_id == label
+                    and item.action == ActuationAction.OPEN
+                    and item.category == ActuationCategory.NORMAL
+                ),
+                2.0,
+                self.pump,
+                after_index=marker,
+            )
+        finally:
+            self.ai_hal.set_ai0_software_stimulus(None)
+            self.latency_trace.end_trial()
+
+    def start_protocol_trial(self, *, label: str, valve: int, duration_ms: float) -> ActuationReceipt:
+        document = ProtocolDocument(
+            source_path=Path(f"{label}.csv"),
+            source_name=f"{label}.csv",
+            trials=[
+                ProtocolTrial(
+                    trial_id=label,
+                    timing_ms=0,
+                    duration_ms=duration_ms,
+                    valve=valve,
+                    trigger=TriggerMode.MANUAL,
+                )
+            ],
+        )
+        self.start_protocol_document(document)
+        return self.trigger_current_trial_via_ai0(label=label)
 
     def command(
         self,
@@ -362,7 +978,7 @@ class Runtime:
 
     def stop(self) -> None:
         try:
-            if self.actuation.isRunning():
+            if self.actuation.isRunning() and not self._shutdown_completed:
                 closed = self.actuation.emergency_close_all(
                     int(self.config.get("actuation_emergency_close_timeout_ms", 500)) * 4
                 )
@@ -371,20 +987,138 @@ class Runtime:
         finally:
             self.actuation.shutdown(int(self.config.get("actuation_shutdown_timeout_ms", 2000)))
             self.hardware.stop()
-            releaser = getattr(self.hal, "release_serial_resources", None)
-            if releaser is not None:
-                releaser()
+            self.flow.shutdown(int(self.config.get("actuation_shutdown_timeout_ms", 2000)))
+
+    def shutdown_via_service(self) -> dict:
+        service = ShutdownService(
+            state=self.state,
+            worker=self.hardware,
+            safety_manager=self.safety,
+            retry_limit=0,
+            retry_interval=0.0,
+            record_path=self.output_dir / "shutdown-event.json",
+            actuation_worker=self.actuation,
+            flow_worker=self.flow,
+            actuation_timeout_ms=int(
+                self.config.get("actuation_shutdown_timeout_ms", 2000)
+            ),
+            emergency_close_timeout_ms=int(
+                self.config.get("actuation_emergency_close_timeout_ms", 500)
+            ),
+        )
+        event = service.shutdown(
+            source="hil_production_shutdown",
+            reason="Story 3.4 shutdown path verification",
+            force=True,
+        )
+        self._shutdown_completed = event.get("result") == "success"
+        return event
 
 
-def wait_trial(runtime: Runtime, command: ActuationCommand) -> tuple[ActuationReceipt, ActuationReceipt]:
-    opened = runtime.submit_and_wait(command)
+def _target_key(item) -> tuple[int, str | None, str | None]:
+    valve = item.valve if hasattr(item, "valve") else item.logical_valve
+    device = item.target_device if hasattr(item, "target_device") else item.device
+    line = item.target_line if hasattr(item, "target_line") else item.line
+    return int(valve), device, line
+
+
+def evaluate_full_close(runtime: Runtime, *, after_index: int, scenario: str) -> dict:
+    """Build auditable evidence for every configured odor target plus master."""
+    expected = {_target_key(step) for step in runtime.valves.emergency_close_steps()}
+    latest: dict[tuple[int, str | None, str | None], ActuationReceipt] = {}
+    for receipt in runtime.collector.receipts[after_index:]:
+        if receipt.action != ActuationAction.CLOSE or receipt.category != ActuationCategory.SAFETY:
+            continue
+        key = _target_key(receipt)
+        if key in expected:
+            latest[key] = receipt
+
+    missing = sorted(expected - set(latest), key=lambda item: item[0])
+    failed = sorted(
+        (key for key, receipt in latest.items() if receipt.result != ActuationResult.SUCCESS),
+        key=lambda item: item[0],
+    )
+    mock_states_closed: bool | None = None
+    if isinstance(runtime.hal, MockHAL):
+        mock_states_closed = all(
+            runtime.hal.get_line_state(f"{device}/{line}" if device else line) is False
+            for _, device, line in expected
+        )
+    state = runtime.actuation.protocol_state
+    protocol_state_closed = state.active_valve is None and not state.possibly_open_valves
+    all_closed = bool(
+        expected
+        and not missing
+        and not failed
+        and protocol_state_closed
+        and mock_states_closed is not False
+    )
+
+    def serialize(keys):
+        return [
+            {"valve": valve, "device": device, "line": line}
+            for valve, device, line in keys
+        ]
+
+    return {
+        "scenario": scenario,
+        "expected_target_count": len(expected),
+        "successful_close_receipt_count": sum(
+            receipt.result == ActuationResult.SUCCESS for receipt in latest.values()
+        ),
+        "missing_targets": serialize(missing),
+        "failed_targets": serialize(failed),
+        "protocol_state_closed": protocol_state_closed,
+        "mock_do_state_closed": mock_states_closed,
+        "all_configured_targets_closed": all_closed,
+    }
+
+
+def wait_for_full_close(
+    runtime: Runtime,
+    *,
+    after_index: int,
+    scenario: str,
+    timeout_s: float = 3.0,
+) -> dict:
+    deadline = time.monotonic() + timeout_s
+    evidence = evaluate_full_close(runtime, after_index=after_index, scenario=scenario)
+    while not evidence["all_configured_targets_closed"] and time.monotonic() < deadline:
+        runtime.pump()
+        time.sleep(0.005)
+        evidence = evaluate_full_close(runtime, after_index=after_index, scenario=scenario)
+    return evidence
+
+
+def run_authorized_close_check(runtime: Runtime, *, timeout_ms: int) -> dict:
+    """Close every DO target without requiring AI or serial owners to become ready."""
+    marker = len(runtime.collector.receipts)
+    owner_success = runtime.actuation.emergency_close_all(max(1, int(timeout_ms)))
+    evidence = evaluate_full_close(
+        runtime,
+        after_index=marker,
+        scenario="authorized_close_check",
+    )
+    return {
+        "count": evidence["successful_close_receipt_count"],
+        "success": bool(owner_success and evidence["all_configured_targets_closed"]),
+        **evidence,
+    }
+
+
+def wait_protocol_trial(
+    runtime: Runtime,
+    *,
+    label: str,
+    opened: ActuationReceipt,
+) -> tuple[ActuationReceipt, ActuationReceipt]:
     closed = runtime.collector.wait_for(
         lambda item: (
             item.action == ActuationAction.CLOSE
             and (
-                (item.trial_id == command.trial_id and item.category == ActuationCategory.NORMAL)
+                (item.trial_id == label and item.category == ActuationCategory.NORMAL)
                 or (
-                    item.valve == command.valve
+                    item.valve == opened.valve
                     and item.category == ActuationCategory.SAFETY
                     and item.expected_ns >= (opened.actual_ns or 0)
                 )
@@ -395,7 +1129,7 @@ def wait_trial(runtime: Runtime, command: ActuationCommand) -> tuple[ActuationRe
     )
     if closed.category == ActuationCategory.SAFETY:
         raise RuntimeError(
-            f"trial {command.trial_id} 触发安全补偿关闭；open jitter={opened.jitter_ms}ms"
+            f"trial {label} 触发安全补偿关闭；open jitter={opened.jitter_ms}ms"
         )
     if closed.result != ActuationResult.SUCCESS:
         raise RuntimeError(f"定时关闭失败：{closed.command_id}: {closed.message}")
@@ -418,20 +1152,39 @@ def run_benchmark(runtime: Runtime, args) -> dict:
     )
     runtime.wait_ms(100)
 
-    started = time.time()
-    for index in range(args.cycles):
-        valve = args.valves[index % len(args.valves)]
-        command = runtime.command(
-            valve=valve,
-            action=ActuationAction.OPEN,
-            category=ActuationCategory.NORMAL,
-            trial_id=f"bench-{index + 1:04d}-v{valve}",
+    trials = [
+        ProtocolTrial(
+            trial_id=f"bench-{index + 1:04d}-v{args.valves[index % len(args.valves)]}",
+            timing_ms=0,
             duration_ms=args.duration_ms,
-            lead_ms=args.lead_ms,
+            valve=args.valves[index % len(args.valves)],
+            trigger=TriggerMode.MANUAL,
         )
-        opened, closed = wait_trial(runtime, command)
+        for index in range(args.cycles)
+    ]
+    runtime.start_protocol_document(
+        ProtocolDocument(
+            source_path=Path("story-3-4-hil-benchmark.csv"),
+            source_name="story-3-4-hil-benchmark.csv",
+            trials=trials,
+        )
+    )
+    started = time.time()
+    for index, trial in enumerate(trials):
+        opened = runtime.trigger_current_trial_via_ai0(label=trial.trial_id)
+        _, closed = wait_protocol_trial(
+            runtime,
+            label=trial.trial_id,
+            opened=opened,
+        )
         if (opened.jitter_ms or 0) > 30.0 or (closed.jitter_ms or 0) > 30.0:
             raise RuntimeError("正式 benchmark 发生单次 >30ms 严重超限，已停止")
+        expected_status = (
+            ProtocolExecutionStatus.COMPLETED
+            if index == len(trials) - 1
+            else ProtocolExecutionStatus.WAITING_TRIGGER
+        )
+        runtime.wait_status({expected_status})
         runtime.wait_ms(args.inter_trial_ms)
 
     bench = [
@@ -448,108 +1201,134 @@ def run_benchmark(runtime: Runtime, args) -> dict:
         "initial_close_count": len(initial_closes),
         "cycles": args.cycles,
         "elapsed_s": time.time() - started,
-        "open": summarize(opens),
-        "close": summarize(closes),
-        "combined": summarize(combined),
+        "open": summarize(
+            opens,
+            window_size=runtime.metrics.config.window_size,
+            min_samples=runtime.metrics.config.min_samples,
+        ),
+        "close": summarize(
+            closes,
+            window_size=runtime.metrics.config.window_size,
+            min_samples=runtime.metrics.config.min_samples,
+        ),
+        "combined": summarize(
+            combined,
+            window_size=runtime.metrics.config.window_size,
+            min_samples=runtime.metrics.config.min_samples,
+        ),
     }
 
 
 def run_safety_scenarios(runtime: Runtime, args) -> dict:
+    """Exercise stop, readiness loss, severe jitter, and shutdown owner paths."""
     results = {}
-    runtime.protocol_state.status = ProtocolExecutionStatus.WAITING_TRIGGER
-    runtime.protocol_state.quality_block_reason = ""
-    runtime.metrics.acknowledge_severe()
 
-    stop_command = runtime.command(
-        valve=args.valves[0],
-        action=ActuationAction.OPEN,
-        category=ActuationCategory.NORMAL,
-        trial_id="safety-stop",
-        duration_ms=500,
+    runtime.start_protocol_trial(
+        label="safety-stop", valve=args.valves[0], duration_ms=500
     )
-    opened = runtime.submit_and_wait(stop_command)
-    runtime.protocol_state.active_valve = opened.valve
-    runtime.actuation.invalidate_execution(reason="HIL stop injection")
-    stop_close = runtime.collector.wait_for(
-        lambda item: (
-            item.valve == opened.valve
-            and item.category == ActuationCategory.SAFETY
-            and item.expected_ns >= (opened.actual_ns or 0)
-        ),
-        2.0,
-        runtime.pump,
+    marker = len(runtime.collector.receipts)
+    runtime.actuation.post_stop(message="HIL production stop path")
+    stop_evidence = wait_for_full_close(
+        runtime,
+        after_index=marker,
+        scenario="stop",
     )
-    results["stop"] = stop_close.result.value
+    runtime.wait_status({ProtocolExecutionStatus.STOPPED})
+    results["stop"] = stop_evidence
+    if not stop_evidence["all_configured_targets_closed"]:
+        runtime.close_everything("stop-safety-recovery")
 
-    runtime.protocol_state.status = ProtocolExecutionStatus.WAITING_TRIGGER
-    runtime.protocol_state.quality_block_reason = ""
-    runtime.ingress.update(safety_state="SAFE")
-    runtime.ingress.clear_unsafe_latch()
-    low_command = runtime.command(
-        valve=args.valves[1],
-        action=ActuationAction.OPEN,
-        category=ActuationCategory.NORMAL,
-        trial_id="safety-low-flow",
-        duration_ms=500,
+    runtime.start_protocol_trial(
+        label="safety-low-flow", valve=args.valves[1], duration_ms=500
     )
-    opened = runtime.submit_and_wait(low_command)
-    runtime.protocol_state.active_valve = opened.valve
-    runtime.ingress.update(safety_state="LOW_FLOW")
-    runtime.actuation.invalidate_execution(reason="HIL LOW_FLOW/readiness injection")
-    low_close = runtime.collector.wait_for(
-        lambda item: (
-            item.valve == opened.valve
-            and item.category == ActuationCategory.SAFETY
-            and item.expected_ns >= (opened.actual_ns or 0)
-        ),
-        2.0,
-        runtime.pump,
+    marker = len(runtime.collector.receipts)
+    runtime.hardware.consume_airflow_sample(0.0, time.time(), None)
+    low_flow_evidence = wait_for_full_close(
+        runtime,
+        after_index=marker,
+        scenario="low_flow",
     )
-    results["low_flow"] = low_close.result.value
+    results["low_flow"] = low_flow_evidence
+    if not low_flow_evidence["all_configured_targets_closed"]:
+        runtime.close_everything("low-flow-safety-recovery")
+    runtime.recover_low_flow_via_owner()
 
-    runtime.protocol_state.status = ProtocolExecutionStatus.WAITING_TRIGGER
-    runtime.protocol_state.quality_block_reason = ""
-    runtime.ingress.update(safety_state="SAFE")
-    runtime.ingress.clear_unsafe_latch()
-    runtime.metrics.acknowledge_severe()
-    runtime.collector.inject_delay_ms = 35.0
-    severe_command = runtime.command(
-        valve=args.valves[2],
-        action=ActuationAction.OPEN,
-        category=ActuationCategory.NORMAL,
-        trial_id="safety-severe",
-        duration_ms=500,
+    runtime.collector.inject_delay_ms = runtime.metrics.config.single_limit_ms + 5.0
+    marker = len(runtime.collector.receipts)
+    severe_open = runtime.start_protocol_trial(
+        label="safety-severe", valve=args.valves[2], duration_ms=500
     )
-    severe_open = runtime.submit_and_wait(severe_command)
-    severe_close = runtime.collector.wait_for(
-        lambda item: (
-            item.valve == severe_open.valve
-            and item.category == ActuationCategory.SAFETY
-            and item.expected_ns >= (severe_open.actual_ns or 0)
-        ),
-        2.0,
-        runtime.pump,
+    severe_evidence = wait_for_full_close(
+        runtime,
+        after_index=marker,
+        scenario="severe",
     )
-    if severe_open.jitter_ms is None or severe_open.jitter_ms <= 30.0:
-        raise RuntimeError("severe 注入未产生 >30ms jitter")
+    severe_limit_ms = runtime.metrics.config.single_limit_ms
+    if severe_open.jitter_ms is None or severe_open.jitter_ms <= severe_limit_ms:
+        raise RuntimeError(
+            f"severe injection did not exceed {severe_limit_ms:g}ms jitter"
+        )
     results["severe"] = {
         "open_jitter_ms": severe_open.jitter_ms,
-        "close": severe_close.result.value,
         "latched": runtime.metrics.severe_latched,
+        **severe_evidence,
     }
+    if not severe_evidence["all_configured_targets_closed"]:
+        runtime.close_everything("severe-safety-recovery")
 
-    shutdown_closes = runtime.close_everything("pre-shutdown-close")
-    results["pre_shutdown_close_count"] = len(shutdown_closes)
+    runtime.start_protocol_trial(
+        label="safety-shutdown", valve=args.valves[0], duration_ms=500
+    )
+    marker = len(runtime.collector.receipts)
+    shutdown_event = runtime.shutdown_via_service()
+    shutdown_evidence = wait_for_full_close(
+        runtime,
+        after_index=marker,
+        scenario="shutdown",
+        timeout_s=0.25,
+    )
+    results["shutdown"] = {
+        "result": shutdown_event.get("result"),
+        "valves_closed": shutdown_event.get("valves_closed"),
+        "heaters_off": shutdown_event.get("heaters_off"),
+        "error": shutdown_event.get("error"),
+        **shutdown_evidence,
+    }
     return results
 
 
-def summarize(values: list[float]) -> dict:
+def production_safety_paths_succeeded(safety: dict) -> bool:
+    """Require complete configured-target closure evidence for every safety path."""
+    return bool(
+        safety.get("stop", {}).get("all_configured_targets_closed") is True
+        and safety.get("low_flow", {}).get("all_configured_targets_closed") is True
+        and safety.get("severe", {}).get("all_configured_targets_closed") is True
+        and safety.get("severe", {}).get("latched") is True
+        and safety.get("shutdown", {}).get("all_configured_targets_closed") is True
+        and safety.get("shutdown", {}).get("result") == "success"
+        and safety.get("shutdown", {}).get("valves_closed") is True
+        and safety.get("shutdown", {}).get("heaters_off") is True
+    )
+
+
+def summarize(values: list[float], *, window_size: int, min_samples: int) -> dict:
+    rolling = [
+        nearest_rank_p95(values[max(0, end - window_size) : end])
+        for end in range(min_samples, len(values) + 1)
+    ]
+    final_values = values[-window_size:]
     return {
         "count": len(values),
         "p95_ms": nearest_rank_p95(values),
         "max_ms": max(values) if values else None,
         "mean_ms": statistics.fmean(values) if values else None,
         "failures": 0,
+        "rolling_window_size": window_size,
+        "rolling_min_samples": min_samples,
+        "rolling_p95_ms": rolling,
+        "max_rolling_p95_ms": max(rolling) if rolling else None,
+        "final_window_count": len(final_values),
+        "final_window_p95_ms": nearest_rank_p95(final_values),
     }
 
 
@@ -575,12 +1354,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--local-config", type=Path, default=REPO_ROOT / "config/local_config.json")
     parser.add_argument("--serial-port", default="COM6")
     parser.add_argument("--live", action="store_true")
+    parser.add_argument(
+        "--latency-trace",
+        action="store_true",
+        help="record in-memory diagnostic stage timestamps and flush them on exit",
+    )
     parser.add_argument("--confirm", default="")
     parser.add_argument("--phase", choices=("preflight", "close", "all"), default="all")
     parser.add_argument("--cycles", type=int, default=200)
     parser.add_argument("--duration-ms", type=float, default=100.0)
     parser.add_argument("--inter-trial-ms", type=float, default=250.0)
-    parser.add_argument("--lead-ms", type=float, default=5.0)
     parser.add_argument("--valves", type=int, nargs="+", default=[1, 9, 13])
     parser.add_argument("--output-root", type=Path, default=REPO_ROOT / "logs/benchmarks")
     args = parser.parse_args()
@@ -612,16 +1395,29 @@ def main() -> int:
             "duration_ms": args.duration_ms,
             "inter_trial_ms": args.inter_trial_ms,
             "cycles": args.cycles,
-            "lead_ms": args.lead_ms,
             "ai0_external_signal": False,
             "ai6_external_signal": False,
+            "latency_trace_enabled": args.latency_trace,
+            "latency_trace_is_diagnostic_only": True,
+            "performance_ai0_source": (
+                "software stimulus applied to HAL frames acquired by HardwareWorker; "
+                "monotonic timestamp/epoch/sequence remain HAL-owned; not an external sensor stimulus"
+            ),
+            "low_flow_safety_source": (
+                "software-injected sample through production HardwareWorker ingress; "
+                "not an external sensor stimulus"
+            ),
             "gas_load": "clean/inert, odor-free, operator confirmed",
         },
     }
     runtime = None
     exit_code = 1
     try:
-        hal, devices, airflow, checks = preflight(config, args.live)
+        hal, devices, airflow, checks = preflight(
+            config,
+            args.live,
+            require_flow=args.phase != "close",
+        )
         metadata.update({"devices": devices, "mfc_airflow": airflow, "checks": checks})
         if args.phase == "preflight":
             (output_dir / "summary.json").write_text(
@@ -630,48 +1426,107 @@ def main() -> int:
             )
             exit_code = 0
             return exit_code
-        runtime = Runtime(config=config, hal=hal, airflow=airflow, output_dir=output_dir)
-        runtime.start()
-        metadata["resource_groups"] = [
-            {"device": key[0], "port": key[1]}
-            for key in sorted(getattr(hal, "_do_sessions", {}))
-        ]
+        runtime = Runtime(
+            config=config,
+            hal=hal,
+            airflow=airflow,
+            output_dir=output_dir,
+            protocol_mode=args.phase == "all",
+            latency_trace=args.latency_trace,
+        )
         if args.phase == "close":
-            closed = runtime.close_everything("authorized-close-check")
+            # Emergency close must remain available when serial/MFC readiness is
+            # unavailable.  Acquire only the ActuationWorker DO owner; do not
+            # start AI or FlowWorker and do not require flow setpoint readback.
+            close_check = run_authorized_close_check(
+                runtime,
+                timeout_ms=int(config.get("actuation_emergency_close_timeout_ms", 500))
+                * 4,
+            )
+            metadata["resource_groups"] = [
+                {"device": key[0], "port": key[1]}
+                for key in sorted(getattr(hal, "_do_sessions", {}))
+            ]
             (output_dir / "summary.json").write_text(
                 json.dumps(
                     {
                         "metadata": metadata,
-                        "close_check": {
-                            "count": len(closed),
-                            "success": all(item.result == ActuationResult.SUCCESS for item in closed),
-                        },
+                        "close_check": close_check,
                     },
                     ensure_ascii=False,
                     indent=2,
                 ),
                 encoding="utf-8",
             )
-            exit_code = 0
+            exit_code = 0 if close_check["success"] else 2
             return exit_code
+        runtime.start()
+        metadata["resource_groups"] = [
+            {"device": key[0], "port": key[1]}
+            for key in sorted(getattr(hal, "_do_sessions", {}))
+        ]
         benchmark = run_benchmark(runtime, args)
         safety = run_safety_scenarios(runtime, args)
         summary = {"metadata": metadata, "benchmark": benchmark, "safety": safety}
+        target_ms = float(config.get("actuation_jitter_target_ms", 20.0))
         target_met = all(
-            benchmark[name]["p95_ms"] is not None and benchmark[name]["p95_ms"] < 20.0
+            benchmark[name]["p95_ms"] is not None
+            and benchmark[name]["p95_ms"] < target_ms
+            for name in ("open", "close", "combined")
+        )
+        rolling_met = all(
+            benchmark[name]["rolling_p95_ms"]
+            and all(value is not None and value < target_ms for value in benchmark[name]["rolling_p95_ms"])
+            for name in ("open", "close", "combined")
+        )
+        final_windows_met = all(
+            benchmark[name]["final_window_p95_ms"] is not None
+            and benchmark[name]["final_window_p95_ms"] < target_ms
             for name in ("open", "close", "combined")
         )
         required_samples = 200 if args.live else args.cycles
+        samples_complete = benchmark["open"]["count"] >= required_samples and benchmark[
+            "close"
+        ]["count"] >= required_samples
+        write_failure_results = {
+            ActuationResult.FAILED,
+            ActuationResult.TIMEOUT,
+            ActuationResult.MEASUREMENT_FAULT,
+            ActuationResult.UNCERTAIN,
+        }
+        write_failures = [
+            item for item in runtime.collector.receipts if item.result in write_failure_results
+        ]
+        cancelled_commands = sum(
+            item.result == ActuationResult.CANCELLED for item in runtime.collector.receipts
+        )
+        actions_succeeded = not write_failures
+        safety_succeeded = production_safety_paths_succeeded(safety)
         summary["acceptance"] = {
-            "p95_strictly_below_20ms": target_met,
-            "sample_counts_complete": benchmark["open"]["count"] >= required_samples
-            and benchmark["close"]["count"] >= required_samples,
-            "no_action_failures": all(
-                item.result == ActuationResult.SUCCESS for item in runtime.collector.receipts
-            ),
+            "target_ms": target_ms,
+            "aggregate_p95_strictly_below_target": target_met,
+            "every_rolling_p95_strictly_below_target": rolling_met,
+            "final_window_p95_strictly_below_target": final_windows_met,
+            "sample_counts_complete": samples_complete,
+            "no_action_failures": actions_succeeded,
+            "cancelled_commands": cancelled_commands,
+            "production_safety_paths_succeeded": safety_succeeded,
             "external_ai_ttl_signal_limitation": True,
         }
-        exit_code = 0 if target_met and summary["acceptance"]["sample_counts_complete"] else 2
+        exit_code = (
+            0
+            if all(
+                (
+                    target_met,
+                    rolling_met,
+                    final_windows_met,
+                    samples_complete,
+                    actions_succeeded,
+                    safety_succeeded,
+                )
+            )
+            else 2
+        )
         (output_dir / "summary.json").write_text(
             json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8"
         )
@@ -692,6 +1547,7 @@ def main() -> int:
                 )
                 exit_code = 1
             write_csv(output_dir / "receipts.csv", runtime.collector.receipts)
+            runtime.latency_trace.write_jsonl(output_dir / "latency-trace.jsonl")
         metadata["finished_at"] = time.time()
         (output_dir / "metadata.json").write_text(
             json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8"

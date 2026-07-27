@@ -23,7 +23,8 @@ class SafetyManager:
 
     def is_safe(self, airflow: float) -> bool:
         """简化检查，保留向后兼容。"""
-        return self._coerce_airflow(airflow) is not None
+        value = self._coerce_airflow(airflow)
+        return value is not None and value >= self.low_flow_threshold
 
     def validate_threshold(self, value: float) -> tuple[bool, str]:
         """阈值校验：必须为正、有穷、不过大。"""
@@ -130,24 +131,38 @@ class SafetyManager:
                 reason="Alicat 数据过期，保持安全阻断",
             )
 
-        base_state = SafetyState(
+        if safe_airflow < self.low_flow_threshold:
+            return SafetyState(
+                state="LOW_FLOW",
+                airflow=safe_airflow,
+                threshold=self.low_flow_threshold,
+                updated_at=timestamp,
+                reason=(
+                    f"气流低于安全阈值：{safe_airflow:.3f} < "
+                    f"{self.low_flow_threshold:.3f}"
+                ),
+            )
+
+        recovery_threshold = self.low_flow_threshold + self.recovery_margin
+        if previous and previous.state == "LOW_FLOW" and safe_airflow < recovery_threshold:
+            return SafetyState(
+                state="LOW_FLOW",
+                airflow=safe_airflow,
+                threshold=self.low_flow_threshold,
+                updated_at=timestamp,
+                reason=(
+                    f"气流尚未达到恢复阈值：{safe_airflow:.3f} < "
+                    f"{recovery_threshold:.3f}"
+                ),
+            )
+
+        return SafetyState(
             state="SAFE",
             airflow=safe_airflow,
             threshold=self.low_flow_threshold,
             updated_at=timestamp,
-            reason="Alicat idle/设定状态正常",
+            reason="Alicat 气流正常",
         )
-
-        if hardware_state and hardware_state != "SAFE":
-            return SafetyState(
-                state=hardware_state,
-                airflow=safe_airflow,
-                threshold=self.low_flow_threshold,
-                updated_at=timestamp,
-                reason=f"硬件上报安全状态 {hardware_state}",
-            )
-
-        return base_state
 
     @staticmethod
     def _coerce_airflow(value: float) -> float | None:

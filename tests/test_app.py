@@ -4,6 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from PySide6.QtCore import QThread
 from PySide6.QtWidgets import QApplication
 
 import app.main as main_module
@@ -164,7 +165,7 @@ def test_bundled_user_config_migrates_com3_to_com6(tmp_path: Path, monkeypatch, 
     assert migrated["baud_rate"] == 19200
 
 
-def test_idle_airflow_keeps_safe_state(qt_app):
+def test_airflow_below_threshold_enters_low_flow(qt_app):
     state = AppState.from_config(
         {
             "language": "zh-CN",
@@ -178,13 +179,13 @@ def test_idle_airflow_keeps_safe_state(qt_app):
     controller = MainController(state, worker, safety_manager=SafetyManager(low_flow_threshold=0.5))
 
     controller.handle_telemetry({"airflow": 0.1, "connected": True, "timestamp": 1})
-    assert state.telemetry.safety_state == "SAFE"
+    assert state.telemetry.safety_state == "LOW_FLOW"
 
     controller.handle_telemetry({"airflow": 0.0, "connected": True, "timestamp": 2})
-    assert state.telemetry.safety_state == "SAFE"
+    assert state.telemetry.safety_state == "LOW_FLOW"
 
 
-def test_idle_airflow_has_no_threshold_flapping(qt_app):
+def test_low_airflow_uses_recovery_hysteresis(qt_app):
     state = AppState.from_config(
         {
             "language": "zh-CN",
@@ -200,10 +201,10 @@ def test_idle_airflow_has_no_threshold_flapping(qt_app):
     )
 
     controller.handle_telemetry({"airflow": 0.45, "connected": True, "timestamp": 1})
-    assert state.telemetry.safety_state == "SAFE"
+    assert state.telemetry.safety_state == "LOW_FLOW"
 
     controller.handle_telemetry({"airflow": 0.54, "connected": True, "timestamp": 2})
-    assert state.telemetry.safety_state == "SAFE"
+    assert state.telemetry.safety_state == "LOW_FLOW"
 
     controller.handle_telemetry({"airflow": 0.62, "connected": True, "timestamp": 3})
     assert state.telemetry.safety_state == "SAFE"
@@ -660,7 +661,7 @@ def test_worker_self_check_exception_sets_failure(qt_app):
     assert any("boom" in item.reason for item in captured["results"])
 
 
-def test_worker_releases_hal_handles_before_check_service(qt_app):
+def test_worker_coordinates_serial_owner_before_external_self_check(qt_app):
     class PassingService:
         def run_checks(self):
             return [], True
@@ -675,11 +676,43 @@ def test_worker_releases_hal_handles_before_check_service(qt_app):
 
     hal = ReleasableHal()
     worker = HardwareWorker(telemetry_hz=1, check_service=PassingService(), hal=hal)
+    coordination = []
+    worker.set_self_check_coordinator(
+        before=lambda: coordination.append("stop") or True,
+        after=lambda: coordination.append("restart") or True,
+    )
 
     worker._run_self_check()
 
-    assert hal.released is True
+    assert hal.released is False
+    assert coordination == ["stop", "restart"]
     assert worker.is_connected is True
+
+
+def test_worker_does_not_reopen_com_while_serial_owner_is_active(qt_app):
+    class ShouldNotRunService:
+        def run_checks(self):
+            raise AssertionError("external COM probe must not run")
+
+    class BusySerialHal(MockHAL):
+        @property
+        def serial_resources_in_use(self) -> bool:
+            return True
+
+    worker = HardwareWorker(
+        telemetry_hz=1,
+        check_service=ShouldNotRunService(),
+        hal=BusySerialHal(),
+    )
+    captured = {}
+    worker.self_check_completed.connect(
+        lambda results, ready: captured.update(results=results, ready=ready)
+    )
+
+    worker._run_self_check()
+
+    assert captured["ready"] is False
+    assert "serial owner" in captured["results"][0].reason
 
 
 def test_recheck_triggers_worker(qt_app, track_controller_workers):
@@ -699,7 +732,7 @@ def test_recheck_triggers_worker(qt_app, track_controller_workers):
     def fake_request():
         called["flag"] = True
 
-    def fake_start():
+    def fake_start(_priority=None):
         started["flag"] = True
 
     worker.request_self_check = fake_request  # type: ignore[assignment]
@@ -1204,12 +1237,17 @@ def test_connect_requests_self_check_and_sets_connected_status(qt_app, track_con
     def fake_request():
         called["flag"] = True
 
-    def fake_start():
+    def fake_start(_priority=None):
         started["flag"] = True
 
     worker.request_self_check = fake_request  # type: ignore[assignment]
     worker.start = fake_start  # type: ignore[assignment]
-    controller = MainController(state, worker, safety_manager=SafetyManager(low_flow_threshold=0.2))
+    controller = MainController(
+        state,
+        worker,
+        safety_manager=SafetyManager(low_flow_threshold=0.2),
+        allow_test_actuation_bridge=True,
+    )
     track_controller_workers(controller)
     window = MainWindow(controller, state)
     controller.bind_view(window)
@@ -1220,6 +1258,8 @@ def test_connect_requests_self_check_and_sets_connected_status(qt_app, track_con
     assert started["flag"] is True
     assert "连接" in state.status_message
 
+    worker._connected = True
+    worker._hardware_ready = True
     controller.handle_self_check([], True)
 
     assert state.hardware_ready is True
@@ -1263,7 +1303,7 @@ def test_connect_requests_recheck_when_worker_already_running(qt_app, track_cont
     assert called["flag"] is True
 
 
-def test_self_check_zero_flow_runs_without_blocking_ui(qt_app):
+def test_self_check_zero_flow_runs_without_blocking_ui(qt_app, track_controller_workers):
     class SlowHAL(MockHAL):
         def set_flow(self, channel, value=None, *, comp=False):
             time.sleep(0.08)
@@ -1279,10 +1319,16 @@ def test_self_check_zero_flow_runs_without_blocking_ui(qt_app):
         }
     )
     worker = HardwareWorker(telemetry_hz=1, hal=SlowHAL(), simulation=True)
-    controller = MainController(state, worker, safety_manager=SafetyManager(low_flow_threshold=0.2))
+    controller = track_controller_workers(
+        MainController(state, worker, safety_manager=SafetyManager(low_flow_threshold=0.2))
+    )
+    controller.flow_worker.start()
+    controller.actuation_worker.start()
     window = MainWindow(controller, state)
     controller.bind_view(window)
 
+    worker._connected = True
+    worker._hardware_ready = True
     started_at = time.time()
     controller.handle_self_check([], True)
     elapsed = time.time() - started_at
@@ -1309,8 +1355,9 @@ def test_reset_requires_ready_and_reinitializes_hardware(qt_app, track_controlle
         }
     )
     worker = HardwareWorker(telemetry_hz=1)
-    controller = MainController(state, worker, safety_manager=SafetyManager(low_flow_threshold=0.2))
-    track_controller_workers(controller)
+    controller = track_controller_workers(
+        MainController(state, worker, safety_manager=SafetyManager(low_flow_threshold=0.2))
+    )
     now_ts = time.time()
     state.hardware_ready = True
     state.telemetry.connected = True
@@ -1331,7 +1378,7 @@ def test_reset_requires_ready_and_reinitializes_hardware(qt_app, track_controlle
         called["flag"] = True
 
     worker.request_self_check = fake_request  # type: ignore[assignment]
-    worker.start = lambda: started.__setitem__("flag", True)  # type: ignore[assignment]
+    worker.start = lambda _priority=None: started.__setitem__("flag", True)  # type: ignore[assignment]
 
     controller.reset_hardware()
 
@@ -1350,7 +1397,12 @@ def test_reset_clears_pretest_valve_selection(qt_app, track_controller_workers):
     config["low_flow_threshold"] = 0.2
     state = AppState.from_config(config)
     worker = HardwareWorker(telemetry_hz=1)
-    controller = MainController(state, worker, safety_manager=SafetyManager(low_flow_threshold=0.2))
+    controller = MainController(
+        state,
+        worker,
+        safety_manager=SafetyManager(low_flow_threshold=0.2),
+        allow_test_actuation_bridge=True,
+    )
     track_controller_workers(controller)
     window = MainWindow(controller, state)
     controller.bind_view(window)
@@ -1367,7 +1419,7 @@ def test_reset_clears_pretest_valve_selection(qt_app, track_controller_workers):
         updated_at=now_ts,
         reason="ok",
     )
-    worker.start = lambda: None  # type: ignore[assignment]
+    worker.start = lambda _priority=None: None  # type: ignore[assignment]
     worker.isRunning = lambda: False  # type: ignore[assignment]
 
     window.pretest_view._handle_click(1)
@@ -1434,7 +1486,7 @@ def test_reset_reinitializes_without_pending_double_self_check(qt_app, track_con
         reason="ok",
     )
 
-    worker.start = lambda: None  # type: ignore[assignment]
+    worker.start = lambda _priority=None: None  # type: ignore[assignment]
     worker.isRunning = lambda: False  # type: ignore[assignment]
     request_count = {"value": 0}
 
@@ -1530,7 +1582,7 @@ def test_stop_then_disconnect_telemetry_does_not_raise_safety_popup(qt_app):
     assert "DATA_STALE" not in window._telemetry_label.text()
 
 
-def test_shutdown_service_persists_event_and_updates_state(tmp_path: Path):
+def test_shutdown_without_actuation_owner_is_persisted_as_unsafe(tmp_path: Path):
     state = AppState.from_config(
         {
             "language": "zh-CN",
@@ -1558,15 +1610,15 @@ def test_shutdown_service_persists_event_and_updates_state(tmp_path: Path):
 
     event = service.shutdown(source="tests", reason="unit", force=True)
 
-    assert event["result"] == "success"
+    assert event["result"] == "unsafe"
     assert event["source"] == "tests"
     assert record_path.exists()
     on_disk = ShutdownService.load_last_event(record_path)
     assert on_disk and on_disk["source"] == "tests"
-    assert state.last_shutdown_event["result"] == "success"
+    assert state.last_shutdown_event["result"] == "unsafe"
     assert state.hardware_ready is False
     assert state.telemetry.connected is False
-    assert "已安全关闭" in state.telemetry.safety_reason
+    assert state.telemetry.safety_state == "DATA_STALE"
 
 
 def test_shutdown_retry_marks_unsafe_on_failure(tmp_path: Path):
@@ -1762,3 +1814,105 @@ def test_help_manual_opens_with_system(monkeypatch, tmp_path: Path, qt_app):
 
     assert opened["path"] == manual
     assert "已打开" in state.status_message
+
+
+def test_self_check_failure_atomically_clears_actuation_interlock(qt_app):
+    state = AppState.from_config({"low_flow_threshold": 0.2, "safety_state": "SAFE"})
+    state.hardware_ready = True
+    state.telemetry.connected = True
+    worker = HardwareWorker(telemetry_hz=1)
+    controller = MainController(state, worker, safety_manager=SafetyManager(0.2))
+    controller.actuation_interlock.update(connected=True, hardware_ready=True)
+
+    controller.handle_self_check([], hardware_ready=False)
+
+    snapshot = controller.actuation_interlock.read()[1]
+    assert snapshot.connected is False
+    assert snapshot.hardware_ready is False
+    assert state.hardware_ready is False
+    assert state.telemetry.connected is False
+
+
+def test_persisted_unsafe_shutdown_requires_explicit_connect_retry(qt_app):
+    state = AppState.from_config({"low_flow_threshold": 0.2, "safety_state": "SAFE"})
+    state.last_shutdown_event = {"result": "unsafe", "error": "close timeout"}
+    worker = HardwareWorker(telemetry_hz=1)
+    controller = MainController(state, worker, safety_manager=SafetyManager(0.2))
+    starts = {"hardware": 0, "flow": 0, "actuation": 0}
+    worker.start = lambda _priority=None: starts.__setitem__("hardware", starts["hardware"] + 1)  # type: ignore[assignment]
+    controller.flow_worker.start = lambda: starts.__setitem__("flow", starts["flow"] + 1)  # type: ignore[assignment]
+    controller.actuation_worker.start = lambda _priority=None: starts.__setitem__("actuation", starts["actuation"] + 1)  # type: ignore[assignment]
+
+    assert controller.start_worker() is False
+    assert starts == {"hardware": 0, "flow": 0, "actuation": 0}
+
+    controller.connect_hardware()
+
+    assert starts == {"hardware": 1, "flow": 1, "actuation": 1}
+    assert controller._unsafe_shutdown_latched is False
+
+
+def test_latency_critical_workers_start_at_high_priority(qt_app):
+    state = AppState.from_config({"low_flow_threshold": 0.2, "safety_state": "SAFE"})
+    worker = HardwareWorker(telemetry_hz=1)
+    controller = MainController(state, worker, safety_manager=SafetyManager(0.2))
+    starts = {}
+    worker.start = lambda priority: starts.__setitem__("hardware", priority)  # type: ignore[assignment]
+    controller.flow_worker.start = lambda: starts.__setitem__("flow", None)  # type: ignore[assignment]
+    controller.actuation_worker.start = lambda priority: starts.__setitem__(  # type: ignore[assignment]
+        "actuation", priority
+    )
+
+    assert controller.start_worker() is True
+
+    assert starts == {
+        "flow": None,
+        "actuation": QThread.Priority.HighPriority,
+        "hardware": QThread.Priority.HighPriority,
+    }
+
+
+def test_actuation_handoff_failure_blocks_all_worker_restart(qt_app):
+    state = AppState.from_config({"low_flow_threshold": 0.2, "safety_state": "SAFE"})
+    worker = HardwareWorker(telemetry_hz=1)
+    controller = MainController(state, worker, safety_manager=SafetyManager(0.2))
+    starts = {"hardware": 0, "flow": 0, "actuation": 0}
+    worker.start = lambda _priority=None: starts.__setitem__("hardware", starts["hardware"] + 1)  # type: ignore[assignment]
+    controller.flow_worker.start = lambda: starts.__setitem__("flow", starts["flow"] + 1)  # type: ignore[assignment]
+    controller.actuation_worker.start = lambda _priority=None: starts.__setitem__("actuation", starts["actuation"] + 1)  # type: ignore[assignment]
+    controller.actuation_worker.prepare_restart = lambda: False  # type: ignore[assignment]
+
+    assert controller.start_worker() is False
+
+    assert starts == {"hardware": 0, "flow": 0, "actuation": 0}
+    assert controller._unsafe_shutdown_latched is True
+    assert controller.actuation_interlock.read()[1].hardware_ready is False
+    assert controller.flow_worker.execution_context[2] is False
+
+
+def test_unsafe_reset_does_not_clear_state_or_auto_reconnect(qt_app):
+    state = AppState.from_config({"low_flow_threshold": 0.2, "safety_state": "SAFE"})
+    state.hardware_ready = True
+    state.telemetry.connected = True
+    worker = HardwareWorker(telemetry_hz=1)
+    controller = MainController(state, worker, safety_manager=SafetyManager(0.2))
+    controller.ensure_safe_command = lambda *_args, **_kwargs: True  # type: ignore[assignment]
+    controller.shutdown_service.shutdown = lambda **_kwargs: {  # type: ignore[assignment]
+        "result": "unsafe",
+        "error": "close timeout",
+        "source": "reset",
+    }
+    calls = {"cache_reset": 0, "self_check": 0}
+    controller.valve_service.reset_cached_state = lambda: calls.__setitem__(  # type: ignore[assignment]
+        "cache_reset", calls["cache_reset"] + 1
+    )
+    controller._start_or_request_self_check = lambda: calls.__setitem__(  # type: ignore[assignment]
+        "self_check", calls["self_check"] + 1
+    )
+
+    controller.reset_hardware()
+
+    assert calls == {"cache_reset": 0, "self_check": 0}
+    assert controller._unsafe_shutdown_latched is True
+    assert state.hardware_ready is False
+    assert state.telemetry.connected is False

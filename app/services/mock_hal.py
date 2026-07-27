@@ -52,9 +52,10 @@ class MockHAL(HalBase):
     def read_ai_frames(self, timestamp: float | None = None) -> list[AnalogInputFrame]:
         return [self.read_ai_frame(timestamp)]
 
-    def reset_ai_input(self) -> None:
+    def reset_ai_input(self) -> bool:
         self._ai_epoch += 1
         self._ai_sequence = 0
+        return True
 
     def set_ttl_level(self, value: float) -> None:
         self._ttl_level = float(value)
@@ -124,10 +125,11 @@ class MockHAL(HalBase):
             self._do_owner_thread_id = owner
         return self._do_owner_thread_id == owner
 
-    def release_do_output(self) -> None:
+    def release_do_output(self) -> bool:
         if self._do_owner_thread_id not in {None, threading.get_ident()}:
             raise RuntimeError("DO task 所有权不属于当前线程，不能跨线程释放。")
         self._do_owner_thread_id = None
+        return True
 
     def release_serial_resources(self) -> None:
         return None

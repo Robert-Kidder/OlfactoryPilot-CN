@@ -13,7 +13,8 @@ from app.services import CalibrationSession
 def controller():
     state = AppState()
     worker = MagicMock()
-    ctrl = MainController(state, worker)
+    worker.isRunning.return_value = False
+    ctrl = MainController(state, worker, allow_test_actuation_bridge=True)
     # Mock view and calibration view interfaces used in controller
     ctrl.view = MagicMock()
     ctrl.view.calibration_view = MagicMock()

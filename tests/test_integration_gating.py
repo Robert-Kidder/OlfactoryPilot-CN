@@ -22,7 +22,11 @@ def controller(mock_worker):
     state.inhale_threshold = 0.5
     state.exhale_threshold = -0.5
 
-    ctrl = MainController(state=state, worker=mock_worker)
+    ctrl = MainController(
+        state=state,
+        worker=mock_worker,
+        allow_test_actuation_bridge=True,
+    )
     # Mock internal logger to verify calls
     ctrl._breath_logger = MagicMock()
     return ctrl
@@ -142,6 +146,13 @@ def test_controller_protocol_executor_trigger_uses_valve_service(controller):
     controller.state.hardware_ready = True
     controller.state.telemetry.connected = True
     controller.state.telemetry.safety_state = "SAFE"
+    controller.actuation_interlock.update(
+        connected=True,
+        hardware_ready=True,
+        flow_setpoints_ready=True,
+        safety_state="SAFE",
+        has_protocol=True,
+    )
     commands = []
 
     def writer(command):
@@ -195,6 +206,13 @@ def test_controller_protocol_close_uses_safety_close_path(controller):
     controller.state.hardware_ready = True
     controller.state.telemetry.connected = True
     controller.state.telemetry.safety_state = "SAFE"
+    controller.actuation_interlock.update(
+        connected=True,
+        hardware_ready=True,
+        flow_setpoints_ready=True,
+        safety_state="SAFE",
+        has_protocol=True,
+    )
     commands = []
 
     def writer(command):
@@ -222,3 +240,113 @@ def test_controller_protocol_close_uses_safety_close_path(controller):
 
     assert [command.action.value for command in commands] == ["open", "close"]
     assert commands[-1].category.value == "safety"
+
+
+def test_protocol_start_waits_for_confirmed_master_prepare(controller):
+    from pathlib import Path
+
+    from app.models import (
+        ActuationReceipt,
+        ActuationResult,
+        ProtocolDocument,
+        ProtocolExecutionStatus,
+        ProtocolTrial,
+        TriggerMode,
+    )
+
+    controller.state.master_valve_line = "Dev1/P1.0"
+    controller.valve_service.master_valve_line = "Dev1/P1.0"
+    controller.state.loaded_protocol = ProtocolDocument(
+        source_path=Path("master.csv"),
+        source_name="master.csv",
+        trials=[ProtocolTrial("1", 0, 100, 1, TriggerMode.MANUAL)],
+    )
+    controller.state.flow_setpoints_ready = True
+    controller.state.hardware_ready = True
+    controller.state.telemetry.connected = True
+    controller.state.telemetry.safety_state = "SAFE"
+    controller.actuation_interlock.update(
+        connected=True,
+        hardware_ready=True,
+        flow_setpoints_ready=True,
+        safety_state="SAFE",
+        has_protocol=True,
+    )
+    commands = []
+
+    def writer(command):
+        commands.append(command)
+        return ActuationReceipt.from_write(
+            command=command,
+            started_ns=command.expected_ns,
+            actual_ns=command.expected_ns,
+            wall_timestamp=10.0,
+            result=ActuationResult.SUCCESS,
+        )
+
+    controller.actuation_worker.writer = writer
+
+    controller.handle_protocol_start_requested()
+
+    assert [(item.valve, item.category.value) for item in commands] == [(0, "warmup")]
+    assert controller.valve_service.master_is_open() is True
+    assert controller.protocol_executor.state.status == ProtocolExecutionStatus.WAITING_TRIGGER
+
+    controller.handle_protocol_manual_trigger_requested()
+    controller.handle_breath_samples([-0.6], 10.0)
+
+    assert [(item.valve, item.category.value) for item in commands[:2]] == [
+        (0, "warmup"),
+        (1, "normal"),
+    ]
+
+
+def test_protocol_start_stays_disarmed_when_master_prepare_fails(controller):
+    from pathlib import Path
+
+    from app.models import (
+        ActuationReceipt,
+        ActuationResult,
+        ProtocolDocument,
+        ProtocolExecutionStatus,
+        ProtocolTrial,
+        TriggerMode,
+    )
+
+    controller.state.master_valve_line = "Dev1/P1.0"
+    controller.valve_service.master_valve_line = "Dev1/P1.0"
+    controller.state.loaded_protocol = ProtocolDocument(
+        source_path=Path("master-fail.csv"),
+        source_name="master-fail.csv",
+        trials=[ProtocolTrial("1", 0, 100, 1, TriggerMode.MANUAL)],
+    )
+    controller.state.flow_setpoints_ready = True
+    controller.state.hardware_ready = True
+    controller.state.telemetry.connected = True
+    controller.state.telemetry.safety_state = "SAFE"
+    controller.actuation_interlock.update(
+        connected=True,
+        hardware_ready=True,
+        flow_setpoints_ready=True,
+        safety_state="SAFE",
+        has_protocol=True,
+    )
+
+    def writer(command):
+        return ActuationReceipt.from_write(
+            command=command,
+            started_ns=command.expected_ns,
+            actual_ns=None,
+            wall_timestamp=10.0,
+            result=ActuationResult.FAILED,
+            message="master write failed",
+        )
+
+    controller.actuation_worker.writer = writer
+
+    controller.handle_protocol_start_requested()
+
+    assert controller.valve_service.master_is_open() is False
+    assert controller.protocol_executor.state.status == ProtocolExecutionStatus.BLOCKED
+    assert controller._protocol_lease_epoch is None
+    assert controller._protocol_master_prepare_pending is False
