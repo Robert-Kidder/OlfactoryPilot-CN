@@ -32,7 +32,7 @@ development_status:
   3-2-breath-gated-stimulation: done
   3-3-manual-vs-ttl-trigger-modes: done
   3-4-low-jitter-actuation-20ms: done
-  3-5-session-file-naming-and-logging: in-progress
+  3-5-session-file-naming-and-logging: done
   epic-3-retrospective: optional
 
   epic-4: backlog
