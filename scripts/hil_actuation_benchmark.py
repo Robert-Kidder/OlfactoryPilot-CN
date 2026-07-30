@@ -89,7 +89,7 @@ class ReceiptCollector:
         def writer(command: ActuationCommand) -> ActuationReceipt:
             tracing = (
                 self._latency_trace is not None
-                and self._latency_trace.trial_label is not None
+                and self._latency_trace.should_trace_command(command.command_id)
             )
             entered_ns = time.perf_counter_ns() if tracing else None
             if tracing:
@@ -122,6 +122,8 @@ class ReceiptCollector:
         return writer
 
     def record(self, receipt: ActuationReceipt) -> None:
+        if self._latency_trace is not None:
+            self._latency_trace.retire_command(receipt.command_id)
         with self._condition:
             self._receipts.append(receipt)
             self._condition.notify_all()
@@ -198,6 +200,21 @@ class LatencyTrace:
                 or str(command_id) in self._command_trials
             )
 
+    def register_command(self, command_id: str) -> str | None:
+        if not self.enabled:
+            return None
+        with self._lock:
+            label = self._trial_label
+            if label is not None:
+                self._command_trials[str(command_id)] = label
+            return label
+
+    def retire_command(self, command_id: str) -> None:
+        if not self.enabled:
+            return
+        with self._lock:
+            self._command_trials.pop(str(command_id), None)
+
     @property
     def events(self) -> list[dict[str, object]]:
         with self._lock:
@@ -217,22 +234,28 @@ class LatencyTrace:
         with self._lock:
             self._trial_label = None
 
-    def record(self, event: str, *, at_ns: int | None = None, **fields) -> None:
+    def record(
+        self,
+        event: str,
+        *,
+        at_ns: int | None = None,
+        label_hint: str | None = None,
+        **fields,
+    ) -> None:
         if not self.enabled:
             return
         event_ns = time.perf_counter_ns() if at_ns is None else int(at_ns)
         with self._lock:
             command_id = str(fields.get("command_id") or "")
-            label = self._trial_label
-            if (
-                label is not None
-                and event == "actuation_submit_return"
-                and command_id
-                and fields.get("accepted") is True
-            ):
-                self._command_trials[command_id] = label
-            if label is None and command_id:
-                label = self._command_trials.get(command_id)
+            label = (
+                self._command_trials.get(command_id)
+                if command_id
+                else None
+            )
+            if label is None:
+                label = label_hint
+            if label is None:
+                label = self._trial_label
             if label is None:
                 labels = set(self._command_trials.values())
                 if len(labels) == 1:
@@ -479,9 +502,12 @@ class TracingActuationWorker(ActuationWorker):
 
     def submit(self, command: ActuationCommand) -> bool:
         entered_ns = time.perf_counter_ns()
+        label = self._latency_trace.register_command(command.command_id)
         accepted = super().submit(command)
         self._latency_trace.record(
             "actuation_submit_return",
+            at_ns=entered_ns,
+            label_hint=label,
             command_id=command.command_id,
             expected_ns=command.expected_ns,
             action=command.action.value,
@@ -489,6 +515,8 @@ class TracingActuationWorker(ActuationWorker):
             entered_ns=entered_ns,
             accepted=accepted,
         )
+        if not accepted:
+            self._latency_trace.retire_command(command.command_id)
         return accepted
 
     def _execute(self, command: ActuationCommand) -> None:
@@ -1326,15 +1354,20 @@ class Runtime:
             receipts.append(receipt)
         return receipts
 
-    def _fail_story_35_shutdown_close(self) -> None:
+    def _fail_story_35_shutdown_close(
+        self,
+        *,
+        stage: str = "shutdown_emergency_close",
+        message: str = (
+            "中止后未取得全部配置目标关闭回执，"
+            "Story 3.5 bundle 禁止标记完整。"
+        ),
+    ) -> None:
         writer = getattr(self, "_story_35_writer", None)
         if writer is not None:
             writer.fail_from_producer(
-                stage="shutdown_emergency_close",
-                message=(
-                    "中止后未取得全部配置目标关闭回执，"
-                    "Story 3.5 bundle 禁止标记完整。"
-                ),
+                stage=stage,
+                message=message,
             )
 
     def stop(self) -> None:
@@ -1361,9 +1394,33 @@ class Runtime:
                     self._fail_story_35_shutdown_close()
                     raise RuntimeError("shutdown emergency close-all 未获得全部成功回执")
         finally:
-            self.actuation.shutdown(int(self.config.get("actuation_shutdown_timeout_ms", 2000)))
-            self.hardware.stop()
-            self.flow.shutdown(int(self.config.get("actuation_shutdown_timeout_ms", 2000)))
+            timeout_ms = int(self.config.get("actuation_shutdown_timeout_ms", 2000))
+            owner_failures = []
+            for owner_name, stop_owner in (
+                ("Actuation/DO", lambda: self.actuation.shutdown(timeout_ms)),
+                ("Hardware/AI", self.hardware.stop),
+                ("Flow/serial", lambda: self.flow.shutdown(timeout_ms)),
+            ):
+                try:
+                    stopped = stop_owner()
+                except Exception as exc:
+                    owner_failures.append(
+                        f"{owner_name} teardown 异常：{type(exc).__name__}: {exc}"
+                    )
+                else:
+                    if stopped is not True:
+                        owner_failures.append(
+                            f"{owner_name} teardown 未确认 owner 停止与资源释放"
+                        )
+            if owner_failures:
+                detail = "；".join(owner_failures)
+                self._fail_story_35_shutdown_close(
+                    stage="shutdown_owner_teardown",
+                    message=(
+                        f"{detail}；Story 3.5 bundle 禁止标记完整。"
+                    ),
+                )
+                raise RuntimeError(detail)
 
     def shutdown_via_service(self) -> dict:
         service = ShutdownService(
@@ -1767,10 +1824,24 @@ def run_safety_scenarios(runtime: Runtime, args) -> dict:
         "error": shutdown_event.get("error"),
         **shutdown_evidence,
     }
+    shutdown_complete = bool(
+        shutdown_event.get("result") == "success"
+        and shutdown_event.get("valves_closed") is True
+        and shutdown_event.get("heaters_off") is True
+        and shutdown_evidence["all_configured_targets_closed"]
+    )
     if (
         getattr(args, "story_3_5_recording", False)
         and runtime._story_35_writer is not None
     ):
+        if not shutdown_complete:
+            runtime._fail_story_35_shutdown_close(
+                stage="shutdown_owner_teardown",
+                message=(
+                    "shutdown 安全场景未确认全部 owner 与配置目标安全收敛；"
+                    "Story 3.5 bundle 禁止标记完整。"
+                ),
+            )
         finalization, validation = runtime.finalize_story_35_recording(
             reason="safety_shutdown_completed",
             aborted=False,

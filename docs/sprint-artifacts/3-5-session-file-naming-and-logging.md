@@ -4,7 +4,7 @@ baseline_commit: e401a319d1da93302bcc8908fc9ed7d161b3da08
 
 # Story 3.5: 会话文件命名与日志
 
-Status: review
+Status: in-progress
 
 <!-- Note: 本 Story 已按 create-story checklist 完成上下文审查；实现阶段仍须逐项勾选并保留测试/HIL 证据。 -->
 
@@ -228,6 +228,13 @@ Status: review
   - [x] [HIL][High] 修复 severe abort → emergency close → receipt drain → producer fence → bundle finalize 顺序；正式 run 必须有界等待并在自身 bundle 持久化全部 21 个配置目标关闭回执，任何中止均不得继续后续安全场景，也不得依赖事后独立 close。
   - [x] [HIL][Automated Gate] 为延迟超限和中止全关顺序先增加确定性 RED 测试，再做最小修复；完成 Story 定向测试、全量 `python -m pytest -q`、`python -m ruff check .` 与 `git diff --check`，仅使用 MockHAL/fake/只读证据，不连接或操作真实硬件、不运行真实 NI HIL。
   - [ ] [HIL][Acceptance] 以新的 40 位 candidate commit 在真实 Windows/NI 上从正式 `scripts/hil_actuation_benchmark.py --story-3-5-recording` 入口完成单次预声明验收：正常 open/close 各 `200/200`、全部 rolling/final-last-100 p95 Gate、四个安全场景、完整 producer fences 与最终 bundle validator 均通过；失败或中止不得继续后续安全场景。通过前 Story、Task 10 与 sprint-status 保持 `review`。
+
+### Review Findings — candidate `e37578d15fc4eeb3679d08909d861faf9deac67f` 独立复审
+
+- [x] [Review][Patch][High] 到期 NORMAL OPEN 不得越过已排队的 pause/mode/load 安全转换；deadline reservation 只应赋予 CLOSE 越过非安全消息的优先权。 [`app/workers/actuation_worker.py:1227`]
+- [x] [Review][Patch][High] HIL teardown 必须检查 Actuation/Hardware/Flow owner 停止与资源释放结果；任一失败须先锁存 writer failure，禁止 fence 齐全后发布 complete bundle。 [`scripts/hil_actuation_benchmark.py:1340`]
+- [x] [Review][Patch][Medium] close-severe 全目标关闭命令必须保留触发 severe 的原 trial identity，不得在 executor 推进后错误归属到下一 trial。 [`app/workers/actuation_worker.py:2276`]
+- [x] [Review][Patch][Medium] latency trace 的 command→trial 登记、归属选择与 terminal 清理必须覆盖并发 submit、跨 trial 执行及 CANCELLED/rejected receipt，避免错误归因、漏 trace 和残留映射。 [`scripts/hil_actuation_benchmark.py:220`]
 
 ### Review Findings
 
@@ -505,6 +512,7 @@ GPT-5 Codex
 - 本次独立复审最终 Gate：新增/扩展确定性测试全部 GREEN；Story 定向集合 454 passed；全量 `python -m pytest -q` 625 passed；`python -m ruff check .` 与 `git diff --check` 通过。只使用 MockHAL、temp Git repo 与只读历史证据，未连接或运行真实 NI HIL。
 - 新的真实 Windows/NI Acceptance 仍未执行且保持未勾选；Task 10 父项、Story 与 sprint-status 继续为 `review`。未提交、未推送。
 - 2026-07-30 第二次真实 Windows/NI Acceptance 失败已登记并完成自动化 follow-up：正常 open/close 各 `68/200` 后，valve 9 close jitter `30.3166 ms` 触发 severe 中止；性能样本与四个安全场景均未完成。只读复核将延迟定位到 owner dispatch（`29.6321 ms`）而非 DAQ write（`0.6845 ms`），并确认历史 bundle 已由 finally 保存 21 条 `shutdown-close`，真正契约缺口为 close-severe 未自行生成 `severe-close`。现已完成 deadline owner reservation、diagnostic I/O 隔离、延迟 close trace、severe 全目标关闭/有界 drain/fence/finalize 及 incomplete bundle fail-closed；Story 定向 462 passed、全量 633 passed、ruff/diff check 通过。新的真实 HIL Acceptance 仍未完成；Task 10、Story 与 sprint-status 继续保持 `review`。
+- candidate `e37578d15fc4eeb3679d08909d861faf9deac67f` 独立复审 4 项 patch 已闭环：CLOSE-only deadline reservation、owner teardown fail-closed、severe 原 trial identity 与 latency trace command 生命周期均有确定性回归；全量 `636 passed`、ruff 与 `git diff --check` 通过。实现修复后工作树尚未形成新的 40 位 candidate，真实 Windows/NI Acceptance 仍未执行。
 
 ### File List
 

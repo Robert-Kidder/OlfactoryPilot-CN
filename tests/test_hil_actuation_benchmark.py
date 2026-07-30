@@ -188,6 +188,7 @@ def test_latency_trace_is_bounded_and_flushes_only_after_collection(tmp_path) ->
 def test_latency_trace_keeps_scheduled_close_visible_after_trial_scope_ends() -> None:
     trace = LatencyTrace(enabled=True, run_id="diag")
     trace.begin_trial("bench-0068-v9")
+    assert trace.register_command("protocol-9-close-1000283") == "bench-0068-v9"
     trace.record(
         "actuation_submit_return",
         command_id="protocol-9-close-1000283",
@@ -225,6 +226,90 @@ def test_latency_trace_keeps_scheduled_close_visible_after_trial_scope_ends() ->
     ]
     assert all(event["trial_label"] == "bench-0068-v9" for event in close_events)
     assert not trace.should_trace_command("protocol-9-close-1000283")
+
+
+def test_latency_trace_uses_command_identity_across_overlapping_trial_scopes(
+    tmp_path,
+) -> None:
+    trace = LatencyTrace(enabled=True, run_id="diag")
+    trace.begin_trial("trial-a")
+    assert trace.register_command("close-a") == "trial-a"
+    trace.end_trial()
+    trace.begin_trial("trial-b")
+    assert trace.register_command("close-b") == "trial-b"
+    trace.record(
+        "actuation_execute_enter",
+        command_id="close-a",
+        expected_ns=100,
+    )
+    trace.end_trial()
+
+    assert next(
+        event
+        for event in trace.events
+        if event.get("command_id") == "close-a"
+    )["trial_label"] == "trial-a"
+    assert trace.trial_label is None
+
+    command_a = ActuationCommand(
+        command_id="close-a",
+        execution_epoch=1,
+        arm_epoch=1,
+        sequence=1,
+        trial_id="trial-a",
+        trial_index=0,
+        valve=1,
+        action=ActuationAction.CLOSE,
+        category=ActuationCategory.NORMAL,
+        expected_ns=time.perf_counter_ns(),
+        duration_ns=None,
+        wall_timestamp=time.time(),
+        safety_generation=1,
+    )
+    adapter = SimpleNamespace(
+        hal=object(),
+        execute=lambda command: ActuationReceipt.from_write(
+            command=command,
+            started_ns=command.expected_ns,
+            actual_ns=command.expected_ns + 1_000_000,
+            wall_timestamp=time.time(),
+            result=ActuationResult.SUCCESS,
+        ),
+    )
+    collector = ReceiptCollector(
+        tmp_path / "receipts.jsonl",
+        latency_trace=trace,
+    )
+
+    collector.wrap(adapter)(command_a)
+
+    writer_events = [
+        event
+        for event in trace.events
+        if event.get("command_id") == "close-a"
+        and event["event"] in {"writer_enter", "writer_return"}
+    ]
+    assert [event["event"] for event in writer_events] == [
+        "writer_enter",
+        "writer_return",
+    ]
+    assert all(event["trial_label"] == "trial-a" for event in writer_events)
+    assert not trace.should_trace_command("close-a")
+    assert trace.should_trace_command("close-b")
+
+    collector.record(
+        _receipt(
+            valve=2,
+            device="Dev1",
+            line="P0.1",
+            command_id="close-b",
+            result=ActuationResult.CANCELLED,
+            trial_id="trial-b",
+        )
+    )
+
+    assert not trace.should_trace_command("close-b")
+    assert trace.trial_label is None
 
 
 @pytest.mark.skipif(
@@ -936,9 +1021,11 @@ def test_confirmed_abort_close_is_not_replaced_by_a_second_shutdown_close_set() 
         "actuation_shutdown_timeout_ms": 2000,
     }
     runtime.actuation = Actuation()
-    runtime.hardware = SimpleNamespace(stop=lambda: order.append("hardware_fence"))
+    runtime.hardware = SimpleNamespace(
+        stop=lambda: (order.append("hardware_fence"), True)[1]
+    )
     runtime.flow = SimpleNamespace(
-        shutdown=lambda _timeout_ms: order.append("flow_shutdown")
+        shutdown=lambda _timeout_ms: (order.append("flow_shutdown"), True)[1]
     )
     runtime._shutdown_completed = False
     runtime._abort_close_confirmed = True
@@ -950,6 +1037,39 @@ def test_confirmed_abort_close_is_not_replaced_by_a_second_shutdown_close_set() 
         "hardware_fence",
         "flow_shutdown",
     ]
+
+
+def test_owner_teardown_failure_latches_story35_bundle_before_finalize() -> None:
+    failures: list[tuple[str, str]] = []
+    order: list[str] = []
+
+    runtime = Runtime.__new__(Runtime)
+    runtime.config = {"actuation_shutdown_timeout_ms": 2000}
+    runtime.actuation = SimpleNamespace(
+        isRunning=lambda: True,
+        emergency_close_all=lambda _timeout_ms: True,
+        shutdown=lambda _timeout_ms: (order.append("actuation"), False)[1],
+    )
+    runtime.hardware = SimpleNamespace(
+        stop=lambda: (order.append("hardware"), True)[1]
+    )
+    runtime.flow = SimpleNamespace(
+        shutdown=lambda _timeout_ms: (order.append("flow"), True)[1]
+    )
+    runtime._shutdown_completed = False
+    runtime._abort_close_confirmed = True
+    runtime._story_35_writer = SimpleNamespace(
+        fail_from_producer=lambda *, stage, message: failures.append(
+            (stage, message)
+        )
+    )
+
+    with pytest.raises(RuntimeError, match="Actuation/DO teardown"):
+        runtime.stop()
+
+    assert order == ["actuation", "hardware", "flow"]
+    assert failures[0][0] == "shutdown_owner_teardown"
+    assert "bundle 禁止标记完整" in failures[0][1]
 
 
 def test_incomplete_shutdown_close_latches_story35_bundle_failure_before_finalize() -> None:
@@ -971,8 +1091,8 @@ def test_incomplete_shutdown_close_latches_story35_bundle_failure_before_finaliz
         "actuation_shutdown_timeout_ms": 2000,
     }
     runtime.actuation = Actuation()
-    runtime.hardware = SimpleNamespace(stop=lambda: None)
-    runtime.flow = SimpleNamespace(shutdown=lambda _timeout_ms: None)
+    runtime.hardware = SimpleNamespace(stop=lambda: True)
+    runtime.flow = SimpleNamespace(shutdown=lambda _timeout_ms: True)
     runtime._shutdown_completed = False
     runtime._abort_close_confirmed = False
     runtime._story_35_writer = SimpleNamespace(

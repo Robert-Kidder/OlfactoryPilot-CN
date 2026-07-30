@@ -752,6 +752,8 @@ class ActuationWorker(QThread):
         target_device: str | None,
         target_line: str | None,
         prefix: str = "safety-close",
+        trial_id: str | None = None,
+        trial_index: int | None = None,
     ) -> ActuationCommand:
         with self._condition:
             self._sequence += 1
@@ -761,11 +763,19 @@ class ActuationWorker(QThread):
                 arm_epoch=self.protocol_state.arm_epoch,
                 sequence=self._sequence,
                 trial_id=(
-                    self.protocol_state.current_trial.trial_id
-                    if self.protocol_state.current_trial
-                    else None
+                    trial_id
+                    if trial_id is not None
+                    else (
+                        self.protocol_state.current_trial.trial_id
+                        if self.protocol_state.current_trial
+                        else None
+                    )
                 ),
-                trial_index=self.protocol_state.trial_index,
+                trial_index=(
+                    trial_index
+                    if trial_index is not None
+                    else self.protocol_state.trial_index
+                ),
                 valve=valve,
                 action=ActuationAction.CLOSE,
                 category=ActuationCategory.SAFETY,
@@ -787,12 +797,25 @@ class ActuationWorker(QThread):
         *,
         reason: str,
         prefix: str = "safety-close-all",
+        trial_id: str | None = None,
+        trial_index: int | None = None,
     ) -> list[ActuationCommand]:
         if self.valve_service is None:
             valves = set(self.protocol_state.possibly_open_valves)
             if self.protocol_state.active_valve is not None:
                 valves.add(self.protocol_state.active_valve)
-            return [self.submit_emergency_close(valve, reason=reason) for valve in sorted(valves)]
+            return [
+                self._submit_emergency_close_target(
+                    valve,
+                    reason=reason,
+                    target_device=None,
+                    target_line=None,
+                    prefix=prefix,
+                    trial_id=trial_id,
+                    trial_index=trial_index,
+                )
+                for valve in sorted(valves)
+            ]
         steps = self.valve_service.emergency_close_steps()
         commands = [
             self._submit_emergency_close_target(
@@ -801,6 +824,8 @@ class ActuationWorker(QThread):
                 target_device=step.device,
                 target_line=step.line,
                 prefix=prefix,
+                trial_id=trial_id,
+                trial_index=trial_index,
             )
             for step in steps
         ]
@@ -809,7 +834,15 @@ class ActuationWorker(QThread):
         if self.protocol_state.active_valve is not None:
             conservative.add(self.protocol_state.active_valve)
         commands.extend(
-            self.submit_emergency_close(valve, reason=reason)
+            self._submit_emergency_close_target(
+                valve,
+                reason=reason,
+                target_device=None,
+                target_line=None,
+                prefix=prefix,
+                trial_id=trial_id,
+                trial_index=trial_index,
+            )
             for valve in sorted(conservative - covered)
         )
         return commands
@@ -1224,7 +1257,11 @@ class ActuationWorker(QThread):
             ):
                 _, _, _, kind, payload = heapq.heappop(self._deadline_heap)
                 return kind, payload
-            if self._normal_heap and self._normal_heap[0][0] <= now_ns:
+            if (
+                self._normal_heap
+                and self._normal_heap[0][0] <= now_ns
+                and self._normal_heap[0][3].action == ActuationAction.CLOSE
+            ):
                 return heapq.heappop(self._normal_heap)[3]
             next_due_ns = (
                 self._normal_heap[0][0]
@@ -1259,6 +1296,8 @@ class ActuationWorker(QThread):
                 if message[0] in priority_message_kinds:
                     del self._messages[index]
                     return message
+            if self._normal_heap and self._normal_heap[0][0] <= now_ns:
+                return heapq.heappop(self._normal_heap)[3]
             if self._messages:
                 if self._messages[0][0] == "recorder_fence" and (
                     self._normal_heap
@@ -2285,6 +2324,8 @@ class ActuationWorker(QThread):
             self._submit_all_configured_closes(
                 reason=self.protocol_state.quality_block_reason,
                 prefix="severe-close",
+                trial_id=receipt.trial_id,
+                trial_index=receipt.trial_index,
             )
         elif receipt.action == ActuationAction.CLOSE and receipt.result != ActuationResult.SUCCESS:
             self.submit_emergency_close(

@@ -635,6 +635,26 @@ def test_imminent_normal_deadline_reserves_owner_ahead_of_non_safety_messages() 
     assert calls == ["scheduled-close"]
 
 
+def test_due_normal_open_does_not_overtake_queued_pause_transition() -> None:
+    clock = FakeClock()
+    worker, _, _ = _worker(clock, lambda _command: None)
+    opening = _command(
+        command_id="due-open",
+        sequence=1,
+        expected_ns=clock.value,
+        action=ActuationAction.OPEN,
+        category=ActuationCategory.NORMAL,
+    )
+
+    assert worker.submit(opening)
+    worker.post_pause()
+
+    first = worker._pop_ready()
+    assert isinstance(first, tuple)
+    assert first[0] == "pause"
+    assert worker._pop_ready() == opening
+
+
 def test_manual_trigger_bypasses_ai_backlog_without_dropping_samples() -> None:
     clock = FakeClock()
     worker, _, _ = _worker(clock, lambda _command: None)
@@ -1597,6 +1617,8 @@ def test_severe_normal_close_enqueues_every_configured_emergency_close_before_fe
     assert all(
         item.command_id.startswith("severe-close-")
         and item.category == ActuationCategory.SAFETY
+        and item.trial_id == "one"
+        and item.trial_index == 0
         for item in severe_closes
     )
 
