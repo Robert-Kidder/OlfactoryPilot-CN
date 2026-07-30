@@ -211,6 +211,20 @@ Status: review
 - [x] [AI-Review][Decision] 采用方案 A：强制应用单实例，以操作系统级、崩溃后可释放的 ownership 防止第二个实例隔离首个实例的 PREPARED staging；第二个实例显示中文提示并安全退出。
 - [x] [AI-Review][Gate] 对每个交错先写稳定失败测试再修改实现，使用 Event/Barrier/fake filesystem/clock 与 fault injection，不以毫秒级 sleep 作为唯一断言；覆盖 Controller、QTimer、QThread、SessionWriter、finalizer、窗口 teardown 及 generation/session 隔离。完成后运行 Story 定向测试、全量 `python -m pytest`、`python -m ruff check .`，以及相对 baseline、包含全部未跟踪文件的 `git diff --check`；仅使用 MockHAL/fake，不运行或声称运行真实 NI HIL，Story 与 sprint-status 保持 `review`。
 
+- [ ] Task 10：处理 2026-07-30 真实 Windows/NI HIL 失败后的 review continuation（AC: 5, 6, 8, 9, 12）
+  - [x] [HIL][Evidence] 登记失败 candidate `c9baff6e6910266621fb2a36c6b62f880f42a27e` 与只读运行目录 `logs/benchmarks/story-3-5-20260730-154234-live`；首个正式动作 `protocol-9-open-1` jitter 为 `33.0973 ms`，超过 `30 ms` severe limit，随后 severe safety close 将 21 个配置目标全部关闭并按要求中止。仅取得正常 open `1/200`、close `0/200`，因此 `400/400` receipt success 与 open/close/combined rolling/final-last-100 p95 Gate 均未完成。
+  - [x] [HIL][High] 在不得排除首个正式样本、增加未声明 warm-up、降低阈值、修改统计口径或挑选成功 run 的前提下，定位并修复首个正式 deadline 超限的真实原因；重点审计 session recorder bind、protocol load/cleanup、AI batch backlog、UI/logging 并发及首个正式动作调度顺序，并以现有 latency trace 与确定性 owner/queue 测试建立 RED→GREEN 证据。
+  - [x] [HIL][High] 统一 writer、receipt schema 与 complete-bundle validator 的主阀契约：logical `valve=0` 仅对配置的主阀动作合法，不得无条件放宽其他非法 valve；增加真实 writer round-trip、complete-bundle validator 回归及本次中止 bundle 的只读验证测试。当前证据的 raw/log SHA-256、byte、count、session sequence、`dropped_count=0` 与 producer fences 均匹配 manifest，但 validator 返回“receipt valve 无效。”。
+  - [x] [HIL Tooling][Medium] 审计并补齐 `scripts/hil_actuation_benchmark.py` 的 Story 3.5 recording 模式，使正式入口可原生建立 `SessionWriter`、绑定 hardware/actuation producer、显示 UI、收集完整 fences、验证最终 bundle；保留明确授权参数、真实/模拟标识、初始全关和中止后全关，且任何中止 run 不得继续后续安全场景，不依赖一次性 inline harness。
+  - [x] [HIL][Automated Gate] 先写稳定失败测试，再实施最小修复；增加首个正式动作调度/积压的确定性测试且不以真实 sleep 为唯一断言。完成 Story 定向测试、全量 `python -m pytest -q`、`python -m ruff check .` 与 `git diff --check`。本轮只允许 MockHAL/fake/只读证据验证，不连接或操作真实硬件、不运行真实 NI HIL。
+  - [x] [AI-Review][High] canonical identity 相同的重复 receipt 只有在完整 canonical 内容一致时才允许去重；valve/action/category/target/result 等任一冲突必须使 writer fail closed，validator 不得发布 complete。
+  - [x] [AI-Review][High] Story 3.5 runner 的 SessionWriter 首次 failure 必须按 MainController 契约先失效 recording interlock 并直接唤醒 ActuationWorker，立即阻断 NORMAL/MANUAL/PRETEST/WARMUP，只允许安全关闭。
+  - [x] [AI-Review][High] 正式 benchmark 必须在进入四个安全场景前判定 aggregate、全部 rolling、final-window p95 与样本完整性 Gate；任一失败立即中止并安全全关，不得继续后续场景。
+  - [x] [AI-Review][High] live Story 3.5 `--candidate-commit` 必须解析为存在的 Git object、精确等于当前 HEAD 且 worktree/index clean；simulation smoke 保留明确 simulation 语义，不得冒充正式 candidate evidence。
+  - [x] [AI-Review][Medium] 统一生产计划与 writer/validator 的 master_prepare 契约：合法 MANUAL/PRETEST 对配置主阀 target 的 `valve=0` receipt 可记录；错误 target、非法 action/category 与其他 `valve=0` 继续 fail closed。
+  - [x] [AI-Review][Medium] Story 3.5 runner 必须保持单 session 单绑定协议，安全场景不得在 benchmark session 内加载不同 ProtocolDocument；session_closed 最终质量必须固定为正式 benchmark 质量，不得被最后一个安全场景的 metrics reset 覆盖，同时保留 canonical receipts、producer fences 与 validator。
+  - [ ] [HIL][Acceptance] 以新的 40 位 candidate commit 在真实 Windows/NI 上从正式 `scripts/hil_actuation_benchmark.py --story-3-5-recording` 入口完成单次预声明验收：正常 open/close 各 `200/200`、全部 rolling/final-last-100 p95 Gate、四个安全场景、完整 producer fences 与最终 bundle validator 均通过；失败或中止不得继续后续安全场景。通过前 Story、Task 10 与 sprint-status 保持 `review`。
+
 ### Review Findings
 
 - [x] [Review][Patch][High] Actuation owner 的协议启动与 NORMAL 动作门禁必须直接检查 `recording_ready`，不能只依赖 Controller、`recorder_failed` 或 `session_closing`，否则内部/迟到 intent 可绕过会话前置条件。 [`app/workers/actuation_worker.py:70`]
@@ -373,12 +387,19 @@ GPT-5 Codex
 - Task 9 继续采用 RED→GREEN→REFACTOR：先用 Event/fake filesystem/clock/fault injection 固定 pending document、bind timeout、旧 recovery callback、scan lock/cancel、无效 manifest 与 JSONL 空白行交错，再实施最小修复。
 - 方案 A 使用覆盖完整 Qt event loop 的 Windows named mutex 强制单实例；第二实例在创建 Controller/HAL 前中文提示并退出，正常退出、构建失败和进程崩溃均不遗留 ownership。
 - 本次“修复后独立复审”按清单顺序处理 4 High、7 Medium：每项先以 Event/fake clock/filesystem/fault injection 或结构化 schema 变异建立 RED，再做最小 GREEN 与共享 validator/终态 helper REFACTOR。
+- Task 10 review continuation 先复现首个正式动作队列顺序、master `valve=0` 契约与正式 runner 缺口，再以 owner monotonic cutover、共享 receipt contract 和原生 SessionWriter/fence/final-validator 路径完成自动化闭环；真实 HIL 验收独立保留为未完成项。
+- 本次独立复审修复限定为 4 High、2 Medium：以 canonical receipt 内容一致性、writer failure interlock 顺序、性能 Gate 前置、Git candidate 绑定、master_prepare 矩阵及单 session 单协议作为六个独立 RED→GREEN 边界，不扩展通用重构。
 
 ### Debug Log References
 
 - Story creation baseline: branch `main`, HEAD `e401a319d1da93302bcc8908fc9ed7d161b3da08`, upstream `OlfactoryPilot-CN/main`, clean worktree.
 - Story 3.4 closure commit verified: `e401a31` exists, is current HEAD, and is an ancestor of current HEAD.
 - Story 3.5 implementation baseline confirmed: branch `main`, HEAD `e401a319d1da93302bcc8908fc9ed7d161b3da08`, upstream `OlfactoryPilot-CN/main`; pre-existing changes were the untracked Story file and its `ready-for-dev` sprint-status update.
+- 2026-07-30 真实 HIL 失败证据：candidate `c9baff6e6910266621fb2a36c6b62f880f42a27e`；运行目录 `logs/benchmarks/story-3-5-20260730-154234-live`；证据文件 `failure.json`、`metadata.json`、`hardware-mapping.json`、`raw-receipts.csv` 与中止 bundle `session-output/20260730-154242-838_HIL-NO-SUBJECT_Story-3.5-Windows-NI` 均保留为只读输入。
+- Task 10 RED：新增首个正式结构化样本必须晚于 owner trigger cutover、runner 必须等待 owner trigger ACK、master `valve=0` writer/validator round-trip、错误主阀 target 拒绝、当前中止 bundle 只读验证及原生 Story 3.5 runner 生命周期测试；首轮定向执行稳定得到 9 failed。
+- Task 10 只读证据复核：中止 bundle 的 raw/log SHA-256、byte、count、last sequence、producer fences 与 `dropped_count=0` 均未变化；修复后的 validator 在配置 `Dev2/P1.0` 为 master 时接受该 bundle，未改写任何证据文件。
+- Task 10 MockHAL smoke：正式 runner 的 `--story-3-5-recording` 模式在 20 open/20 close 下完成 UI、SessionWriter、hardware/actuation/controller fences、四个安全场景与 bundle final validator；该运行仅用于软件路径验证，不构成真实 NI HIL 证据。
+- 本次独立复审 RED：HIL runner 的 candidate/performance/failure-callback/session-boundary/quality-preservation 5 个测试稳定得到 5 failed；writer/master 契约组合得到 9 failed、3 个既有非法类别场景已正确拒绝。所有 RED 均在修改对应实现前运行。
 
 ### Completion Notes List
 
@@ -461,6 +482,20 @@ GPT-5 Codex
 - Medium-7 GREEN：`__999` collision staging 的 ownership marker 纳入 240 UTF-16 code unit 预算；长根目录边界与既有预算测试 2 passed。
 - 本轮最终 Gate：受影响核心测试 307 passed；Story 定向集合 409 passed；全量 `python -m pytest -q` 592 passed；`python -m ruff check .` 通过；相对 baseline `e401a319d1da93302bcc8908fc9ed7d161b3da08` 的独立临时 index 纳入全部未跟踪文件后共 30 个 diff entries，`git diff --cached --check` 返回 0，真实 index 前后不变且为 0 entries。
 - 本轮全程仅使用 MockHAL、fake clock/filesystem、结构化变异与自动化 fault injection，未连接或运行真实 NI HIL。Story 与 sprint-status 均保持 `review`；未 reset、未提交、未推送。
+- 2026-07-30 HIL review continuation 已登记：首个正式 open jitter `33.0973 ms` 触发 severe safety close，21/21 配置目标关闭，run 中止于正常 open `1/200`、close `0/200`；400/400 与全部 p95 Gate 未完成。中止 bundle 的 manifest 完整性字段匹配且无 dropped/fence 缺口，但 validator 以“receipt valve 无效。”拒绝合法 master `valve=0`。Task 10 保持未完成，等待自动化修复与新的真实 HIL 全通过。
+- Task 10 首动作根因与修复：旧 runner 在 owner 接受 manual trigger 之前先注入 AI exhale batch；优先级 trigger 越过既有 AI backlog 后，旧样本仍能以过期 expected deadline 启动首个正式 open。executor 现以 owner 接受 trigger 的 monotonic cutover 丢弃此前结构化 backlog，runner 等待 WAITING_EXHALE ACK 后才注入正式 stimulus；recorder-ready 也改为 owner ACK，避免 bind generation 与首命令交错。未排除正式样本、未增加 warm-up、未调整阈值或统计口径。
+- Task 10 主阀契约修复：writer 与 complete validator 共用严格 receipt contract；`valve=0` 仅在 target 精确匹配配置的 master device/line 且 category 为 `SAFETY`/`WARMUP`/`MASTER` 时合法，其他零值、负值、bool、错误 target 或普通 valve 类别继续 fail closed。新增真实 SessionWriter round-trip 与当前中止 bundle 只读回归。
+- Task 10 runner 修复：`scripts/hil_actuation_benchmark.py` 新增原生 Story 3.5 recording 模式，建立/绑定 SessionWriter 与 hardware/actuation/controller producer，显示 ProtocolView，记录真实/模拟标识和 candidate，收集 fences 并验证最终或中止 bundle；保留 live 明确授权、初始全关和 finally 全关，中止会阻断后续安全场景。
+- Task 10 自动化 Gate：新增测试首轮 9 failed 后 GREEN；Story 定向集合 433 passed；全量 `python -m pytest -q` 604 passed；`python -m ruff check .` 与 `git diff --check` 通过。另以 MockHAL 完成 runner 20 open/20 close smoke，final/rolling p95、安全场景和 bundle validator 均通过。未连接或运行真实 NI HIL。
+- Task 10 仍未完成：新的真实 Windows/NI 单次正式验收尚未执行，必须以新 candidate 达成 open/close 各 200、全部 p95 Gate、安全场景及 complete bundle 后才能关闭。Story 与 sprint-status 保持 `review`；未提交、未推送。
+- 独立复审 High-1 闭环：writer 将 canonical identity 缓存从 set 改为完整 frozen receipt 映射；仅 dataclass 全内容相等才写 `duplicate_receipt_ignored`，valve/action/category/target/result 等冲突立即锁存 writer failure，禁止 complete publish。
+- 独立复审 High-2 闭环：runner 为 SessionWriter 注入与 MainController 同序的 failure callback；先同步更新 `recording_ready=False/recorder_failed=True/generation`，再通知 ActuationWorker recorder failure 与 stop，普通及 warmup 开阀立即受 interlock 阻断，安全关闭仍可执行。
+- 独立复审 High-3 闭环：aggregate、全部 rolling、final-window p95 和样本完整性集中为正式 performance Gate；在任何安全场景前判定，失败先执行 `performance-gate-abort` 全关再抛出，中止后不进入 stop/low-flow/severe/shutdown。
+- 独立复审 High-4 闭环：live Story 3.5 candidate 在创建证据目录前通过 Git 验证 commit object、当前 HEAD 精确匹配及 index/worktree（含 untracked）clean；simulation 仍明确标记 mock/simulation，允许独立 smoke SHA。
+- 独立复审 Medium-1 闭环：共享 master contract 允许精确配置 target 上的 `SAFETY/CLOSE`、`WARMUP|MANUAL|PRETEST/OPEN` 与 `MASTER/OPEN|CLOSE`；错误 target、SAFETY open、WARMUP/MANUAL/PRETEST close、NORMAL valve=0 继续 fail closed。MANUAL/PRETEST 真实 SessionWriter round-trip 与 complete validator 均通过。
+- 独立复审 Medium-2 闭环：benchmark 通过性能 Gate 后先以其即时 quality snapshot、三 producer fences 和 validator 封存独立 bundle；四个安全协议各自使用独立 recording session/document/bundle，禁止活动 session 加载不同 ProtocolDocument。MockHAL 20/20 smoke 生成 benchmark + 4 safety 共 5 个 complete bundle，benchmark `session_closed.final_quality` 保留正式样本 20 open/20 close，不受 severe/shutdown metrics reset 覆盖。
+- 本次独立复审最终 Gate：新增/扩展确定性测试全部 GREEN；Story 定向集合 454 passed；全量 `python -m pytest -q` 625 passed；`python -m ruff check .` 与 `git diff --check` 通过。只使用 MockHAL、temp Git repo 与只读历史证据，未连接或运行真实 NI HIL。
+- 新的真实 Windows/NI Acceptance 仍未执行且保持未勾选；Task 10 父项、Story 与 sprint-status 继续为 `review`。未提交、未推送。
 
 ### File List
 
@@ -494,6 +529,8 @@ GPT-5 Codex
 - `tests/test_app.py`
 - `tests/test_shutdown_actuation.py`
 - `tests/test_session_view.py`
+- `scripts/hil_actuation_benchmark.py`
+- `tests/test_hil_actuation_benchmark.py`
 
 ### Change Log
 
@@ -505,6 +542,9 @@ GPT-5 Codex
 - 2026-07-30：完成当前 `Review Findings` 的 4 High、9 Medium；新增 22 个确定性缺陷断言，Story 定向 281 passed、全量 529 passed、ruff 通过；仅使用 MockHAL/fake/fault injection，Story 与 sprint-status 保持 `review`。
 - 2026-07-30：完成新登记的 13 项 Review Findings（6 High、7 Medium）；新增/扩展 37 个确定性 RED 场景并逐项闭环，Story 定向 325 passed、全量 565 passed、ruff 与含全部未跟踪文件的 baseline 临时-index diff check 通过；未运行真实 NI HIL，状态保持 `review`。
 - 2026-07-30：完成“修复后独立复审”11 项 findings（4 High、7 Medium）；26 个确定性 RED 断言闭环，Story 定向 409 passed、全量 592 passed、ruff 与含全部未跟踪文件的 baseline 临时-index diff check 通过；Story 与 sprint-status 保持 `review`。
+- 2026-07-30：登记 candidate `c9baff6e6910266621fb2a36c6b62f880f42a27e` 的真实 Windows/NI HIL 失败：首个正式动作 jitter `33.0973 ms` 后 severe 中止并安全关闭 21/21 目标；记录 master `valve=0` complete-bundle validator 契约缺陷与正式 HIL runner 缺口，新增未完成 Task 10。Story 与 sprint-status 保持 `review`。
+- 2026-07-30：完成 Task 10 的自动化 review continuation：修复 owner trigger cutover 前 AI backlog 被首个正式动作消费、统一 master `valve=0` writer/validator 契约，并将 Story 3.5 SessionWriter/fence/final-validator 生命周期纳入正式 HIL runner；新增确定性 RED→GREEN、当前中止 bundle 只读回归与 MockHAL smoke。真实 Windows/NI 验收仍未运行，Task 10、Story 与 sprint-status 保持 `review`，未提交、未推送。
+- 2026-07-30：处理 Story 3.5 HIL follow-up 独立复审的 4 High、2 Medium：冲突 duplicate receipt fail closed、writer failure 直达 interlock、性能 Gate 前置、live candidate Git 绑定、MANUAL/PRETEST master_prepare 契约及单 session 单协议/质量隔离全部闭环；定向 454 passed、全量 625 passed、ruff/diff check 通过。真实 HIL Acceptance 仍未运行，Task 10、Story 与 sprint-status 保持 `review`，未提交、未推送。
 
 ## Senior Developer Review (AI)
 

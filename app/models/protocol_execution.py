@@ -152,6 +152,7 @@ class ProtocolExecutionState:
     execution_epoch: int = 0
     waiting_trigger_started_at: float | None = None
     waiting_started_at: float | None = None
+    waiting_started_monotonic_ns: int | None = None
     triggered_at: float | None = None
     active_valve: int | None = None
     possibly_open_valves: set[int] = field(default_factory=set)

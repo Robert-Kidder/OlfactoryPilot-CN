@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import threading
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -12,9 +14,15 @@ from app.models import (
     ActuationAction,
     ActuationCategory,
     ActuationCommand,
+    ActuationQualitySnapshot,
     ActuationReceipt,
     ActuationResult,
+    ActuationStreamSnapshot,
+    ProtocolDocument,
+    ProtocolTrial,
+    TriggerMode,
 )
+from app.models.protocol_execution import ProtocolExecutionStatus
 from app.services import AnalogInputFrame, MockHAL
 from scripts.hil_actuation_benchmark import (
     AIOnlyHal,
@@ -496,3 +504,567 @@ def test_benchmark_normal_actions_come_from_protocol_document() -> None:
     assert all(trial.trigger.value == "manual" for trial in captured_documents[0].trials)
     assert result["open"]["count"] == 3
     assert result["close"]["count"] == 3
+
+
+def test_hil_waits_for_manual_trigger_owner_ack_before_applying_ai0_stimulus() -> None:
+    order: list[object] = []
+    receipt = _receipt(
+        valve=1,
+        device="Dev1",
+        line="P0.0",
+        action=ActuationAction.OPEN,
+        category=ActuationCategory.NORMAL,
+        trial_id="bench-0001-v1",
+    )
+
+    class Collector:
+        receipts = []
+
+        def wait_for(self, predicate, _timeout_s, _pump, *, after_index=0):
+            order.append("wait_receipt")
+            assert after_index == 0
+            assert predicate(receipt)
+            return receipt
+
+    waiting = ("status", frozenset({ProtocolExecutionStatus.WAITING_EXHALE}))
+    runtime = SimpleNamespace(
+        config={"exhale_threshold": -0.44},
+        collector=Collector(),
+        latency_trace=SimpleNamespace(
+            begin_trial=lambda label: order.append(("begin", label)),
+            end_trial=lambda: order.append("end"),
+        ),
+        ai_hal=SimpleNamespace(
+            set_ai0_software_stimulus=lambda value: order.append(("stimulus", value))
+        ),
+        actuation=SimpleNamespace(
+            post_manual_trigger=lambda **_kwargs: order.append("manual_trigger")
+        ),
+        readiness=lambda: object(),
+        wait_status=lambda statuses: order.append(
+            ("status", frozenset(statuses))
+        ),
+        pump=lambda: None,
+    )
+
+    result = Runtime.trigger_current_trial_via_ai0(
+        runtime,
+        label="bench-0001-v1",
+    )
+
+    assert result is receipt
+    assert order.index("manual_trigger") < order.index(waiting)
+    assert order.index(waiting) < order.index(("stimulus", -0.94))
+
+
+def test_story35_cli_exposes_native_recording_gate(monkeypatch) -> None:
+    import scripts.hil_actuation_benchmark as benchmark_module
+
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "hil_actuation_benchmark.py",
+            "--story-3-5-recording",
+            "--candidate-commit",
+            "a" * 40,
+            "--cycles",
+            "1",
+        ],
+    )
+
+    args = benchmark_module.parse_args()
+
+    assert args.story_3_5_recording is True
+    assert args.candidate_commit == "a" * 40
+
+
+def _git(repo: Path, *args: str) -> str:
+    completed = subprocess.run(
+        ["git", "-C", str(repo), *args],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return completed.stdout.strip()
+
+
+def _initialize_candidate_repo(tmp_path: Path) -> tuple[Path, str, str]:
+    repo = tmp_path / "candidate-repo"
+    repo.mkdir()
+    _git(repo, "init")
+    _git(repo, "config", "user.email", "hil-test@example.invalid")
+    _git(repo, "config", "user.name", "HIL Test")
+    tracked = repo / "candidate.txt"
+    tracked.write_text("first\n", encoding="utf-8")
+    _git(repo, "add", "candidate.txt")
+    _git(repo, "commit", "-m", "first")
+    first = _git(repo, "rev-parse", "HEAD")
+    tracked.write_text("second\n", encoding="utf-8")
+    _git(repo, "add", "candidate.txt")
+    _git(repo, "commit", "-m", "second")
+    return repo, first, _git(repo, "rev-parse", "HEAD")
+
+
+def test_live_story35_candidate_must_exist_equal_head_and_have_clean_worktree(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    import scripts.hil_actuation_benchmark as benchmark_module
+
+    repo, prior_commit, head = _initialize_candidate_repo(tmp_path)
+    monkeypatch.setattr(benchmark_module, "REPO_ROOT", repo)
+
+    def parse(candidate: str):
+        monkeypatch.setattr(
+            "sys.argv",
+            [
+                "hil_actuation_benchmark.py",
+                "--live",
+                "--confirm",
+                benchmark_module.LIVE_CONFIRMATION,
+                "--story-3-5-recording",
+                "--candidate-commit",
+                candidate,
+            ],
+        )
+        return benchmark_module.parse_args()
+
+    with pytest.raises(SystemExit):
+        parse("f" * 40)
+    with pytest.raises(SystemExit):
+        parse(prior_commit)
+
+    (repo / "candidate.txt").write_text("dirty\n", encoding="utf-8")
+    with pytest.raises(SystemExit):
+        parse(head)
+
+    _git(repo, "restore", "candidate.txt")
+    args = parse(head)
+    assert args.candidate_commit == head
+    assert args.live is True
+
+
+def test_aborted_benchmark_never_continues_to_safety_scenarios(monkeypatch) -> None:
+    import scripts.hil_actuation_benchmark as benchmark_module
+
+    safety_started = False
+
+    def fail_benchmark(_runtime, _args):
+        raise RuntimeError("formal benchmark aborted")
+
+    def safety(_runtime, _args):
+        nonlocal safety_started
+        safety_started = True
+        return {}
+
+    monkeypatch.setattr(benchmark_module, "run_benchmark", fail_benchmark)
+    monkeypatch.setattr(benchmark_module, "run_safety_scenarios", safety)
+
+    with pytest.raises(RuntimeError, match="aborted"):
+        benchmark_module.run_acceptance_scenarios(object(), object())
+
+    assert safety_started is False
+
+
+@pytest.mark.parametrize(
+    ("failed_field", "failed_value"),
+    [
+        ("p95_ms", 20.0),
+        ("rolling_p95_ms", [20.0]),
+        ("final_window_p95_ms", 20.0),
+        ("count", 199),
+    ],
+)
+def test_failed_performance_gate_closes_and_never_starts_safety_scenarios(
+    monkeypatch,
+    failed_field,
+    failed_value,
+) -> None:
+    import scripts.hil_actuation_benchmark as benchmark_module
+
+    stream = {
+        "count": 200,
+        "p95_ms": 10.0,
+        "rolling_p95_ms": [10.0],
+        "final_window_p95_ms": 10.0,
+    }
+    benchmark = {
+        "open": {**stream, failed_field: failed_value},
+        "close": dict(stream),
+        "combined": dict(stream),
+    }
+    safety_started = False
+    closes: list[str] = []
+
+    monkeypatch.setattr(
+        benchmark_module,
+        "run_benchmark",
+        lambda _runtime, _args: benchmark,
+    )
+
+    def safety(_runtime, _args):
+        nonlocal safety_started
+        safety_started = True
+        return {}
+
+    monkeypatch.setattr(benchmark_module, "run_safety_scenarios", safety)
+    runtime = SimpleNamespace(
+        metrics=SimpleNamespace(config=SimpleNamespace(target_ms=20.0)),
+        close_everything=lambda label: closes.append(label),
+    )
+    args = SimpleNamespace(live=True, cycles=200, story_3_5_recording=False)
+
+    with pytest.raises(RuntimeError, match="性能 Gate"):
+        benchmark_module.run_acceptance_scenarios(runtime, args)
+
+    assert closes == ["performance-gate-abort"]
+    assert safety_started is False
+
+
+def test_story35_safety_scenarios_use_one_recording_session_per_protocol(
+    monkeypatch,
+) -> None:
+    import scripts.hil_actuation_benchmark as benchmark_module
+
+    started: list[str] = []
+    finalized: list[str] = []
+
+    class RuntimeDouble:
+        def __init__(self) -> None:
+            self._story_35_writer = None
+            self.collector = SimpleNamespace(
+                receipts=[],
+                inject_delay_ms=0.0,
+            )
+            self.metrics = SimpleNamespace(
+                config=SimpleNamespace(single_limit_ms=30.0),
+                severe_latched=True,
+                snapshot=lambda: SimpleNamespace(label=started[-1]),
+            )
+            self.actuation = SimpleNamespace(
+                post_stop=lambda **_kwargs: None,
+            )
+            self.hardware = SimpleNamespace(
+                consume_airflow_sample=lambda *_args: None,
+            )
+
+        def start_protocol_trial(self, *, label, valve, duration_ms):
+            assert self._story_35_writer is None
+            assert valve in {1, 9, 13}
+            assert duration_ms == 500
+            self._story_35_writer = object()
+            started.append(label)
+            return SimpleNamespace(jitter_ms=35.0 if label == "safety-severe" else 1.0)
+
+        def finalize_story_35_recording(self, **kwargs):
+            assert self._story_35_writer is not None
+            finalized.append(kwargs["reason"])
+            self._story_35_writer = None
+            return (
+                SimpleNamespace(complete=True),
+                SimpleNamespace(complete=True),
+            )
+
+        def wait_status(self, _statuses):
+            return None
+
+        def close_everything(self, _label):
+            return []
+
+        def recover_low_flow_via_owner(self):
+            return None
+
+        def shutdown_via_service(self):
+            return {
+                "result": "success",
+                "valves_closed": True,
+                "heaters_off": True,
+                "error": "",
+            }
+
+    monkeypatch.setattr(
+        benchmark_module,
+        "wait_for_full_close",
+        lambda *_args, **kwargs: {
+            "scenario": kwargs["scenario"],
+            "all_configured_targets_closed": True,
+        },
+    )
+    runtime = RuntimeDouble()
+    args = SimpleNamespace(
+        story_3_5_recording=True,
+        valves=[1, 9, 13],
+    )
+
+    result = benchmark_module.run_safety_scenarios(runtime, args)
+
+    assert set(result) == {"stop", "low_flow", "severe", "shutdown"}
+    assert started == [
+        "safety-stop",
+        "safety-low-flow",
+        "safety-severe",
+        "safety-shutdown",
+    ]
+    assert finalized == [
+        "safety_stop_completed",
+        "safety_low_flow_completed",
+        "safety_severe_completed",
+        "safety_shutdown_completed",
+    ]
+    assert runtime._story_35_writer is None
+
+
+def test_story35_writer_failure_invalidates_interlock_before_waking_actuation() -> None:
+    order: list[tuple[str, object]] = []
+
+    class Interlock:
+        def update(self, **values):
+            order.append(("interlock", values))
+
+    class Actuation:
+        def post_recorder_failed(self, message):
+            order.append(("recorder_failed", message))
+
+        def post_stop(self, *, message):
+            order.append(("stop", message))
+
+    runtime = object.__new__(Runtime)
+    runtime.ingress = Interlock()
+    runtime.actuation = Actuation()
+    failure = SimpleNamespace(
+        session_generation=7,
+        message="disk failed",
+    )
+
+    Runtime._handle_story_35_writer_failure(runtime, failure)
+
+    assert order[0] == (
+        "interlock",
+        {
+            "recording_ready": False,
+            "recorder_failed": True,
+            "recorder_generation": 7,
+        },
+    )
+    assert order[1] == ("recorder_failed", "disk failed")
+    assert order[2][0] == "stop"
+
+
+def test_story35_active_session_rejects_loading_a_different_protocol_document(
+    tmp_path: Path,
+) -> None:
+    runtime = object.__new__(Runtime)
+    bound = ProtocolDocument(
+        source_path=tmp_path / "bound.csv",
+        source_name="bound.csv",
+        trials=[],
+    )
+    different = ProtocolDocument(
+        source_path=tmp_path / "different.csv",
+        source_name="different.csv",
+        trials=[],
+    )
+    runtime._story_35_writer = object()
+    runtime._story_35_bound_document = bound
+    runtime.executor = object()
+
+    with pytest.raises(RuntimeError, match="单 session|绑定协议"):
+        Runtime.start_protocol_document(runtime, different)
+
+
+def test_story35_benchmark_session_is_finalized_with_preserved_quality_before_safety(
+    monkeypatch,
+) -> None:
+    import scripts.hil_actuation_benchmark as benchmark_module
+
+    quality = ActuationQualitySnapshot(
+        open=ActuationStreamSnapshot(sample_count=20, p95_ms=10.0),
+        close=ActuationStreamSnapshot(sample_count=20, p95_ms=11.0),
+        combined=ActuationStreamSnapshot(sample_count=40, p95_ms=11.0),
+    )
+    stream = {
+        "count": 20,
+        "p95_ms": 10.0,
+        "rolling_p95_ms": [10.0],
+        "final_window_p95_ms": 10.0,
+    }
+    benchmark = {
+        "open": dict(stream),
+        "close": dict(stream),
+        "combined": dict(stream),
+    }
+    order: list[tuple[str, object]] = []
+    runtime = SimpleNamespace(
+        metrics=SimpleNamespace(
+            config=SimpleNamespace(target_ms=20.0),
+            snapshot=lambda: quality,
+        ),
+        _story_35_writer=object(),
+        close_everything=lambda _label: None,
+    )
+
+    def finalize(**kwargs):
+        order.append(("finalize", kwargs["final_quality"]))
+        runtime._story_35_writer = None
+        return (
+            SimpleNamespace(complete=True),
+            SimpleNamespace(complete=True),
+        )
+
+    runtime.finalize_story_35_recording = finalize
+    monkeypatch.setattr(
+        benchmark_module,
+        "run_benchmark",
+        lambda _runtime, _args: benchmark,
+    )
+
+    def safety(_runtime, _args):
+        assert runtime._story_35_writer is None
+        order.append(("safety", None))
+        return {"passed": True}
+
+    monkeypatch.setattr(benchmark_module, "run_safety_scenarios", safety)
+    args = SimpleNamespace(
+        live=False,
+        cycles=20,
+        story_3_5_recording=True,
+    )
+
+    returned_benchmark, returned_safety = benchmark_module.run_acceptance_scenarios(
+        runtime,
+        args,
+    )
+
+    assert returned_benchmark is benchmark
+    assert returned_safety == {"passed": True}
+    assert order == [("finalize", quality), ("safety", None)]
+
+
+def test_story35_native_recording_binds_both_owners_collects_fences_and_validates(
+    tmp_path,
+) -> None:
+    class FakeActuation:
+        def __init__(self) -> None:
+            self.recorder = None
+            self.ready_generation = None
+
+        def bind_session_recorder(self, recorder, *, generation, timeout_ms):
+            assert timeout_ms > 0
+            self.recorder = recorder
+            self.generation = generation
+            return True
+
+        def post_recorder_ready(self, generation, *, wait=False, timeout_ms=1000):
+            assert wait
+            assert timeout_ms > 0
+            self.ready_generation = generation
+            return True
+
+        def post_recorder_fence(self, *, wait=False, timeout_ms=1000):
+            assert wait
+            return self.recorder.post_fence(
+                "actuation",
+                producer_sequence=0,
+            )
+
+    class FakeHardware:
+        def __init__(self) -> None:
+            self.recorder = None
+
+        def bind_session_recorder(self, recorder, *, generation, timeout_ms):
+            assert generation > 0
+            assert timeout_ms > 0
+            self.recorder = recorder
+            return True
+
+        def post_session_fence(self):
+            assert self.recorder.post_fence(
+                "hardware",
+                producer_sequence=0,
+            )
+
+    class FakeInterlock:
+        def __init__(self) -> None:
+            self.cleared = False
+            self.snapshot = SimpleNamespace(unsafe_reason=lambda: "")
+
+        def update(self, **_kwargs):
+            return 2
+
+        def read(self):
+            return 2, self.snapshot, True
+
+        def clear_unsafe_latch(self):
+            self.cleared = True
+            return True
+
+    runtime = object.__new__(Runtime)
+    runtime.config = {
+        "inhale_threshold": 0.47,
+        "exhale_threshold": -0.44,
+        "low_flow_threshold": 0.2,
+        "actuation_jitter_target_ms": 20.0,
+        "actuation_jitter_single_limit_ms": 30.0,
+        "actuation_jitter_window_size": 100,
+        "actuation_jitter_min_samples": 20,
+        "session_writer_close_timeout_ms": 2000,
+    }
+    runtime.output_dir = tmp_path
+    runtime.state = SimpleNamespace(
+        master_valve_line="Dev2/P1.0",
+        hardware_variant="20-channel",
+    )
+    runtime.ingress = FakeInterlock()
+    runtime.metrics = SimpleNamespace(
+        config=SimpleNamespace(
+            target_ms=20.0,
+            single_limit_ms=30.0,
+            window_size=100,
+            min_samples=20,
+        ),
+        snapshot=lambda: None,
+    )
+    runtime.actuation = FakeActuation()
+    runtime.hardware = FakeHardware()
+    runtime._story_35_writer = None
+    runtime._story_35_ingress = None
+    runtime._story_35_descriptor = None
+    runtime._story_35_controller_sequence = 0
+    document = ProtocolDocument(
+        source_path=tmp_path / "story-3-5.csv",
+        source_name="story-3-5.csv",
+        trials=[
+            ProtocolTrial(
+                trial_id="bench-0001-v1",
+                timing_ms=0,
+                duration_ms=100,
+                valve=1,
+                trigger=TriggerMode.MANUAL,
+            )
+        ],
+        metadata={"story": "3.5"},
+    )
+
+    descriptor = runtime.begin_story_35_recording(
+        document,
+        candidate_commit="a" * 40,
+        run_id="story-3-5-test",
+        live=False,
+    )
+
+    assert runtime.actuation.recorder is runtime._story_35_ingress
+    assert runtime.hardware.recorder is runtime._story_35_ingress
+    assert runtime.actuation.ready_generation == descriptor.generation
+    assert runtime.ingress.cleared
+    assert runtime._story_35_writer._failure_callback is not None
+    runtime.hardware.post_session_fence()
+    assert runtime.actuation.post_recorder_fence(wait=True)
+
+    result, validation = runtime.finalize_story_35_recording(
+        reason="test_completed",
+        aborted=False,
+    )
+
+    assert result.complete
+    assert validation.complete, validation.reason
+    assert validation.path == descriptor.paths.final_dir

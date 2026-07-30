@@ -4,6 +4,7 @@ import hashlib
 import json
 import threading
 import time
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 
@@ -85,7 +86,15 @@ def _batch(sequence: int = 10) -> BreathSampleBatch:
     )
 
 
-def _receipt(command_id: str = "command-1") -> ActuationReceipt:
+def _receipt(
+    command_id: str = "command-1",
+    *,
+    valve: int = 9,
+    action: ActuationAction = ActuationAction.OPEN,
+    category: ActuationCategory = ActuationCategory.NORMAL,
+    target_device: str = "Dev1",
+    target_line: str = "Dev1/port0/line0",
+) -> ActuationReceipt:
     return ActuationReceipt(
         command_id=command_id,
         execution_epoch=4,
@@ -93,9 +102,9 @@ def _receipt(command_id: str = "command-1") -> ActuationReceipt:
         sequence=11,
         trial_id="trial-1",
         trial_index=0,
-        valve=9,
-        action=ActuationAction.OPEN,
-        category=ActuationCategory.NORMAL,
+        valve=valve,
+        action=action,
+        category=category,
         expected_ns=100,
         started_ns=105,
         actual_ns=110,
@@ -107,8 +116,8 @@ def _receipt(command_id: str = "command-1") -> ActuationReceipt:
         message="写入成功",
         stale=False,
         actual_duration_ms=None,
-        target_device="Dev1",
-        target_line="Dev1/port0/line0",
+        target_device=target_device,
+        target_line=target_line,
     )
 
 
@@ -118,6 +127,7 @@ def _writer(
     capacity: int = 32,
     expected_producers: tuple[str, ...] = ("hardware", "actuation", "controller"),
     fault_injector=None,
+    master_valve_line: str = "",
 ):
     descriptor = _descriptor(tmp_path)
     latch = RecorderReadinessLatch()
@@ -131,6 +141,7 @@ def _writer(
         expected_producers=expected_producers,
         session_started_payload=_started_payload(),
         readiness_latch=latch,
+        master_valve_line=master_valve_line,
         fault_injector=fault_injector,
     )
     ingress = SessionRecorderIngress(writer, latch)
@@ -296,6 +307,153 @@ def test_raw_and_log_schema_round_trip_and_structured_adapters(tmp_path: Path) -
     assert manifest["log_sha256"] == hashlib.sha256(log_path.read_bytes()).hexdigest()
 
 
+def test_configured_master_valve_zero_writer_round_trip_validates_complete_bundle(
+    tmp_path: Path,
+) -> None:
+    descriptor, writer, ingress, _ = _writer(
+        tmp_path,
+        expected_producers=("actuation", "controller"),
+        master_valve_line="Dev2/P1.0",
+    )
+    assert writer.start_and_wait()
+    master_receipt = _receipt(
+        "safety-close-master",
+        valve=0,
+        action=ActuationAction.CLOSE,
+        category=ActuationCategory.SAFETY,
+        target_device="Dev2",
+        target_line="P1.0",
+    )
+    assert ingress.post_receipt(master_receipt, producer_sequence=1)
+    assert ingress.post_fence("actuation", producer_sequence=1)
+    assert ingress.post_fence("controller", producer_sequence=0)
+
+    result = writer.close(reason="safety_abort")
+
+    assert result.complete
+    validation = SessionFileService(
+        master_valve_line="Dev2/P1.0"
+    ).validate_complete_bundle(descriptor.paths.final_dir)
+    assert validation.complete, validation.reason
+
+
+@pytest.mark.parametrize(
+    "category",
+    [ActuationCategory.MANUAL, ActuationCategory.PRETEST],
+)
+def test_configured_master_prepare_writer_round_trip_accepts_manual_and_pretest(
+    tmp_path: Path,
+    category: ActuationCategory,
+) -> None:
+    descriptor, writer, ingress, _ = _writer(
+        tmp_path,
+        expected_producers=("actuation", "controller"),
+        master_valve_line="Dev2/P1.0",
+    )
+    assert writer.start_and_wait()
+    assert ingress.post_receipt(
+        _receipt(
+            f"{category.value}-master-prepare",
+            valve=0,
+            action=ActuationAction.OPEN,
+            category=category,
+            target_device="Dev2",
+            target_line="P1.0",
+        ),
+        producer_sequence=1,
+    )
+    assert ingress.post_fence("actuation", producer_sequence=1)
+    assert ingress.post_fence("controller", producer_sequence=0)
+
+    result = writer.close(reason="master_prepare_complete")
+
+    assert result.complete
+    validation = SessionFileService(
+        master_valve_line="Dev2/P1.0"
+    ).validate_complete_bundle(descriptor.paths.final_dir)
+    assert validation.complete, validation.reason
+
+
+@pytest.mark.parametrize(
+    ("action", "category"),
+    [
+        (ActuationAction.CLOSE, ActuationCategory.WARMUP),
+        (ActuationAction.OPEN, ActuationCategory.SAFETY),
+        (ActuationAction.CLOSE, ActuationCategory.MANUAL),
+        (ActuationAction.CLOSE, ActuationCategory.PRETEST),
+        (ActuationAction.OPEN, ActuationCategory.NORMAL),
+    ],
+)
+def test_configured_master_zero_rejects_illegal_action_category_pairs(
+    tmp_path: Path,
+    action: ActuationAction,
+    category: ActuationCategory,
+) -> None:
+    descriptor, writer, ingress, _ = _writer(
+        tmp_path,
+        expected_producers=("actuation",),
+        master_valve_line="Dev2/P1.0",
+    )
+    assert writer.start_and_wait()
+    assert ingress.post_receipt(
+        _receipt(
+            "illegal-master-action",
+            valve=0,
+            action=action,
+            category=category,
+            target_device="Dev2",
+            target_line="P1.0",
+        ),
+        producer_sequence=1,
+    )
+    assert writer.wait(2000)
+
+    assert writer.failure is not None
+    assert "主阀" in writer.failure.message or "valve=0" in writer.failure.message
+    assert not writer.close(reason="failed").complete
+    assert not descriptor.paths.final_dir.exists()
+
+
+@pytest.mark.parametrize(
+    ("master_valve_line", "target_device", "target_line"),
+    [
+        ("", "Dev2", "P1.0"),
+        ("Dev2/P1.0", "Dev1", "P1.0"),
+        ("Dev2/P1.0", "Dev2", "P0.0"),
+    ],
+)
+def test_valve_zero_is_rejected_unless_it_matches_configured_master_target(
+    tmp_path: Path,
+    master_valve_line: str,
+    target_device: str,
+    target_line: str,
+) -> None:
+    descriptor, writer, ingress, _ = _writer(
+        tmp_path,
+        expected_producers=("actuation", "controller"),
+        master_valve_line=master_valve_line,
+    )
+    assert writer.start_and_wait()
+    assert ingress.post_receipt(
+        _receipt(
+            "invalid-master",
+            valve=0,
+            action=ActuationAction.CLOSE,
+            category=ActuationCategory.SAFETY,
+            target_device=target_device,
+            target_line=target_line,
+        ),
+        producer_sequence=1,
+    )
+    assert writer.wait(2000)
+    result = writer.close(reason="safety_abort")
+
+    assert not result.complete
+    assert writer.failure is not None
+    assert "valve" in writer.failure.message or "主阀" in writer.failure.message
+    assert not descriptor.paths.final_dir.exists()
+
+
 def test_duplicate_receipt_is_persisted_once_by_canonical_identity(tmp_path: Path) -> None:
     descriptor, writer, ingress, _ = _writer(
         tmp_path,
@@ -341,6 +499,38 @@ def test_duplicate_receipt_preserves_envelope_sequence_for_later_records(
         if record["producer"] == "actuation"
     ] == [1, 2, 3]
     assert sum(record["record_type"] == "receipt" for record in records) == 2
+
+
+@pytest.mark.parametrize(
+    "conflict",
+    [
+        {"valve": 8},
+        {"action": ActuationAction.CLOSE},
+        {"category": ActuationCategory.MANUAL},
+        {"target_device": "Dev2", "target_line": "P0.0"},
+        {"result": ActuationResult.FAILED},
+    ],
+)
+def test_conflicting_duplicate_receipt_fails_closed(
+    tmp_path: Path,
+    conflict: dict,
+) -> None:
+    descriptor, writer, ingress, _ = _writer(
+        tmp_path,
+        expected_producers=("actuation",),
+    )
+    assert writer.start_and_wait()
+    original = _receipt()
+    conflicting = replace(original, **conflict)
+
+    assert ingress.post_receipt(original, producer_sequence=1)
+    assert ingress.post_receipt(conflicting, producer_sequence=2)
+    assert writer.wait(2000)
+
+    assert writer.failure is not None
+    assert "canonical" in writer.failure.message or "冲突" in writer.failure.message
+    assert not writer.close(reason="conflicting_receipt").complete
+    assert not descriptor.paths.final_dir.exists()
 
 
 @pytest.mark.parametrize(

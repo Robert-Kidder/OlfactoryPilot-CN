@@ -5,12 +5,15 @@ import csv
 import json
 import math
 import platform
+import re
 import statistics
+import subprocess
 import sys
 import threading
 import time
 from collections.abc import Callable
 from dataclasses import asdict, replace
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -47,6 +50,7 @@ from app.services import (
     ProtocolExecutor,
     RealHAL,
     SafetyManager,
+    SessionFileService,
     ShutdownService,
 )
 from app.services.hardware_check_service import HardwareCheckService
@@ -59,6 +63,10 @@ from app.workers import (
     FlowWorker,
     HardwareWorker,
     InterlockSnapshot,
+    RecorderReadinessLatch,
+    SessionRecorderIngress,
+    SessionWriterConfig,
+    SessionWriterWorker,
 )
 
 LIVE_CONFIRMATION = "I_AUTHORIZE_LIVE_NI_HIL"
@@ -533,12 +541,16 @@ class Runtime:
         protocol_mode: bool = False,
         collector: ReceiptCollector | None = None,
         latency_trace: bool = False,
+        story_35_recording: bool = False,
+        live: bool = False,
     ) -> None:
         self.config = config
         self.protocol_mode = bool(protocol_mode)
         self.airflow = float(airflow)
         self.hal = hal
         self.output_dir = output_dir
+        self._story_35_recording_enabled = bool(story_35_recording)
+        self._live = bool(live)
         self.latency_trace = LatencyTrace(
             enabled=latency_trace,
             run_id=output_dir.name,
@@ -638,7 +650,7 @@ class Runtime:
             ttl_config=config,
             check_service=PassingCheck(),
             hal=self.ai_hal,
-            simulation=False,
+            simulation=not self._live,
         )
         self.hardware.telemetry_ready.connect(self.state.update_telemetry)
         self.hardware.set_actuation_sink(self.actuation, interlock_ingress=self.ingress)
@@ -651,6 +663,17 @@ class Runtime:
         self.sequence = 0
         self._last_ui_ns = 0
         self._shutdown_completed = False
+        self._story_35_file_service = None
+        self._story_35_writer = None
+        self._story_35_ingress = None
+        self._story_35_descriptor = None
+        self._story_35_controller_sequence = 0
+        self._story_35_bound_document = None
+        self._story_35_generation = 0
+        self._story_35_candidate_commit = ""
+        self._story_35_run_id = ""
+        self._story_35_live = False
+        self._story_35_bundle_results: list[dict] = []
 
     def _handle_hil_flow_result(self, wrapped) -> None:
         self._hil_flow_results[wrapped.command.source] = wrapped
@@ -658,6 +681,8 @@ class Runtime:
             self._flow_restore_confirmed = True
 
     def start(self) -> None:
+        if getattr(self, "_story_35_recording_enabled", False):
+            self.view.show()
         self.actuation.start(QThread.Priority.HighPriority)
         self.flow.start()
         self.hardware.start(QThread.Priority.HighPriority)
@@ -704,6 +729,270 @@ class Runtime:
                 stable_since = None
             time.sleep(0.01)
         raise RuntimeError("AI/DO owner threads did not become ready")
+
+    def begin_story_35_recording(
+        self,
+        document: ProtocolDocument,
+        *,
+        candidate_commit: str,
+        run_id: str,
+        live: bool,
+    ):
+        if self._story_35_writer is not None:
+            raise RuntimeError("Story 3.5 session recording 已经建立")
+        self._story_35_generation = (
+            getattr(self, "_story_35_generation", 0) + 1
+        )
+        self._story_35_candidate_commit = str(candidate_commit)
+        self._story_35_run_id = str(run_id)
+        self._story_35_live = bool(live)
+        session_output = self.output_dir / "session-output"
+        session_output.mkdir(parents=True, exist_ok=True)
+        file_service = SessionFileService(
+            master_valve_line=self.state.master_valve_line
+        )
+        protocol_metadata = {
+            key: str(value)
+            for key, value in dict(document.metadata).items()
+        }
+        protocol_metadata.update(
+            {
+                "story": "3.5",
+                "candidate_commit": str(candidate_commit),
+                "run_id": str(run_id),
+            }
+        )
+        descriptor = file_service.reserve(
+            output_dir=session_output,
+            subject="HIL-NO-SUBJECT",
+            condition="Story-3.5-Windows-NI",
+            generation=self._story_35_generation,
+            protocol_source=document.source_name,
+            protocol_metadata=protocol_metadata,
+        )
+        readiness_latch = RecorderReadinessLatch()
+        quality_config = self.metrics.config
+        writer = SessionWriterWorker(
+            descriptor=descriptor,
+            config=SessionWriterConfig.from_mapping(self.config),
+            expected_producers=("hardware", "actuation", "controller"),
+            session_started_payload={
+                "recording_started_at": datetime.now()
+                .astimezone()
+                .isoformat(timespec="milliseconds"),
+                "declared_trigger_mode": "manual",
+                "current_trigger_mode": "manual",
+                "inhale_threshold": float(self.config.get("inhale_threshold", 0.47)),
+                "exhale_threshold": float(self.config.get("exhale_threshold", -0.44)),
+                "low_flow_threshold": float(
+                    self.config.get("low_flow_threshold", 0.2)
+                ),
+                "hardware_variant": self.state.hardware_variant,
+                "hardware_mode": "real" if live else "simulation",
+                "ai_epoch_available": True,
+                "candidate_commit": str(candidate_commit),
+                "run_id": str(run_id),
+                "subject_connected": False,
+                "actuation_quality_config": {
+                    "target_ms": quality_config.target_ms,
+                    "single_limit_ms": quality_config.single_limit_ms,
+                    "window_size": quality_config.window_size,
+                    "min_samples": quality_config.min_samples,
+                },
+            },
+            readiness_latch=readiness_latch,
+            master_valve_line=self.state.master_valve_line,
+            failure_callback=self._handle_story_35_writer_failure,
+        )
+        ingress = SessionRecorderIngress(writer, readiness_latch)
+        self._story_35_file_service = file_service
+        self._story_35_writer = writer
+        self._story_35_ingress = ingress
+        self._story_35_descriptor = descriptor
+        self._story_35_bound_document = document
+        self._story_35_controller_sequence = 0
+        timeout_ms = SessionWriterConfig.from_mapping(self.config).close_timeout_ms
+        if not writer.start_and_wait(timeout_ms):
+            file_service.mark_inactive(descriptor.paths.staging_dir)
+            raise RuntimeError("Story 3.5 SessionWriter 初始化失败")
+        if not self.actuation.bind_session_recorder(
+            ingress,
+            generation=descriptor.generation,
+            timeout_ms=timeout_ms,
+        ):
+            writer.fail_from_producer(
+                stage="actuation_recorder_bind",
+                message="动作 owner 未确认 Story 3.5 recorder bind。",
+            )
+            writer.wait(timeout_ms)
+            file_service.mark_inactive(descriptor.paths.staging_dir)
+            raise RuntimeError("动作 owner 未确认 Story 3.5 recorder bind")
+        if not self.hardware.bind_session_recorder(
+            ingress,
+            generation=descriptor.generation,
+            timeout_ms=timeout_ms,
+        ):
+            self.actuation.post_recorder_fence(wait=True, timeout_ms=timeout_ms)
+            writer.fail_from_producer(
+                stage="hardware_recorder_bind",
+                message="采集 owner 未确认 Story 3.5 recorder bind。",
+            )
+            writer.wait(timeout_ms)
+            file_service.mark_inactive(descriptor.paths.staging_dir)
+            raise RuntimeError("采集 owner 未确认 Story 3.5 recorder bind")
+        self.ingress.update(
+            recording_ready=True,
+            recorder_failed=False,
+            recorder_generation=descriptor.generation,
+            session_closing=False,
+        )
+        current_interlock = self.ingress.read()[1]
+        if current_interlock.unsafe_reason():
+            raise RuntimeError(
+                "Story 3.5 recording bind 后安全状态不是 SAFE，禁止正式动作"
+            )
+        if not self.ingress.clear_unsafe_latch():
+            raise RuntimeError(
+                "Story 3.5 recording bind 后安全联锁无法重新布防，禁止正式动作"
+            )
+        if not self.actuation.post_recorder_ready(
+            descriptor.generation,
+            wait=True,
+            timeout_ms=timeout_ms,
+        ):
+            raise RuntimeError(
+                "动作 owner 未确认 Story 3.5 recording-ready generation"
+            )
+        self._story_35_controller_sequence += 1
+        if not ingress.post_session_event(
+            event="protocol_bound",
+            producer_sequence=self._story_35_controller_sequence,
+            source="session",
+            result="success",
+            message="Story 3.5 HIL 协议已绑定到会话。",
+            payload={
+                "protocol_source": document.source_name,
+                "protocol_metadata": protocol_metadata,
+            },
+        ):
+            raise RuntimeError("Story 3.5 protocol_bound 无法进入 recorder queue")
+        return descriptor
+
+    def _handle_story_35_writer_failure(self, failure) -> None:
+        self.ingress.update(
+            recording_ready=False,
+            recorder_failed=True,
+            recorder_generation=failure.session_generation,
+        )
+        self.actuation.post_recorder_failed(failure.message)
+        self.actuation.post_stop(
+            message="Story 3.5 会话写入失败，HIL runner 已请求安全停止。"
+        )
+
+    def finalize_story_35_recording(
+        self,
+        *,
+        reason: str,
+        aborted: bool,
+        final_quality=None,
+        fence_producers: bool = False,
+    ):
+        writer = self._story_35_writer
+        ingress = self._story_35_ingress
+        descriptor = self._story_35_descriptor
+        file_service = self._story_35_file_service
+        if writer is None or ingress is None or descriptor is None or file_service is None:
+            raise RuntimeError("Story 3.5 session recording 尚未建立")
+        self.ingress.update(recording_ready=False, session_closing=True)
+        if fence_producers:
+            self.hardware.post_session_fence()
+            if not self.actuation.post_recorder_fence(
+                wait=True,
+                timeout_ms=SessionWriterConfig.from_mapping(
+                    self.config
+                ).close_timeout_ms,
+            ):
+                writer.fail_from_producer(
+                    stage="actuation_recorder_fence",
+                    message="动作 owner 未确认 Story 3.5 recorder fence。",
+                )
+        self._story_35_controller_sequence += 1
+        ingress.post_session_event(
+            event="hil_run_aborted" if aborted else "hil_run_completed",
+            producer_sequence=self._story_35_controller_sequence,
+            source="hil_runner",
+            result="aborted" if aborted else "success",
+            message=(
+                "Story 3.5 HIL 已中止，安全全关后结束记录。"
+                if aborted
+                else "Story 3.5 HIL 已完成，安全全关后结束记录。"
+            ),
+            payload={"reason": str(reason)},
+        )
+        ingress.post_fence(
+            "controller",
+            producer_sequence=self._story_35_controller_sequence,
+        )
+        metrics = getattr(self, "metrics", None)
+        if final_quality is None and metrics is not None:
+            final_quality = metrics.snapshot()
+        result = writer.close(
+            reason=str(reason),
+            final_quality=final_quality,
+            timeout_ms=SessionWriterConfig.from_mapping(self.config).close_timeout_ms,
+        )
+        validation_path = (
+            descriptor.paths.final_dir
+            if descriptor.paths.final_dir.is_dir()
+            else descriptor.paths.staging_dir
+        )
+        validation = file_service.validate_complete_bundle(validation_path)
+        if not writer.isRunning():
+            file_service.mark_inactive(descriptor.paths.staging_dir)
+        bundle_result = {
+            "protocol_source": (
+                None
+                if self._story_35_bound_document is None
+                else self._story_35_bound_document.source_name
+            ),
+            "path": str(validation.path),
+            "writer_complete": result.complete,
+            "validator_complete": validation.complete,
+            "validator_reason": validation.reason,
+            "last_session_sequence": validation.last_sequence,
+            "aborted": bool(aborted),
+        }
+        if not hasattr(self, "_story_35_bundle_results"):
+            self._story_35_bundle_results = []
+        self._story_35_bundle_results.append(bundle_result)
+        self._story_35_file_service = None
+        self._story_35_writer = None
+        self._story_35_ingress = None
+        self._story_35_descriptor = None
+        self._story_35_bound_document = None
+        self._story_35_controller_sequence = 0
+        self.ingress.update(session_closing=False)
+        return result, validation
+
+    def _ensure_story_35_recording_for_document(
+        self,
+        document: ProtocolDocument,
+    ) -> None:
+        if not getattr(self, "_story_35_recording_enabled", False):
+            return
+        if self._story_35_writer is None:
+            self.begin_story_35_recording(
+                document,
+                candidate_commit=self._story_35_candidate_commit,
+                run_id=self._story_35_run_id,
+                live=self._story_35_live,
+            )
+            return
+        if self._story_35_bound_document is not document:
+            raise RuntimeError(
+                "Story 3.5 单 session 只能绑定一份协议；"
+                "必须先完成当前 bundle 再加载安全场景协议。"
+            )
 
     def pump(self) -> None:
         self.app.processEvents()
@@ -842,6 +1131,13 @@ class Runtime:
         # The next scenario must explicitly start a fresh protocol epoch.
 
     def start_protocol_document(self, document: ProtocolDocument) -> None:
+        if (
+            getattr(self, "_story_35_writer", None) is not None
+            and getattr(self, "_story_35_bound_document", None) is not document
+        ):
+            raise RuntimeError(
+                "Story 3.5 单 session 只能使用已绑定协议，禁止加载不同 ProtocolDocument。"
+            )
         if self.executor is None:
             raise RuntimeError("production HIL requires ProtocolExecutor")
         self.ingress.update(has_protocol=True, device_lease="idle")
@@ -872,9 +1168,10 @@ class Runtime:
         marker = len(self.collector.receipts)
         exhale = float(self.config.get("exhale_threshold", -0.44)) - 0.5
         self.latency_trace.begin_trial(label)
-        self.ai_hal.set_ai0_software_stimulus(exhale)
         try:
             self.actuation.post_manual_trigger(readiness=self.readiness())
+            self.wait_status({ProtocolExecutionStatus.WAITING_EXHALE})
+            self.ai_hal.set_ai0_software_stimulus(exhale)
             return self.collector.wait_for(
                 lambda item: (
                     item.trial_id == label
@@ -903,6 +1200,7 @@ class Runtime:
                 )
             ],
         )
+        self._ensure_story_35_recording_for_document(document)
         self.start_protocol_document(document)
         return self.trigger_current_trial_via_ai0(label=label)
 
@@ -1136,8 +1434,36 @@ def wait_protocol_trial(
     return opened, closed
 
 
+def build_benchmark_document(args) -> ProtocolDocument:
+    trials = [
+        ProtocolTrial(
+            trial_id=f"bench-{index + 1:04d}-v{args.valves[index % len(args.valves)]}",
+            timing_ms=0,
+            duration_ms=args.duration_ms,
+            valve=args.valves[index % len(args.valves)],
+            trigger=TriggerMode.MANUAL,
+        )
+        for index in range(args.cycles)
+    ]
+    story = "3.5" if getattr(args, "story_3_5_recording", False) else "3.4"
+    return ProtocolDocument(
+        source_path=Path(f"story-{story.replace('.', '-')}-hil-benchmark.csv"),
+        source_name=f"story-{story.replace('.', '-')}-hil-benchmark.csv",
+        trials=trials,
+        metadata={"story": story},
+    )
+
+
 def run_benchmark(runtime: Runtime, args) -> dict:
     initial_closes = runtime.close_everything("initial-close")
+    document = build_benchmark_document(args)
+    if getattr(args, "story_3_5_recording", False):
+        runtime.begin_story_35_recording(
+            document,
+            candidate_commit=args.candidate_commit,
+            run_id=runtime.output_dir.name,
+            live=bool(args.live),
+        )
     master_device, master_line = runtime.valves.resolve_target(0)
     runtime.submit_and_wait(
         runtime.command(
@@ -1152,23 +1478,8 @@ def run_benchmark(runtime: Runtime, args) -> dict:
     )
     runtime.wait_ms(100)
 
-    trials = [
-        ProtocolTrial(
-            trial_id=f"bench-{index + 1:04d}-v{args.valves[index % len(args.valves)]}",
-            timing_ms=0,
-            duration_ms=args.duration_ms,
-            valve=args.valves[index % len(args.valves)],
-            trigger=TriggerMode.MANUAL,
-        )
-        for index in range(args.cycles)
-    ]
-    runtime.start_protocol_document(
-        ProtocolDocument(
-            source_path=Path("story-3-4-hil-benchmark.csv"),
-            source_name="story-3-4-hil-benchmark.csv",
-            trials=trials,
-        )
-    )
+    trials = list(document.trials)
+    runtime.start_protocol_document(document)
     started = time.time()
     for index, trial in enumerate(trials):
         opened = runtime.trigger_current_trial_via_ai0(label=trial.trial_id)
@@ -1237,6 +1548,20 @@ def run_safety_scenarios(runtime: Runtime, args) -> dict:
     results["stop"] = stop_evidence
     if not stop_evidence["all_configured_targets_closed"]:
         runtime.close_everything("stop-safety-recovery")
+    if (
+        getattr(args, "story_3_5_recording", False)
+        and runtime._story_35_writer is not None
+    ):
+        finalization, validation = runtime.finalize_story_35_recording(
+            reason="safety_stop_completed",
+            aborted=False,
+            final_quality=runtime.metrics.snapshot(),
+            fence_producers=True,
+        )
+        if not finalization.complete or not validation.complete:
+            raise RuntimeError(
+                "Story 3.5 stop safety bundle 未通过 writer/validator。"
+            )
 
     runtime.start_protocol_trial(
         label="safety-low-flow", valve=args.valves[1], duration_ms=500
@@ -1252,6 +1577,20 @@ def run_safety_scenarios(runtime: Runtime, args) -> dict:
     if not low_flow_evidence["all_configured_targets_closed"]:
         runtime.close_everything("low-flow-safety-recovery")
     runtime.recover_low_flow_via_owner()
+    if (
+        getattr(args, "story_3_5_recording", False)
+        and runtime._story_35_writer is not None
+    ):
+        finalization, validation = runtime.finalize_story_35_recording(
+            reason="safety_low_flow_completed",
+            aborted=False,
+            final_quality=runtime.metrics.snapshot(),
+            fence_producers=True,
+        )
+        if not finalization.complete or not validation.complete:
+            raise RuntimeError(
+                "Story 3.5 low-flow safety bundle 未通过 writer/validator。"
+            )
 
     runtime.collector.inject_delay_ms = runtime.metrics.config.single_limit_ms + 5.0
     marker = len(runtime.collector.receipts)
@@ -1275,6 +1614,20 @@ def run_safety_scenarios(runtime: Runtime, args) -> dict:
     }
     if not severe_evidence["all_configured_targets_closed"]:
         runtime.close_everything("severe-safety-recovery")
+    if (
+        getattr(args, "story_3_5_recording", False)
+        and runtime._story_35_writer is not None
+    ):
+        finalization, validation = runtime.finalize_story_35_recording(
+            reason="safety_severe_completed",
+            aborted=False,
+            final_quality=runtime.metrics.snapshot(),
+            fence_producers=True,
+        )
+        if not finalization.complete or not validation.complete:
+            raise RuntimeError(
+                "Story 3.5 severe safety bundle 未通过 writer/validator。"
+            )
 
     runtime.start_protocol_trial(
         label="safety-shutdown", valve=args.valves[0], duration_ms=500
@@ -1294,7 +1647,113 @@ def run_safety_scenarios(runtime: Runtime, args) -> dict:
         "error": shutdown_event.get("error"),
         **shutdown_evidence,
     }
+    if (
+        getattr(args, "story_3_5_recording", False)
+        and runtime._story_35_writer is not None
+    ):
+        finalization, validation = runtime.finalize_story_35_recording(
+            reason="safety_shutdown_completed",
+            aborted=False,
+            final_quality=runtime.metrics.snapshot(),
+            fence_producers=False,
+        )
+        if not finalization.complete or not validation.complete:
+            raise RuntimeError(
+                "Story 3.5 shutdown safety bundle 未通过 writer/validator。"
+            )
     return results
+
+
+def evaluate_performance_gates(runtime: Runtime, args, benchmark: dict) -> dict:
+    target_ms = float(runtime.metrics.config.target_ms)
+    streams = ("open", "close", "combined")
+    aggregate_met = all(
+        benchmark[name]["p95_ms"] is not None
+        and benchmark[name]["p95_ms"] < target_ms
+        for name in streams
+    )
+    rolling_met = all(
+        bool(benchmark[name]["rolling_p95_ms"])
+        and all(
+            value is not None and value < target_ms
+            for value in benchmark[name]["rolling_p95_ms"]
+        )
+        for name in streams
+    )
+    final_windows_met = all(
+        benchmark[name]["final_window_p95_ms"] is not None
+        and benchmark[name]["final_window_p95_ms"] < target_ms
+        for name in streams
+    )
+    required_samples = 200 if args.live else args.cycles
+    samples_complete = bool(
+        benchmark["open"]["count"] >= required_samples
+        and benchmark["close"]["count"] >= required_samples
+    )
+    return {
+        "target_ms": target_ms,
+        "aggregate_p95_strictly_below_target": aggregate_met,
+        "every_rolling_p95_strictly_below_target": rolling_met,
+        "final_window_p95_strictly_below_target": final_windows_met,
+        "sample_counts_complete": samples_complete,
+        "passed": bool(
+            aggregate_met
+            and rolling_met
+            and final_windows_met
+            and samples_complete
+        ),
+    }
+
+
+def run_acceptance_scenarios(runtime: Runtime, args) -> tuple[dict, dict]:
+    """Run safety scenarios only after the formal benchmark returns successfully."""
+    benchmark = run_benchmark(runtime, args)
+    performance_gate = evaluate_performance_gates(runtime, args, benchmark)
+    benchmark["performance_gate"] = performance_gate
+    if not performance_gate["passed"]:
+        runtime.close_everything("performance-gate-abort")
+        failed = [
+            name
+            for name, passed in (
+                (
+                    "aggregate_p95",
+                    performance_gate["aggregate_p95_strictly_below_target"],
+                ),
+                (
+                    "rolling_p95",
+                    performance_gate["every_rolling_p95_strictly_below_target"],
+                ),
+                (
+                    "final_window_p95",
+                    performance_gate["final_window_p95_strictly_below_target"],
+                ),
+                ("sample_counts", performance_gate["sample_counts_complete"]),
+            )
+            if not passed
+        ]
+        raise RuntimeError(
+            "正式 benchmark 性能 Gate 未通过，已安全全关且不执行后续场景："
+            + ", ".join(failed)
+        )
+    if (
+        getattr(args, "story_3_5_recording", False)
+        and runtime._story_35_writer is not None
+    ):
+        benchmark_quality = runtime.metrics.snapshot()
+        finalization, validation = runtime.finalize_story_35_recording(
+            reason="benchmark_performance_gate_passed",
+            aborted=False,
+            final_quality=benchmark_quality,
+            fence_producers=True,
+        )
+        if not finalization.complete or not validation.complete:
+            runtime.close_everything("benchmark-bundle-failure")
+            raise RuntimeError(
+                "Story 3.5 benchmark bundle 未通过 writer/validator，"
+                "已安全全关且不执行后续场景。"
+            )
+    safety = run_safety_scenarios(runtime, args)
+    return benchmark, safety
 
 
 def production_safety_paths_succeeded(safety: dict) -> bool:
@@ -1348,12 +1807,67 @@ def write_csv(path: Path, receipts: list[ActuationReceipt]) -> None:
         writer.writerows(rows)
 
 
+def _git_output(*args: str) -> str:
+    completed = subprocess.run(
+        ["git", "-C", str(REPO_ROOT), *args],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return completed.stdout.strip()
+
+
+def _validate_live_story35_candidate(
+    parser: argparse.ArgumentParser,
+    candidate_commit: str,
+) -> None:
+    try:
+        _git_output("cat-file", "-e", f"{candidate_commit}^{{commit}}")
+    except (OSError, subprocess.CalledProcessError):
+        parser.error(
+            "live Story 3.5 candidate 必须是当前仓库中存在的 commit object"
+        )
+    try:
+        head = _git_output("rev-parse", "HEAD")
+        status = _git_output(
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=all",
+        )
+    except (OSError, subprocess.CalledProcessError):
+        parser.error("live Story 3.5 无法读取当前 Git HEAD/worktree 状态")
+    if candidate_commit.lower() != head.lower():
+        parser.error(
+            "live Story 3.5 --candidate-commit 必须精确等于当前 HEAD"
+        )
+    if status:
+        parser.error(
+            "live Story 3.5 正式 Gate 要求 index/worktree clean；"
+            "不得把未提交内容绑定到 candidate evidence"
+        )
+
+
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Story 3.4 live NI actuation HIL benchmark")
+    parser = argparse.ArgumentParser(
+        description="Story 3.4/3.5 live NI actuation HIL benchmark"
+    )
     parser.add_argument("--config", type=Path, default=REPO_ROOT / "config/default_config.json")
     parser.add_argument("--local-config", type=Path, default=REPO_ROOT / "config/local_config.json")
     parser.add_argument("--serial-port", default="COM6")
     parser.add_argument("--live", action="store_true")
+    parser.add_argument(
+        "--story-3-5-recording",
+        action="store_true",
+        help=(
+            "enable native Story 3.5 SessionWriter, owner bind/fences, visible "
+            "ProtocolView, and final complete-bundle validation"
+        ),
+    )
+    parser.add_argument(
+        "--candidate-commit",
+        default="",
+        help="40-character candidate commit recorded in Story 3.5 evidence",
+    )
     parser.add_argument(
         "--latency-trace",
         action="store_true",
@@ -1373,17 +1887,34 @@ def parse_args() -> argparse.Namespace:
         parser.error("cycles/duration must be positive and inter-trial must be >=250ms")
     if args.valves != [1, 9, 13]:
         parser.error("Story 3.4 HIL requires representative valves 1 9 13")
+    if args.story_3_5_recording:
+        if args.phase != "all":
+            parser.error("Story 3.5 recording gate requires --phase all")
+        if not re.fullmatch(r"[0-9a-fA-F]{40}", args.candidate_commit):
+            parser.error(
+                "Story 3.5 recording gate requires --candidate-commit with 40 hex characters"
+            )
+        if args.live:
+            _validate_live_story35_candidate(
+                parser,
+                args.candidate_commit,
+            )
+        args.latency_trace = True
     return args
 
 
 def main() -> int:
     args = parse_args()
     stamp = time.strftime("%Y%m%d-%H%M%S")
-    output_dir = args.output_root / f"story-3-4-{stamp}-{'live' if args.live else 'mock'}"
+    story_key = "3-5" if args.story_3_5_recording else "3-4"
+    output_dir = (
+        args.output_root
+        / f"story-{story_key}-{stamp}-{'live' if args.live else 'mock'}"
+    )
     output_dir.mkdir(parents=True, exist_ok=False)
     config = load_config(args)
     metadata = {
-        "story": "3.4",
+        "story": "3.5" if args.story_3_5_recording else "3.4",
         "started_at": time.time(),
         "live": args.live,
         "authorization": "explicit user authorization received" if args.live else "mock smoke",
@@ -1399,6 +1930,12 @@ def main() -> int:
             "ai6_external_signal": False,
             "latency_trace_enabled": args.latency_trace,
             "latency_trace_is_diagnostic_only": True,
+            "session_recording": args.story_3_5_recording,
+            "structured_logging": args.story_3_5_recording,
+            "ui_component": "ProtocolView",
+            "ui_visible": args.story_3_5_recording,
+            "hardware_mode": "real" if args.live else "simulation",
+            "candidate_commit": args.candidate_commit or None,
             "performance_ai0_source": (
                 "software stimulus applied to HAL frames acquired by HardwareWorker; "
                 "monotonic timestamp/epoch/sequence remain HAL-owned; not an external sensor stimulus"
@@ -1433,6 +1970,8 @@ def main() -> int:
             output_dir=output_dir,
             protocol_mode=args.phase == "all",
             latency_trace=args.latency_trace,
+            story_35_recording=args.story_3_5_recording,
+            live=args.live,
         )
         if args.phase == "close":
             # Emergency close must remain available when serial/MFC readiness is
@@ -1465,29 +2004,20 @@ def main() -> int:
             {"device": key[0], "port": key[1]}
             for key in sorted(getattr(hal, "_do_sessions", {}))
         ]
-        benchmark = run_benchmark(runtime, args)
-        safety = run_safety_scenarios(runtime, args)
+        benchmark, safety = run_acceptance_scenarios(runtime, args)
         summary = {"metadata": metadata, "benchmark": benchmark, "safety": safety}
-        target_ms = float(config.get("actuation_jitter_target_ms", 20.0))
-        target_met = all(
-            benchmark[name]["p95_ms"] is not None
-            and benchmark[name]["p95_ms"] < target_ms
-            for name in ("open", "close", "combined")
-        )
-        rolling_met = all(
-            benchmark[name]["rolling_p95_ms"]
-            and all(value is not None and value < target_ms for value in benchmark[name]["rolling_p95_ms"])
-            for name in ("open", "close", "combined")
-        )
-        final_windows_met = all(
-            benchmark[name]["final_window_p95_ms"] is not None
-            and benchmark[name]["final_window_p95_ms"] < target_ms
-            for name in ("open", "close", "combined")
-        )
-        required_samples = 200 if args.live else args.cycles
-        samples_complete = benchmark["open"]["count"] >= required_samples and benchmark[
-            "close"
-        ]["count"] >= required_samples
+        performance_gate = benchmark["performance_gate"]
+        target_ms = performance_gate["target_ms"]
+        target_met = performance_gate[
+            "aggregate_p95_strictly_below_target"
+        ]
+        rolling_met = performance_gate[
+            "every_rolling_p95_strictly_below_target"
+        ]
+        final_windows_met = performance_gate[
+            "final_window_p95_strictly_below_target"
+        ]
+        samples_complete = performance_gate["sample_counts_complete"]
         write_failure_results = {
             ActuationResult.FAILED,
             ActuationResult.TIMEOUT,
@@ -1546,6 +2076,46 @@ def main() -> int:
                     json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8"
                 )
                 exit_code = 1
+            if (
+                args.story_3_5_recording
+                and getattr(runtime, "_story_35_writer", None) is not None
+            ):
+                aborted = exit_code != 0 or "failure" in metadata
+                try:
+                    finalization, validation = runtime.finalize_story_35_recording(
+                        reason=(
+                            metadata.get("failure", "acceptance_failed")
+                            if aborted
+                            else "acceptance_completed"
+                        ),
+                        aborted=aborted,
+                    )
+                    metadata["session_bundle"] = {
+                        "path": str(validation.path),
+                        "writer_complete": finalization.complete,
+                        "validator_complete": validation.complete,
+                        "validator_reason": validation.reason,
+                        "last_session_sequence": validation.last_sequence,
+                    }
+                    if not finalization.complete or not validation.complete:
+                        exit_code = 1
+                except Exception as exc:
+                    metadata["session_finalization_failure"] = (
+                        f"{type(exc).__name__}: {exc}"
+                    )
+                    exit_code = 1
+            bundle_results = list(
+                getattr(runtime, "_story_35_bundle_results", ())
+            )
+            if bundle_results:
+                metadata["session_bundles"] = bundle_results
+                metadata.setdefault("session_bundle", bundle_results[0])
+                if any(
+                    not item["writer_complete"]
+                    or not item["validator_complete"]
+                    for item in bundle_results
+                ):
+                    exit_code = 1
             write_csv(output_dir / "receipts.csv", runtime.collector.receipts)
             runtime.latency_trace.write_jsonl(output_dir / "latency-trace.jsonl")
         metadata["finished_at"] = time.time()

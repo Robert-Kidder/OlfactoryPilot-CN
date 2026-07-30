@@ -26,6 +26,7 @@ from app.services.hal import BreathSampleBatch
 from app.services.session_file_service import (
     MAX_STREAM_LINE_BYTES,
     PUBLISH_INCOMPLETE_MARKER,
+    _receipt_contract_reason,
 )
 
 LOG = logging.getLogger(__name__)
@@ -534,6 +535,7 @@ class SessionWriterWorker(QThread):
         expected_producers: tuple[str, ...],
         session_started_payload: dict[str, Any],
         readiness_latch: RecorderReadinessLatch,
+        master_valve_line: str = "",
         fault_injector=None,
         failure_callback=None,
     ) -> None:
@@ -557,6 +559,14 @@ class SessionWriterWorker(QThread):
         )
         self.readiness_latch = readiness_latch
         self.readiness_latch.bind(descriptor)
+        configured_master = str(master_valve_line or "")
+        self._master_target = (
+            tuple(configured_master.split("/", 1))
+            if "/" in configured_master
+            else (None, configured_master)
+            if configured_master
+            else None
+        )
         self._fault_injector = fault_injector
         self._failure_callback = failure_callback
         self._queue: queue.Queue[SessionRecordEnvelope | ProducerFence] = queue.Queue(
@@ -590,7 +600,10 @@ class SessionWriterWorker(QThread):
         self._receipt_count = 0
         self._session_sequence = 0
         self._records_since_flush = 0
-        self._seen_receipts: set[tuple[str, int, str]] = set()
+        self._seen_receipts: dict[
+            tuple[str, int, str],
+            ActuationReceipt,
+        ] = {}
 
     @property
     def failure(self) -> SessionWriterFailure | None:
@@ -910,7 +923,13 @@ class SessionWriterWorker(QThread):
             receipt.execution_epoch,
             receipt.command_id,
         )
-        if identity in self._seen_receipts:
+        previous_receipt = self._seen_receipts.get(identity)
+        if previous_receipt is not None:
+            if previous_receipt != receipt:
+                raise ValueError(
+                    "receipt canonical identity 相同但内容冲突，"
+                    "已阻止会话发布。"
+                )
             self._write_log_record(
                 {
                     "record_type": "protocol_event",
@@ -929,8 +948,6 @@ class SessionWriterWorker(QThread):
                 stage="log_write",
             )
             return
-        self._seen_receipts.add(identity)
-        self._receipt_count += 1
         payload = {
             "record_type": "receipt",
             "event": "actuation_receipt",
@@ -964,6 +981,14 @@ class SessionWriterWorker(QThread):
             "target_device": receipt.target_device,
             "target_line": receipt.target_line,
         }
+        contract_reason = _receipt_contract_reason(
+            payload,
+            master_target=self._master_target,
+        )
+        if contract_reason:
+            raise ValueError(contract_reason)
+        self._seen_receipts[identity] = receipt
+        self._receipt_count += 1
         self._write_log_record(payload, stage="log_write")
 
     def _consume_protocol_event(self, envelope: SessionRecordEnvelope) -> None:

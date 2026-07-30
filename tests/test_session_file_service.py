@@ -27,6 +27,14 @@ from app.services.session_file_service import (
 )
 
 FIXED_LOCAL_TIME = datetime(2026, 7, 27, 18, 0, 0, 123000).astimezone()
+FAILED_HIL_BUNDLE = (
+    Path(__file__).resolve().parents[1]
+    / "logs"
+    / "benchmarks"
+    / "story-3-5-20260730-154234-live"
+    / "session-output"
+    / "20260730-154242-838_HIL-NO-SUBJECT_Story-3.5-Windows-NI"
+)
 
 
 class CountingClock:
@@ -37,6 +45,40 @@ class CountingClock:
     def __call__(self) -> datetime:
         self.calls += 1
         return self.value
+
+
+@pytest.mark.skipif(
+    not FAILED_HIL_BUNDLE.is_dir(),
+    reason="本机未保留 2026-07-30 Story 3.5 中止 HIL bundle",
+)
+def test_failed_hil_bundle_validates_read_only_with_configured_master_contract() -> None:
+    evidence_files = tuple(
+        sorted(path for path in FAILED_HIL_BUNDLE.iterdir() if path.is_file())
+    )
+    before = {
+        path: (
+            path.stat().st_size,
+            path.stat().st_mtime_ns,
+            hashlib.sha256(path.read_bytes()).hexdigest(),
+        )
+        for path in evidence_files
+    }
+
+    validation = SessionFileService(
+        master_valve_line="Dev2/P1.0"
+    ).validate_complete_bundle(FAILED_HIL_BUNDLE)
+
+    after = {
+        path: (
+            path.stat().st_size,
+            path.stat().st_mtime_ns,
+            hashlib.sha256(path.read_bytes()).hexdigest(),
+        )
+        for path in evidence_files
+    }
+    assert validation.complete, validation.reason
+    assert validation.last_sequence == 139
+    assert after == before
 
 
 def test_windows_component_cleaning_is_nfc_ordered_and_rejects_empty() -> None:

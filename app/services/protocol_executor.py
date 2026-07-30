@@ -189,6 +189,7 @@ class ProtocolExecutor:
         timestamp: float | None = None,
         captured_epoch: int | None = None,
         sequence: int | None = None,
+        monotonic_ns: int | None = None,
     ) -> ProtocolExecutorResult:
         now = self._now(timestamp)
         try:
@@ -266,7 +267,11 @@ class ProtocolExecutor:
         self.state.trigger_source = trigger_source.value
         self.state.ttl_armed = False
         self.state.waiting_trigger_started_at = None
-        waiting = self._enter_waiting(now, safety_state=readiness.safety_state)
+        waiting = self._enter_waiting(
+            now,
+            safety_state=readiness.safety_state,
+            monotonic_ns=monotonic_ns,
+        )
         accepted = self._event(
             "trigger_accepted",
             now,
@@ -455,6 +460,19 @@ class ProtocolExecutor:
         safety_generation: int = 0,
     ) -> ProtocolExecutorResult:
         structured = samples if isinstance(samples, BreathSampleBatch) else None
+        if (
+            structured is not None
+            and self.state.status == ProtocolExecutionStatus.WAITING_EXHALE
+            and self.state.waiting_started_monotonic_ns is not None
+        ):
+            structured = BreathSampleBatch(
+                tuple(
+                    sample
+                    for sample in structured.samples
+                    if sample.monotonic_ns
+                    >= self.state.waiting_started_monotonic_ns
+                )
+            )
         values = [sample.value for sample in structured.samples] if structured else samples
         if not values:
             return self.empty_result()
@@ -954,7 +972,13 @@ class ProtocolExecutor:
             ]
         )
 
-    def _enter_waiting(self, timestamp: float, *, safety_state: str) -> ProtocolExecutorResult:
+    def _enter_waiting(
+        self,
+        timestamp: float,
+        *,
+        safety_state: str,
+        monotonic_ns: int | None = None,
+    ) -> ProtocolExecutorResult:
         if safety_state != "SAFE":
             return self._safety_block(
                 timestamp,
@@ -968,6 +992,7 @@ class ProtocolExecutor:
         self.state.status = ProtocolExecutionStatus.WAITING_EXHALE
         self.state.waiting_trigger_started_at = None
         self.state.waiting_started_at = timestamp
+        self.state.waiting_started_monotonic_ns = monotonic_ns
         self.state.triggered_at = None
         self.state.active_valve = None
         return self._result_with_events(

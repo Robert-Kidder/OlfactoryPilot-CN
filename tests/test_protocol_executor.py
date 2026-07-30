@@ -72,12 +72,14 @@ def _start_manual(
     document: ProtocolDocument | None = None,
     *,
     timestamp: float = 10.0,
+    monotonic_ns: int | None = None,
 ) -> None:
     executor.start(document or _document(), readiness=_readiness(), timestamp=timestamp)
     executor.accept_trigger(
         TriggerMode.MANUAL,
         readiness=_readiness(ttl_input_ready=False),
         timestamp=timestamp,
+        monotonic_ns=monotonic_ns,
     )
 
 
@@ -683,6 +685,60 @@ def test_deferred_open_event_preserves_trigger_sample_monotonic_identity() -> No
     event = next(item for item in result.events if item.event == "open_requested")
     assert event.monotonic_ns == 987_654_321
     assert result.action_requests[0].expected_ns == 987_654_321
+
+
+def test_trigger_never_uses_structured_sample_captured_before_waiting_started() -> None:
+    executor = ProtocolExecutor(
+        gating_service=GatingService(inhale_threshold=0.5, exhale_threshold=-0.5),
+        valve_writer=lambda _channel, _open_state: (True, "ok"),
+        config=ProtocolExecutionConfig(breath_gate_timeout_ms=5000),
+        clock=lambda: 10.0,
+        deferred_actuation=True,
+    )
+    _start_manual(
+        executor,
+        timestamp=10.0,
+        monotonic_ns=1_000_000_000,
+    )
+    backlog = BreathSampleBatch.from_frames(
+        (
+            AnalogInputFrame(
+                timestamp=9.99,
+                ai0=-0.8,
+                monotonic_ns=990_000_000,
+                ai_epoch=4,
+                sample_sequence=10,
+            ),
+            AnalogInputFrame(
+                timestamp=10.01,
+                ai0=0.0,
+                monotonic_ns=1_010_000_000,
+                ai_epoch=4,
+                sample_sequence=11,
+            ),
+        )
+    )
+
+    stale_result = executor.process_breath_samples(backlog, safety_state="SAFE")
+
+    assert stale_result.action_requests == ()
+    assert stale_result.state.status == ProtocolExecutionStatus.WAITING_EXHALE
+
+    fresh_result = executor.process_breath_samples(
+        BreathSampleBatch.from_frames(
+            (
+                AnalogInputFrame(
+                    timestamp=10.02,
+                    ai0=-0.8,
+                    monotonic_ns=1_020_000_000,
+                    ai_epoch=4,
+                    sample_sequence=12,
+                ),
+            )
+        ),
+        safety_state="SAFE",
+    )
+    assert fresh_result.action_requests[0].expected_ns == 1_020_000_000
 
 
 def test_wait_timeout_skips_without_new_breath_samples() -> None:

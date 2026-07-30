@@ -358,8 +358,30 @@ class ActuationWorker(QThread):
             self._recorder_failure_notified = True
         self._post_message("recorder_failed", {"message": str(message)})
 
-    def post_recorder_ready(self, generation: int) -> None:
-        self._post_message("recorder_ready", {"generation": int(generation)})
+    def post_recorder_ready(
+        self,
+        generation: int,
+        *,
+        wait: bool = False,
+        timeout_ms: int = 1000,
+    ) -> bool:
+        ack = threading.Event() if wait else None
+        result: dict[str, bool] = {}
+        self._post_message(
+            "recorder_ready",
+            {
+                "generation": int(generation),
+                "ack": ack,
+                "result": result,
+            },
+        )
+        if not self.isRunning():
+            self.process_ready()
+        if ack is None:
+            return True
+        if not ack.wait(max(1, int(timeout_ms)) / 1000.0):
+            return False
+        return bool(result.get("accepted"))
 
     def post_recorder_fence(
         self,
@@ -648,7 +670,7 @@ class ActuationWorker(QThread):
     def _reject_stopped_message(self, kind: str, payload: dict[str, Any]) -> None:
         """Give correlated intents a terminal result instead of replaying them after restart."""
         message = "动作线程已停止接单，请在硬件恢复后重新发起请求。"
-        if kind in {"recorder_bind", "recorder_fence"}:
+        if kind in {"recorder_bind", "recorder_fence", "recorder_ready"}:
             payload["result"]["accepted"] = False
             if payload.get("ack") is not None:
                 payload["ack"].set()
@@ -1264,11 +1286,17 @@ class ActuationWorker(QThread):
                 payload["ack"].set()
             return
         if kind == "recorder_ready":
+            accepted = False
             if (
                 self.protocol_state.active_valve is None
                 and not self.protocol_state.possibly_open_valves
             ):
-                self.interlock.clear_recorder_failure(payload["generation"])
+                accepted = self.interlock.clear_recorder_failure(
+                    payload["generation"]
+                )
+            if payload.get("ack") is not None:
+                payload["result"]["accepted"] = accepted
+                payload["ack"].set()
             return
         if kind == "recorder_failed":
             current = self.interlock.read()[1]
@@ -1378,6 +1406,7 @@ class ActuationWorker(QThread):
                 "manual",
                 readiness=readiness,
                 timestamp=self._wall_clock(),
+                monotonic_ns=int(self._clock_ns()),
             )
             if any(event.event == "trigger_accepted" for event in result.events):
                 self._schedule_breath_timeout(readiness)
@@ -1428,6 +1457,7 @@ class ActuationWorker(QThread):
                     timestamp=float(timestamp),
                     captured_epoch=arm_epoch,
                     sequence=pulse_sequence,
+                    monotonic_ns=monotonic_ns,
                 )
                 result = replace(
                     result,

@@ -224,7 +224,9 @@ class MainController(QObject):
         self._protocol_start_pending = False
         self._protocol_master_prepare_pending = False
         self.session_state = SessionState()
-        self.session_file_service = SessionFileService()
+        self.session_file_service = SessionFileService(
+            master_valve_line=state.master_valve_line
+        )
         self.recorder_readiness = RecorderReadinessLatch()
         self.session_writer: SessionWriterWorker | None = None
         self.session_ingress: SessionRecorderIngress | None = None
@@ -1191,6 +1193,7 @@ class MainController(QObject):
             expected_producers=("hardware", "actuation", "controller"),
             session_started_payload=started_payload,
             readiness_latch=self.recorder_readiness,
+            master_valve_line=self.state.master_valve_line,
             failure_callback=self._wake_actuation_for_recorder_failure,
         )
         ingress = SessionRecorderIngress(writer, self.recorder_readiness)

@@ -186,16 +186,49 @@ def _is_finite_number(
     )
 
 
-def _receipt_contract_reason(record: dict[str, Any]) -> str:
+def _receipt_contract_reason(
+    record: dict[str, Any],
+    *,
+    master_target: tuple[str | None, str] | None,
+) -> str:
     for field, minimum in (
         ("execution_epoch", 1),
         ("arm_epoch", 0),
         ("sequence", 1),
-        ("valve", 1),
         ("expected_ns", 0),
     ):
         if not _is_strict_int(record.get(field), minimum=minimum):
             return f"receipt {field} 无效。"
+    valve = record.get("valve")
+    if not _is_strict_int(valve):
+        return "receipt valve 无效。"
+    if valve == 0:
+        receipt_target = (
+            record.get("target_device"),
+            record.get("target_line"),
+        )
+        action = record.get("action")
+        category = record.get("category")
+        legal_master_action = bool(
+            (category == "safety" and action == "close")
+            or (
+                category in {"warmup", "manual", "pretest"}
+                and action == "open"
+            )
+            or (
+                category == "master"
+                and action in {"open", "close"}
+            )
+        )
+        if (
+            master_target is None
+            or receipt_target != master_target
+            or not legal_master_action
+        ):
+            return (
+                "receipt valve=0 仅允许匹配配置主阀目标且 action/category "
+                "符合 master_prepare 或安全关闭契约的动作。"
+            )
     trial_index = record.get("trial_index")
     if trial_index is not None and not _is_strict_int(trial_index):
         return "receipt trial_index 无效。"
@@ -394,9 +427,16 @@ class SessionFileService:
         *,
         clock: Callable[[], datetime] | None = None,
         fault_injector: FaultInjector | None = None,
+        master_valve_line: str = "",
     ) -> None:
         self._clock = clock or (lambda: datetime.now().astimezone())
         self._fault_injector = fault_injector
+        configured_master = str(master_valve_line or "")
+        self._master_target = (
+            self._split_configured_target(configured_master)
+            if configured_master
+            else None
+        )
         self._active_lock = threading.RLock()
         self._active_staging: set[Path] = set()
         self._orphan_staging: set[Path] = set()
@@ -1066,7 +1106,10 @@ class SessionFileService:
                                 False,
                                 "receipt canonical identity 无效。",
                             )
-                        receipt_reason = _receipt_contract_reason(record)
+                        receipt_reason = _receipt_contract_reason(
+                            record,
+                            master_target=self._master_target,
+                        )
                         if receipt_reason:
                             return BundleValidation(
                                 bundle,
@@ -1234,7 +1277,11 @@ class SessionFileService:
                 "last session sequence 不一致。",
                 manifest_last_sequence,
             )
-        return BundleValidation(bundle, True)
+        return BundleValidation(
+            bundle,
+            True,
+            last_sequence=manifest_last_sequence,
+        )
 
     def scan_recovery(
         self,
@@ -1582,6 +1629,13 @@ class SessionFileService:
     def _fault(self, stage: str, path: Path) -> None:
         if self._fault_injector is not None:
             self._fault_injector(stage, path)
+
+    @staticmethod
+    def _split_configured_target(target: str) -> tuple[str | None, str]:
+        if "/" in target:
+            device, line = target.split("/", 1)
+            return device or None, line
+        return None, target
 
     @staticmethod
     def _normalize_output(output_dir: str | Path, *, require_exists: bool) -> Path:
