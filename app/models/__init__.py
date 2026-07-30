@@ -21,6 +21,15 @@ from .protocol_execution import (
 )
 from .safety_state import SafetyState
 from .self_check import SelfCheckResult
+from .session import (
+    ProducerFence,
+    SessionDescriptor,
+    SessionPaths,
+    SessionRecordEnvelope,
+    SessionState,
+    SessionStatus,
+    SessionViewSnapshot,
+)
 
 __all__ = [
     "ActuationAction",
@@ -42,6 +51,13 @@ __all__ = [
     "ProtocolMetadata",
     "ProtocolTrial",
     "SafetyState",
+    "ProducerFence",
+    "SessionDescriptor",
+    "SessionPaths",
+    "SessionRecordEnvelope",
+    "SessionState",
+    "SessionStatus",
+    "SessionViewSnapshot",
     "SelfCheckResult",
     "Telemetry",
     "TriggerMode",

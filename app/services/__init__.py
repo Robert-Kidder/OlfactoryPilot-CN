@@ -22,6 +22,15 @@ from .protocol_executor import (  # noqa: F401
 from .protocol_parser import ProtocolParseError, parse_protocol_file  # noqa: F401
 from .real_hal import RealHAL  # noqa: F401
 from .safety_manager import SafetyManager  # noqa: F401
+from .session_file_service import (  # noqa: F401
+    BundleValidation,
+    RecoveryFinding,
+    SessionFileError,
+    SessionFileService,
+    SessionPreview,
+    sanitize_windows_component,
+    utf16_code_units,
+)
 from .shutdown_service import ShutdownService  # noqa: F401
 from .ttl_trigger_service import (  # noqa: F401
     TtlInputError,
@@ -58,10 +67,17 @@ __all__ = [
     "RealHAL",
     "SafetyManager",
     "ShutdownService",
+    "BundleValidation",
+    "RecoveryFinding",
+    "SessionFileError",
+    "SessionFileService",
+    "SessionPreview",
     "TtlInputError",
     "TtlPulse",
     "TtlTriggerConfig",
     "TtlTriggerService",
     "ValveService",
     "parse_protocol_file",
+    "sanitize_windows_component",
+    "utf16_code_units",
 ]

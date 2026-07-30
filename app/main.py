@@ -24,6 +24,52 @@ from app.workers import HardwareWorker
 BASE_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent.parent))
 DEFAULT_CONFIG = BASE_DIR / "config" / "default_config.json"
 DEFAULT_LOCAL_CONFIG = BASE_DIR / "config" / "local_config.json"
+SINGLE_INSTANCE_MUTEX_NAME = "Global\\OlfactoryPilot-CN.SessionOwner.v1"
+_LINGERING_INSTANCE_GUARDS = []
+
+
+class SingleInstanceGuard:
+    """Own the Windows process-wide application mutex for the GUI lifetime."""
+
+    def __init__(self, name: str = SINGLE_INSTANCE_MUTEX_NAME) -> None:
+        self._name = str(name)
+        self._handle = None
+        self._kernel32 = None
+
+    def acquire(self) -> bool:
+        if self._handle is not None:
+            return True
+        if os.name != "nt":
+            raise RuntimeError("OlfactoryPilot 单实例 mutex 仅支持 Windows。")
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateMutexW.argtypes = [
+            wintypes.LPVOID,
+            wintypes.BOOL,
+            wintypes.LPCWSTR,
+        ]
+        kernel32.CreateMutexW.restype = wintypes.HANDLE
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        handle = kernel32.CreateMutexW(None, False, self._name)
+        if not handle:
+            raise OSError(ctypes.get_last_error(), "无法创建应用单实例 mutex")
+        if ctypes.get_last_error() == 183:  # ERROR_ALREADY_EXISTS
+            kernel32.CloseHandle(handle)
+            return False
+        self._kernel32 = kernel32
+        self._handle = handle
+        return True
+
+    def release(self) -> None:
+        handle = self._handle
+        kernel32 = self._kernel32
+        self._handle = None
+        self._kernel32 = None
+        if handle is not None and kernel32 is not None:
+            kernel32.CloseHandle(handle)
 
 
 def load_config(config_path: Path) -> dict:
@@ -171,7 +217,7 @@ def build_application(
     if start_worker:
         controller.start_worker()
 
-    qt_app.aboutToQuit.connect(controller.shutdown)
+    qt_app.aboutToQuit.connect(controller.shutdown_and_teardown)
     return qt_app, window
 
 
@@ -228,20 +274,67 @@ def report_startup_error(exc: Exception) -> None:
         pass
 
 
-def main(argv: list[str] | None = None) -> int:
+def report_duplicate_instance() -> None:
+    message = "OlfactoryPilot 已在运行。为保护活动会话与硬件，本次启动已取消。"
     try:
-        args = parse_args(argv or sys.argv[1:])
+        sys.stderr.write(message + "\n")
+    except Exception:
+        pass
+    try:
+        app = QApplication.instance() or QApplication(sys.argv)
+        QMessageBox.information(
+            None,
+            "OlfactoryPilot 已在运行",
+            message,
+        )
+        app.processEvents()
+    except Exception:
+        pass
+
+
+def main(argv: list[str] | None = None) -> int:
+    guard = SingleInstanceGuard()
+    acquired = False
+    controller = None
+    try:
+        acquired = guard.acquire()
+        if not acquired:
+            report_duplicate_instance()
+            return 2
+        args = parse_args(sys.argv[1:] if argv is None else argv)
         qt_app, window = build_application(
             args.config,
             start_worker=not args.no_worker,
             simulation=args.simulation,
             local_config_path=args.local_config,
         )
+        controller = getattr(window, "controller", None)
+        window.show()
+        result = qt_app.exec()
+        return result
     except Exception as exc:
         report_startup_error(exc)
         return 1
-    window.show()
-    return qt_app.exec()
+    finally:
+        if acquired:
+            retain_guard = False
+            if controller is not None:
+                lifecycle_stopped = getattr(
+                    controller,
+                    "lifecycle_stopped",
+                    None,
+                )
+                if not callable(lifecycle_stopped):
+                    retain_guard = True
+                else:
+                    try:
+                        retain_guard = not bool(lifecycle_stopped())
+                    except Exception:
+                        retain_guard = True
+            if retain_guard:
+                _LINGERING_INSTANCE_GUARDS.append(guard)
+            else:
+                guard.release()
 
 
 if __name__ == "__main__":

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import heapq
+import math
 import threading
 import time
 from collections import deque
@@ -39,6 +40,10 @@ class InterlockSnapshot:
     ttl_input_ready: bool = False
     has_protocol: bool = False
     device_lease: str = "idle"
+    recording_ready: bool = False
+    recorder_failed: bool = False
+    recorder_generation: int = 0
+    session_closing: bool = False
 
     def unsafe_reason(self) -> str:
         if not self.connected:
@@ -66,6 +71,24 @@ class InterlockSnapshot:
     def command_rejection_reason(self, command: ActuationCommand) -> str:
         if command.category == ActuationCategory.SAFETY:
             return "" if command.action == ActuationAction.CLOSE else "安全命令只能关闭输出。"
+        if (
+            (
+                command.category == ActuationCategory.NORMAL
+                or (
+                    command.category == ActuationCategory.WARMUP
+                    and command.action == ActuationAction.OPEN
+                )
+            )
+            and not self.recording_ready
+        ):
+            return "会话尚未进入记录就绪状态，已拒绝协议开阀动作。"
+        if self.recorder_failed:
+            return (
+                "会话记录器已失败，已拒绝非安全动作；"
+                "请执行安全停止并成功建立新会话。"
+            )
+        if self.session_closing:
+            return "会话正在关闭，已拒绝非安全动作。"
         unsafe = self.unsafe_reason()
         if unsafe and command.action == ActuationAction.OPEN:
             return unsafe
@@ -130,7 +153,8 @@ class ActuationInterlockIngress:
                 previous_state=self._snapshot.safety_state,
                 hardware_state=hardware_state,
             )
-            candidate = InterlockSnapshot(
+            candidate = replace(
+                self._snapshot,
                 connected=bool(connected),
                 hardware_ready=bool(hardware_ready),
                 # These fields are owned by flow/protocol producers.  Preserve
@@ -181,6 +205,19 @@ class ActuationInterlockIngress:
             if self._snapshot.unsafe_reason():
                 return False
             self._unsafe_latched = False
+            return True
+
+    def clear_recorder_failure(self, generation: int) -> bool:
+        with self._lock:
+            if (
+                not self._snapshot.recording_ready
+                or self._snapshot.recorder_generation != int(generation)
+            ):
+                return False
+            if self._snapshot.unsafe_reason():
+                return False
+            self._snapshot = replace(self._snapshot, recorder_failed=False)
+            self._generation += 1
             return True
 
 
@@ -274,6 +311,154 @@ class ActuationWorker(QThread):
         self._pending_safe_transition: tuple[str, dict[str, Any]] | None = None
         self._safe_transition_close_pending: set[str] = set()
         self._unsafe_close_generation: int | None = None
+        self._session_recorder = None
+        self._session_recorder_sequence = 0
+        self._session_recorder_generation = 0
+        self._recorder_failure_notified = False
+
+    def set_session_recorder(self, recorder) -> bool:
+        return self.bind_session_recorder(recorder, generation=0)
+
+    def bind_session_recorder(
+        self,
+        recorder,
+        *,
+        generation: int,
+        timeout_ms: int = 1000,
+    ) -> bool:
+        ack = threading.Event()
+        cancelled = threading.Event()
+        result: dict[str, bool] = {}
+        payload = {
+            "recorder": recorder,
+            "generation": int(generation),
+            "ack": ack,
+            "cancelled": cancelled,
+            "result": result,
+        }
+        self._post_message("recorder_bind", payload)
+        if not self.isRunning():
+            self.process_ready()
+        if not ack.wait(max(1, int(timeout_ms)) / 1000.0):
+            with self._condition:
+                if not ack.is_set():
+                    cancelled.set()
+                    for index, (kind, queued_payload) in enumerate(self._messages):
+                        if kind == "recorder_bind" and queued_payload is payload:
+                            del self._messages[index]
+                            break
+                    result["accepted"] = False
+                    ack.set()
+        return bool(result.get("accepted"))
+
+    def post_recorder_failed(self, message: str) -> None:
+        with self._condition:
+            if self._recorder_failure_notified:
+                return
+            self._recorder_failure_notified = True
+        self._post_message("recorder_failed", {"message": str(message)})
+
+    def post_recorder_ready(self, generation: int) -> None:
+        self._post_message("recorder_ready", {"generation": int(generation)})
+
+    def post_recorder_fence(
+        self,
+        *,
+        wait: bool = False,
+        timeout_ms: int = 1000,
+    ) -> bool:
+        ack = threading.Event() if wait else None
+        result: dict[str, bool] = {}
+        self._post_message("recorder_fence", {"ack": ack, "result": result})
+        if not self.isRunning() and self._writer_hal() is None:
+            self.process_ready()
+        if ack is None:
+            return True
+        if not ack.wait(max(1, int(timeout_ms)) / 1000.0):
+            return False
+        return bool(result.get("accepted"))
+
+    def _emit_receipt(self, receipt: ActuationReceipt) -> None:
+        recorder = self._session_recorder
+        if recorder is not None:
+            self._session_recorder_sequence += 1
+            if not recorder.post_receipt(
+                receipt,
+                producer_sequence=self._session_recorder_sequence,
+            ):
+                self.post_recorder_failed(
+                    "动作回执无法进入会话记录队列，已请求安全阻断。"
+                )
+        self.receipt_ready.emit(receipt)
+
+    def _emit_executor_result(self, result) -> None:
+        recorder = self._session_recorder
+        if recorder is not None:
+            for event in result.events:
+                self._session_recorder_sequence += 1
+                if event.event in {
+                    "actuation_receipt",
+                    "quality_acknowledged",
+                    "quality_ack_rejected",
+                }:
+                    accepted = recorder.post_quality_event(
+                        event=(
+                            "actuation_quality"
+                            if event.event == "actuation_receipt"
+                            else event.event
+                        ),
+                        snapshot=self.protocol_state.quality,
+                        producer_sequence=self._session_recorder_sequence,
+                        command_id=event.command_id,
+                        message=event.message,
+                        timestamp=event.timestamp,
+                        monotonic_ns=(
+                            event.monotonic_ns
+                            if event.monotonic_ns is not None
+                            else event.actual_ns
+                        ),
+                        transitions=tuple(
+                            {
+                                "stream": stream,
+                                "direction": direction,
+                                "p95_ms": p95_ms,
+                            }
+                            for stream, direction, p95_ms in event.quality_transitions
+                        ),
+                    )
+                else:
+                    accepted = recorder.post_protocol_event(
+                        event,
+                        producer_sequence=self._session_recorder_sequence,
+                    )
+                if not accepted:
+                    self.post_recorder_failed(
+                        "协议/质量事件无法进入会话记录队列，已请求安全阻断。"
+                    )
+                    break
+        self.executor_result_ready.emit(result)
+
+    def _emit_recorder_fence(self) -> bool:
+        recorder = self._session_recorder
+        if recorder is None:
+            return False
+        final_quality = self.metrics.snapshot()
+        accepted = bool(
+            recorder.post_fence(
+                "actuation",
+                producer_sequence=self._session_recorder_sequence,
+                final_payload={"quality": final_quality},
+            )
+        )
+        if accepted:
+            self._session_recorder = None
+            self._session_recorder_generation = 0
+        return accepted
+
+    def finalize_recorder_after_owner_stopped(self) -> bool:
+        if self.isRunning() or not self._do_handed_off:
+            return False
+        return self._emit_recorder_fence()
 
     @property
     def emergency_queue_size(self) -> int:
@@ -311,7 +496,7 @@ class ActuationWorker(QThread):
                     if command.action == ActuationAction.CLOSE:
                         self.protocol_state.possibly_open_valves.add(command.valve)
                     self.invalidate_execution(reason=reason)
-                    self.receipt_ready.emit(
+                    self._emit_receipt(
                         ActuationReceipt.from_write(
                             command=command,
                             started_ns=None,
@@ -463,6 +648,11 @@ class ActuationWorker(QThread):
     def _reject_stopped_message(self, kind: str, payload: dict[str, Any]) -> None:
         """Give correlated intents a terminal result instead of replaying them after restart."""
         message = "动作线程已停止接单，请在硬件恢复后重新发起请求。"
+        if kind in {"recorder_bind", "recorder_fence"}:
+            payload["result"]["accepted"] = False
+            if payload.get("ack") is not None:
+                payload["ack"].set()
+            return
         if kind == "start":
             current_epoch = int(self.protocol_state.execution_epoch)
             self.start_result_ready.emit(
@@ -658,14 +848,14 @@ class ActuationWorker(QThread):
                     self._condition.notify_all()
                 self._safe_transition_close_pending.discard(receipt.command_id)
             self._handle_plan_receipt(receipt)
-            self.receipt_ready.emit(receipt)
+            self._emit_receipt(receipt)
             self._maybe_finalize_safe_transition()
             self._retire_command(receipt.command_id)
             return
 
         if receipt.category != ActuationCategory.NORMAL:
             self._handle_plan_receipt(receipt)
-            self.receipt_ready.emit(receipt)
+            self._emit_receipt(receipt)
             self._retire_command(receipt.command_id)
             return
 
@@ -685,7 +875,7 @@ class ActuationWorker(QThread):
                 self.submit_emergency_close(receipt.valve, reason="收到陈旧成功开阀回执，已请求补偿关闭。")
             elif receipt.action == ActuationAction.CLOSE and receipt.result == ActuationResult.SUCCESS:
                 self._confirm_closed(receipt.valve)
-            self.receipt_ready.emit(replace(receipt, stale=True))
+            self._emit_receipt(replace(receipt, stale=True))
             self._retire_command(receipt.command_id)
             return
 
@@ -732,7 +922,7 @@ class ActuationWorker(QThread):
                 self.protocol_state.quality = update.snapshot
                 if update.severe:
                     self._block("关闭动作时序严重超限；阀门已确认关闭，请显式重新布防。")
-        self.receipt_ready.emit(receipt)
+        self._emit_receipt(receipt)
         self._retire_command(receipt.command_id)
 
     def invalidate_execution(self, *, reason: str, close_all_configured: bool = False) -> None:
@@ -786,7 +976,7 @@ class ActuationWorker(QThread):
                 message="TTL 输入布防返回失败，已失效当前布防并阻断协议。",
             )
             result = self.protocol_executor._result_with_events([event])
-            self.executor_result_ready.emit(result)
+            self._emit_executor_result(result)
 
     def request_ttl_disarm(self) -> None:
         self._pending_ttl_arm_epoch = None
@@ -829,6 +1019,7 @@ class ActuationWorker(QThread):
                         timeout = max(0.0, remaining_ns / 1_000_000_000)
                     self._condition.wait(timeout=timeout)
         finally:
+            self._emit_recorder_fence()
             released = True
             if hal is not None:
                 released = hal.release_do_output() is True
@@ -998,10 +1189,15 @@ class ActuationWorker(QThread):
                 "mode",
                 "pause",
                 "readiness",
+                "recorder_bind",
+                "recorder_failed",
+                "recorder_ready",
                 "start",
                 "stop",
             }
             for index, message in enumerate(self._messages):
+                if message[0] in {"recorder_bind", "recorder_fence"}:
+                    break
                 if message[0] in priority_message_kinds:
                     del self._messages[index]
                     return message
@@ -1016,6 +1212,14 @@ class ActuationWorker(QThread):
             if self._normal_heap and self._normal_heap[0][0] <= now_ns:
                 return heapq.heappop(self._normal_heap)[3]
             if self._messages:
+                if self._messages[0][0] == "recorder_fence" and (
+                    self._normal_heap
+                    or self._deadline_heap
+                    or self._emergency
+                    or self._plan_contexts
+                    or self._pending_safe_transition is not None
+                ):
+                    return None
                 kind, payload = self._messages.popleft()
                 if kind != "ai_batch":
                     return kind, payload
@@ -1037,6 +1241,61 @@ class ActuationWorker(QThread):
             return None
 
     def _handle_message(self, kind: str, payload: dict[str, Any]) -> None:
+        if kind == "recorder_bind":
+            with self._condition:
+                accepted = (
+                    not payload["cancelled"].is_set()
+                    and self._session_recorder is None
+                    and self.protocol_state.active_valve is None
+                    and not self.protocol_state.possibly_open_valves
+                )
+                if accepted:
+                    self._session_recorder = payload["recorder"]
+                    self._session_recorder_sequence = 0
+                    self._session_recorder_generation = int(payload["generation"])
+                    self._recorder_failure_notified = False
+                payload["result"]["accepted"] = accepted
+                payload["ack"].set()
+            return
+        if kind == "recorder_fence":
+            accepted = self._emit_recorder_fence()
+            if payload.get("ack") is not None:
+                payload["result"]["accepted"] = accepted
+                payload["ack"].set()
+            return
+        if kind == "recorder_ready":
+            if (
+                self.protocol_state.active_valve is None
+                and not self.protocol_state.possibly_open_valves
+            ):
+                self.interlock.clear_recorder_failure(payload["generation"])
+            return
+        if kind == "recorder_failed":
+            current = self.interlock.read()[1]
+            self.interlock.update(
+                recording_ready=False,
+                recorder_failed=True,
+                recorder_generation=current.recorder_generation,
+            )
+            self.invalidate_execution(
+                reason=payload["message"],
+                close_all_configured=True,
+            )
+            if self.protocol_executor is not None:
+                event = self.protocol_executor._event(
+                    "recording_failed",
+                    self._wall_clock(),
+                    safety_state=self._current_readiness().safety_state,
+                    result="blocked",
+                    message=payload["message"],
+                )
+                self._emit_executor_result(
+                    self.protocol_executor._result_with_events([event])
+                )
+                self._emit_snapshot()
+            self._session_recorder = None
+            self._session_recorder_generation = 0
+            return
         if kind == "valve_plan":
             self._begin_valve_plan(**payload)
             return
@@ -1083,24 +1342,37 @@ class ActuationWorker(QThread):
             self._begin_safe_transition(kind, payload)
             return
         if kind == "start":
-            if (
-                not readiness.rejection_reason(has_protocol=bool(payload.get("document") or executor.state.document))
-                and self.protocol_state.active_valve is None
-                and not self.protocol_state.possibly_open_valves
-            ):
-                self.interlock.clear_unsafe_latch()
             previous_epoch = executor.state.execution_epoch
-            result = executor.start(
-                payload["document"],
-                readiness=readiness,
-                timestamp=self._wall_clock(),
-            )
-            if (
-                executor.state.execution_epoch != previous_epoch
-                and executor.state.status == ProtocolExecutionStatus.WAITING_TRIGGER
-            ):
-                self.metrics.reset()
-                executor.state.quality = self.metrics.snapshot()
+            recording_ready = self.interlock.read()[1].recording_ready
+            if not recording_ready:
+                result = executor._rejected(
+                    "start_rejected",
+                    self._wall_clock(),
+                    safety_state=readiness.safety_state,
+                    message="会话尚未进入记录就绪状态，已拒绝协议启动。",
+                )
+            else:
+                if (
+                    not readiness.rejection_reason(
+                        has_protocol=bool(
+                            payload.get("document") or executor.state.document
+                        )
+                    )
+                    and self.protocol_state.active_valve is None
+                    and not self.protocol_state.possibly_open_valves
+                ):
+                    self.interlock.clear_unsafe_latch()
+                result = executor.start(
+                    payload["document"],
+                    readiness=readiness,
+                    timestamp=self._wall_clock(),
+                )
+                if (
+                    executor.state.execution_epoch != previous_epoch
+                    and executor.state.status == ProtocolExecutionStatus.WAITING_TRIGGER
+                ):
+                    self.metrics.reset()
+                    executor.state.quality = self.metrics.snapshot()
         elif kind == "manual_trigger":
             result = executor.accept_trigger(
                 "manual",
@@ -1111,21 +1383,67 @@ class ActuationWorker(QThread):
                 self._schedule_breath_timeout(readiness)
         elif kind == "ttl_pulse":
             pulse = payload["pulse"]
-            result = executor.accept_trigger(
-                "ttl",
-                readiness=readiness,
-                timestamp=pulse.timestamp,
-                captured_epoch=pulse.arm_epoch,
-                sequence=pulse.sequence,
+            timestamp = getattr(pulse, "timestamp", None)
+            arm_epoch = getattr(pulse, "arm_epoch", None)
+            pulse_sequence = getattr(pulse, "sequence", None)
+            monotonic_ns = getattr(pulse, "monotonic_ns", None)
+            valid_timestamp = (
+                isinstance(timestamp, int | float)
+                and not isinstance(timestamp, bool)
+                and math.isfinite(float(timestamp))
             )
-            if any(event.event == "trigger_accepted" for event in result.events):
-                self._schedule_breath_timeout(
-                    readiness,
-                    origin_ns=(
-                        int(pulse.monotonic_ns)
-                        if int(pulse.monotonic_ns) > 0
+            valid_identity = (
+                isinstance(arm_epoch, int)
+                and not isinstance(arm_epoch, bool)
+                and arm_epoch > 0
+                and isinstance(pulse_sequence, int)
+                and not isinstance(pulse_sequence, bool)
+                and pulse_sequence > 0
+                and isinstance(monotonic_ns, int)
+                and not isinstance(monotonic_ns, bool)
+                and monotonic_ns > 0
+            )
+            if not valid_timestamp or not valid_identity:
+                result = executor._rejected(
+                    "ttl_pulse_rejected",
+                    self._wall_clock(),
+                    safety_state=readiness.safety_state,
+                    message=(
+                        "TTL pulse 的 timestamp/epoch/sequence/monotonic "
+                        "identity 无效，已拒绝且未推进 trial。"
+                    ),
+                    trigger_source="ttl",
+                    pulse_sequence=(
+                        pulse_sequence
+                        if isinstance(pulse_sequence, int)
+                        and not isinstance(pulse_sequence, bool)
+                        and pulse_sequence > 0
                         else None
                     ),
+                )
+            else:
+                result = executor.accept_trigger(
+                    "ttl",
+                    readiness=readiness,
+                    timestamp=float(timestamp),
+                    captured_epoch=arm_epoch,
+                    sequence=pulse_sequence,
+                )
+                result = replace(
+                    result,
+                    events=[
+                        replace(event, monotonic_ns=monotonic_ns)
+                        if event.trigger_source == "ttl"
+                        else event
+                        for event in result.events
+                    ],
+                )
+            if valid_identity and any(
+                event.event == "trigger_accepted" for event in result.events
+            ):
+                self._schedule_breath_timeout(
+                    readiness,
+                    origin_ns=monotonic_ns,
                 )
         elif kind == "ai_batch":
             generation = self.interlock.read()[0]
@@ -1275,7 +1593,7 @@ class ActuationWorker(QThread):
                     message=(result.events[-1].message if result.events else ""),
                 )
             )
-        self.executor_result_ready.emit(result)
+        self._emit_executor_result(result)
         self._emit_snapshot()
 
     def _begin_safe_transition(self, kind: str, payload: dict[str, Any]) -> None:
@@ -1311,7 +1629,7 @@ class ActuationWorker(QThread):
                     result="rejected",
                     message="另一安全状态转换尚未完成，该请求已拒绝。",
                 )
-                self.executor_result_ready.emit(
+                self._emit_executor_result(
                     self.protocol_executor._result_with_events([event])
                 )
                 self._emit_snapshot()
@@ -1405,7 +1723,7 @@ class ActuationWorker(QThread):
             )
         self.protocol_state = self.protocol_executor.state
         self._sync_ttl_request()
-        self.executor_result_ready.emit(result)
+        self._emit_executor_result(result)
         self._emit_snapshot()
 
     def _emit_snapshot(self) -> None:
@@ -1694,7 +2012,7 @@ class ActuationWorker(QThread):
             and command.execution_epoch != self.protocol_state.execution_epoch
         ):
             self._clear_cancelled_pending(command)
-            self.receipt_ready.emit(
+            self._emit_receipt(
                 ActuationReceipt.from_write(
                     command=command,
                     started_ns=None,
@@ -1714,12 +2032,18 @@ class ActuationWorker(QThread):
             or unsafe_latched
             or rejection
         )
-        rejected_manual_close = (
+        rejected_close = (
             command.action == ActuationAction.CLOSE
-            and command.category in {ActuationCategory.MANUAL, ActuationCategory.PRETEST}
+            and (
+                not snapshot.recording_ready
+                or snapshot.recorder_failed
+                or snapshot.session_closing
+                or command.category
+                in {ActuationCategory.MANUAL, ActuationCategory.PRETEST}
+            )
             and bool(rejection)
         )
-        if rejected_open or rejected_manual_close:
+        if rejected_open or rejected_close:
             self._clear_cancelled_pending(command)
             message = rejection or "安全联锁已锁存，取消开阀。"
             if command.category == ActuationCategory.NORMAL:
@@ -1733,7 +2057,17 @@ class ActuationWorker(QThread):
                 message=message,
             )
             self._handle_plan_receipt(cancelled)
-            self.receipt_ready.emit(cancelled)
+            self._emit_receipt(cancelled)
+            if (
+                (snapshot.recorder_failed or snapshot.session_closing)
+                and command.category == ActuationCategory.NORMAL
+                and command.action == ActuationAction.CLOSE
+            ):
+                self.protocol_state.possibly_open_valves.add(command.valve)
+                self.submit_emergency_close(
+                    command.valve,
+                    reason="会话关闭/记录器失败后普通关闭已升级为紧急安全关闭。",
+                )
             return
 
         try:
@@ -1770,7 +2104,7 @@ class ActuationWorker(QThread):
                     command.valve,
                     reason=self.protocol_state.quality_block_reason,
                 )
-            self.receipt_ready.emit(uncertain)
+            self._emit_receipt(uncertain)
             self._remember_receipt(uncertain)
             self._retire_command(command.command_id)
             return
@@ -1896,8 +2230,8 @@ class ActuationWorker(QThread):
                 reason="正常关闭失败或状态不确定，已立即请求补偿关闭。",
             )
         self._sync_ttl_request()
-        self.executor_result_ready.emit(result)
-        self.receipt_ready.emit(receipt)
+        self._emit_executor_result(result)
+        self._emit_receipt(receipt)
 
     def _quality_event(self, receipt: ActuationReceipt, update) -> ProtocolGateEvent:
         transition_message = ""
@@ -1943,6 +2277,14 @@ class ActuationWorker(QThread):
             warning=bool(update.warning_transitions or quality.open.warning or quality.close.warning or quality.combined.warning),
             severe=bool(update.severe),
             measurement_point=receipt.measurement_point,
+            quality_transitions=tuple(
+                (
+                    transition.stream,
+                    "entered" if transition.active else "recovered",
+                    float(transition.p95_ms),
+                )
+                for transition in update.warning_transitions
+            ),
         )
 
     def _enqueue_emergency_locked(self, command: ActuationCommand) -> None:
@@ -2006,7 +2348,7 @@ class ActuationWorker(QThread):
     def _settle_cancelled_receipts(self, receipts: list[ActuationReceipt]) -> None:
         for receipt in receipts:
             self._handle_plan_receipt(receipt)
-            self.receipt_ready.emit(receipt)
+            self._emit_receipt(receipt)
             self._retire_command(receipt.command_id)
 
     def _reject_queued_messages(self, messages: list[tuple[str, dict[str, Any]]]) -> None:

@@ -6,6 +6,7 @@ import threading
 import time
 from collections import deque
 from collections.abc import Callable
+from typing import Any
 
 from PySide6.QtCore import QThread, Signal
 
@@ -76,7 +77,10 @@ class HardwareWorker(QThread):
         self._ai_release_attempted = False
         self._ai_release_success = False
         self._ttl_control_lock = threading.Lock()
-        self._ttl_control_queue: deque[tuple[str, int | None]] = deque()
+        self._ttl_control_queue: deque[tuple[str, Any]] = deque()
+        self._session_recorder = None
+        self._session_recorder_sequence = 0
+        self._session_recorder_generation = 0
 
     @property
     def is_connected(self) -> bool:
@@ -112,6 +116,7 @@ class HardwareWorker(QThread):
             # QThread.msleep(1) rounds to the ~15.6 ms system timer quantum.
             time.sleep(max(1, sleep_ms) / 1000.0)
         self._apply_ttl_disarm()
+        self._emit_session_fence()
         self._release_ai_owned_resources(final=True)
         self.status_message.emit("硬件线程已停止")
 
@@ -134,6 +139,50 @@ class HardwareWorker(QThread):
     def set_actuation_sink(self, sink, *, interlock_ingress=None) -> None:
         self._actuation_sink = sink
         self._interlock_ingress = interlock_ingress
+
+    def set_session_recorder(self, recorder) -> bool:
+        return self.bind_session_recorder(recorder, generation=0)
+
+    def bind_session_recorder(
+        self,
+        recorder,
+        *,
+        generation: int,
+        timeout_ms: int = 1000,
+    ) -> bool:
+        ack = threading.Event()
+        cancelled = threading.Event()
+        result: dict[str, bool] = {}
+        payload = {
+            "recorder": recorder,
+            "generation": int(generation),
+            "ack": ack,
+            "cancelled": cancelled,
+            "result": result,
+        }
+        with self._ttl_control_lock:
+            self._ttl_control_queue.append(("session_bind", payload))
+        if not self.isRunning():
+            self._process_ttl_control()
+        if not ack.wait(max(1, int(timeout_ms)) / 1000.0):
+            with self._ttl_control_lock:
+                if not ack.is_set():
+                    cancelled.set()
+                    for index, (action, queued_payload) in enumerate(
+                        self._ttl_control_queue
+                    ):
+                        if action == "session_bind" and queued_payload is payload:
+                            del self._ttl_control_queue[index]
+                            break
+                    result["accepted"] = False
+                    ack.set()
+        return bool(result.get("accepted"))
+
+    def post_session_fence(self) -> None:
+        with self._ttl_control_lock:
+            self._ttl_control_queue.append(("session_fence", None))
+        if not self.isRunning():
+            self._process_ttl_control()
 
     def set_self_check_coordinator(
         self,
@@ -209,12 +258,28 @@ class HardwareWorker(QThread):
             with self._ttl_control_lock:
                 if not self._ttl_control_queue:
                     return
-                action, arm_epoch = self._ttl_control_queue.popleft()
+                action, payload = self._ttl_control_queue.popleft()
             if action == "arm":
-                assert arm_epoch is not None
-                self._apply_ttl_arm(arm_epoch)
-            else:
+                assert payload is not None
+                self._apply_ttl_arm(payload)
+            elif action == "disarm":
                 self._apply_ttl_disarm()
+            elif action == "session_fence":
+                self._emit_session_fence()
+            else:
+                with self._ttl_control_lock:
+                    accepted = (
+                        not payload["cancelled"].is_set()
+                        and self._session_recorder is None
+                    )
+                    if accepted:
+                        self._session_recorder = payload["recorder"]
+                        self._session_recorder_sequence = 0
+                        self._session_recorder_generation = int(
+                            payload["generation"]
+                        )
+                    payload["result"]["accepted"] = accepted
+                    payload["ack"].set()
 
     def arm_ttl(self, *, arm_epoch: int) -> None:
         """Synchronous owner-local helper retained for deterministic tests."""
@@ -483,6 +548,7 @@ class HardwareWorker(QThread):
                 batch = BreathSampleBatch.from_frames(tuple(breath_frames))
                 if self._actuation_sink is not None:
                     self._actuation_sink.post_ai_batch(batch)
+                self._record_raw_batch(batch)
                 self.breath_samples.emit(batch)
             for pulse in pulses:
                 if self._actuation_sink is not None:
@@ -512,6 +578,29 @@ class HardwareWorker(QThread):
                 self._actuation_sink.post_input_error(message)
             LOG.exception(message)
             self.ttl_input_error.emit(message)
+
+    def _record_raw_batch(self, batch: BreathSampleBatch) -> None:
+        with self._ttl_control_lock:
+            recorder = self._session_recorder
+            if recorder is None:
+                return
+            self._session_recorder_sequence += 1
+            sequence = self._session_recorder_sequence
+        if not recorder.post_raw_batch(batch, producer_sequence=sequence):
+            sink = self._actuation_sink
+            if sink is not None:
+                sink.post_recorder_failed(
+                    "呼吸原始 batch 无法进入会话记录队列，已请求安全阻断。"
+                )
+
+    def _emit_session_fence(self) -> None:
+        with self._ttl_control_lock:
+            recorder = self._session_recorder
+            sequence = self._session_recorder_sequence
+            self._session_recorder = None
+            self._session_recorder_generation = 0
+        if recorder is not None:
+            recorder.post_fence("hardware", producer_sequence=sequence)
 
     def _release_ai_owned_resources(self, *, final: bool) -> bool:
         try:

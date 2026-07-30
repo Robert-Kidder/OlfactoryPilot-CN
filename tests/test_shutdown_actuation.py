@@ -24,6 +24,12 @@ class _Hardware:
         self.order.append("hardware_stop")
 
 
+class _FlushFailingHardware(_Hardware):
+    def flush_logs(self) -> None:
+        self.order.append("flush")
+        raise OSError("synthetic recorder disk failure")
+
+
 class _Actuation:
     def __init__(self, order: list[str], *, close=True, stopped=True, fallback=True) -> None:
         self.order = order
@@ -137,3 +143,33 @@ def test_shutdown_is_unsafe_when_ai_worker_does_not_stop(tmp_path) -> None:
     assert event["result"] == "unsafe"
     assert event["valves_closed"] is True
     assert "AI" in event["error"]
+
+
+def test_shutdown_receipts_and_owner_release_continue_after_log_failure(
+    tmp_path,
+) -> None:
+    order = []
+    service = ShutdownService(
+        state=_state(),
+        worker=_FlushFailingHardware(order),
+        actuation_worker=_Actuation(order),
+        flow_worker=_Flow(order),
+        retry_limit=0,
+        record_path=tmp_path / "disk-failed.json",
+        actuation_timeout_ms=321,
+        emergency_close_timeout_ms=123,
+    )
+
+    event = service.shutdown(source="recorder-failed")
+
+    assert event["result"] == "unsafe"
+    assert event["valves_closed"] is True
+    assert "flush" in event["error"]
+    assert order == [
+        "emergency:123",
+        "actuation_stop:321",
+        "heaters",
+        "flush",
+        "ai_release",
+        "serial_stop:321",
+    ]

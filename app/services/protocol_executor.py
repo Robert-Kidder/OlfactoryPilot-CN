@@ -1038,6 +1038,7 @@ class ProtocolExecutor:
                     self._event(
                         "open_requested",
                         timestamp,
+                        monotonic_ns=expected_open_ns,
                         safety_state=safety_state,
                         gate_state=gate_state,
                         sample_value=sample_value,
@@ -1059,6 +1060,7 @@ class ProtocolExecutor:
                 self._event(
                     "exhale_trigger",
                     timestamp,
+                    monotonic_ns=expected_open_ns,
                     safety_state=safety_state,
                     gate_state=gate_state,
                     sample_value=sample_value,
@@ -1424,6 +1426,7 @@ class ProtocolExecutor:
         event: str,
         timestamp: float,
         *,
+        monotonic_ns: int | None = None,
         safety_state: str | None = None,
         gate_state: str | None = None,
         sample_value: float | None = None,
@@ -1440,6 +1443,7 @@ class ProtocolExecutor:
         return ProtocolGateEvent(
             event=event,
             timestamp=timestamp,
+            monotonic_ns=monotonic_ns,
             trial_id=trial.trial_id if trial else None,
             trial_index=self.state.trial_index if trial else None,
             valve=trial.valve if trial else self.state.active_valve,

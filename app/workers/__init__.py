@@ -5,6 +5,14 @@ from .actuation_worker import (
 )
 from .flow_worker import FlowCommand, FlowCommandResult, FlowWorker
 from .hardware_worker import HardwareWorker
+from .session_writer import (
+    RecorderReadinessLatch,
+    SessionFinalizationResult,
+    SessionRecorderIngress,
+    SessionWriterConfig,
+    SessionWriterFailure,
+    SessionWriterWorker,
+)
 
 __all__ = [
     "ActuationInterlockIngress",
@@ -14,4 +22,10 @@ __all__ = [
     "FlowCommandResult",
     "FlowWorker",
     "InterlockSnapshot",
+    "RecorderReadinessLatch",
+    "SessionFinalizationResult",
+    "SessionRecorderIngress",
+    "SessionWriterConfig",
+    "SessionWriterFailure",
+    "SessionWriterWorker",
 ]

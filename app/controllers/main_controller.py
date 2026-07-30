@@ -7,6 +7,8 @@ import subprocess
 import sys
 import threading
 import time
+from dataclasses import replace
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -20,6 +22,7 @@ from app.models import (
     ProtocolExecutionStatus,
     SafetyState,
 )
+from app.models.session import SessionState, SessionStatus, SessionViewSnapshot
 from app.services import (
     ActuationDOAdapter,
     ActuationMetrics,
@@ -39,6 +42,7 @@ from app.services import (
     ValveService,
     parse_protocol_file,
 )
+from app.services.session_file_service import SessionFileError, SessionFileService
 from app.services.valve_service import ValveWritePlan
 from app.workers import (
     ActuationInterlockIngress,
@@ -47,6 +51,12 @@ from app.workers import (
     HardwareWorker,
     InterlockSnapshot,
 )
+from app.workers.session_writer import (
+    RecorderReadinessLatch,
+    SessionRecorderIngress,
+    SessionWriterConfig,
+    SessionWriterWorker,
+)
 
 if TYPE_CHECKING:
     from app.views import MainWindow
@@ -54,9 +64,40 @@ if TYPE_CHECKING:
 LOG = logging.getLogger(__name__)
 
 
+class RecoveryScanWorker(QThread):
+    completed = Signal(object, object, object)
+
+    def __init__(
+        self,
+        service: SessionFileService,
+        output_path: Path,
+        request_id: int,
+    ) -> None:
+        super().__init__()
+        self._service = service
+        self._output_path = output_path
+        self._request_id = request_id
+        self._cancel_event = threading.Event()
+
+    def cancel(self) -> None:
+        self._cancel_event.set()
+        self.requestInterruption()
+
+    def run(self) -> None:
+        try:
+            result = self._service.scan_recovery(
+                self._output_path,
+                cancel_event=self._cancel_event,
+            )
+        except Exception as exc:  # pragma: no cover - defensive thread boundary
+            result = exc
+        self.completed.emit(self._request_id, self._output_path, result)
+
+
 class MainController(QObject):
     _pretest_sequence_completed = Signal(str, list, object, bool, str)
     _startup_zero_completed = Signal(object)
+    _session_finalized = Signal(object)
 
     def __init__(
         self,
@@ -182,6 +223,30 @@ class MainController(QObject):
         self._protocol_lease_epoch: int | None = None
         self._protocol_start_pending = False
         self._protocol_master_prepare_pending = False
+        self.session_state = SessionState()
+        self.session_file_service = SessionFileService()
+        self.recorder_readiness = RecorderReadinessLatch()
+        self.session_writer: SessionWriterWorker | None = None
+        self.session_ingress: SessionRecorderIngress | None = None
+        self._session_generation = 0
+        self._session_controller_sequence = 0
+        self._session_controller_fenced = False
+        self._session_protocol_document = None
+        self._session_close_pending_reason = ""
+        self._session_finalize_started = False
+        self._session_global_stop_in_progress = False
+        self._session_finalize_event = threading.Event()
+        self._session_finalize_result = None
+        self._session_finalize_thread: threading.Thread | None = None
+        self._pretest_thread: threading.Thread | None = None
+        self._session_preview = None
+        self._session_display_message = ""
+        self._session_recovery_messages: tuple[str, ...] = ()
+        self._last_recovery_output: Path | None = None
+        self._last_recovery_location: Path | None = None
+        self._recovery_scan_worker: RecoveryScanWorker | None = None
+        self._recovery_scan_request = 0
+        self._pending_recovery_output: Path | None = None
         previous_shutdown = state.last_shutdown_event or {}
         self._unsafe_shutdown_latched = bool(
             previous_shutdown and previous_shutdown.get("result") != "success"
@@ -222,6 +287,7 @@ class MainController(QObject):
         )
         self._pretest_sequence_completed.connect(self._handle_pretest_sequence_completed)
         self._startup_zero_completed.connect(self._handle_startup_zero_completed)
+        self._session_finalized.connect(self._handle_session_finalized)
         self._breath_logger = logging.getLogger("breath_viz")
         self._protocol_tick_timer = QTimer(self)
         self._protocol_tick_timer.setInterval(50)
@@ -244,6 +310,7 @@ class MainController(QObject):
             )
         )
         self._refresh_toolbar_state()
+        self._render_session_snapshot()
         if hasattr(self.view, "pretest_view"):
             self.view.pretest_view.flow_sequence_requested.connect(self.handle_flow_sequence_request)
         if hasattr(self.view, "calibration_view"):
@@ -309,12 +376,147 @@ class MainController(QObject):
 
     def shutdown(self) -> None:
         LOG.info("Shutting down worker thread")
+        finalize_session = self._prepare_session_for_global_stop("app_exit")
         event = self.shutdown_service.shutdown(
             source="app_exit",
             reason="application_exit",
             force=True,
         )
         self._handle_shutdown_event(event, success_message="已安全关闭")
+        if finalize_session:
+            self._finish_session_after_global_stop(event)
+            self.wait_for_session_finalization(
+                SessionWriterConfig.from_mapping(self.config).close_timeout_ms
+                / 1000.0
+            )
+
+    def shutdown_and_teardown(self) -> None:
+        try:
+            self.shutdown()
+        finally:
+            self.teardown(
+                timeout_ms=SessionWriterConfig.from_mapping(
+                    self.config
+                ).close_timeout_ms
+            )
+
+    def teardown(self, *, timeout_ms: int = 2000) -> None:
+        """Idempotently join every timer/thread owned by this Controller."""
+        timeout = max(1, int(timeout_ms))
+        if self._protocol_tick_timer.isActive():
+            self._protocol_tick_timer.stop()
+        recovery = self._recovery_scan_worker
+        if recovery is not None and recovery.isRunning():
+            recovery.cancel()
+            if recovery.wait(timeout):
+                self._recovery_scan_worker = None
+            else:
+                LOG.error("Recovery scan thread did not stop within teardown timeout")
+        elif recovery is not None:
+            self._recovery_scan_worker = None
+        if self.session_state.status == SessionStatus.PREPARED:
+            descriptor = self.session_state.descriptor
+            if descriptor is not None:
+                self.session_file_service.mark_inactive(
+                    descriptor.paths.staging_dir
+                )
+            self.session_state.fail(
+                "会话路径已锁定但记录尚未开始；请从恢复目录检查该会话。",
+                recovery_required=True,
+            )
+        writer = self.session_writer
+        if writer is not None and writer.isRunning():
+            writer.fail_from_producer(
+                stage="teardown",
+                message="测试/生命周期 teardown 已终止未收尾会话。",
+            )
+            writer.wait(timeout)
+        finalize_thread = self._session_finalize_thread
+        if (
+            finalize_thread is not None
+            and finalize_thread is not threading.current_thread()
+            and finalize_thread.is_alive()
+        ):
+            finalize_thread.join(timeout / 1000.0)
+        pretest_thread = self._pretest_thread
+        if (
+            pretest_thread is not None
+            and pretest_thread is not threading.current_thread()
+            and pretest_thread.is_alive()
+        ):
+            pretest_thread.join(timeout / 1000.0)
+        self.actuation_worker.shutdown(timeout)
+        if self.worker.isRunning():
+            self.worker.stop()
+        self.flow_worker.shutdown(timeout)
+
+    def lifecycle_stopped(self) -> bool:
+        recovery = self._recovery_scan_worker
+        writer = self.session_writer
+        finalizer = self._session_finalize_thread
+        pretest = self._pretest_thread
+        return (
+            (recovery is None or not recovery.isRunning())
+            and (writer is None or not writer.isRunning())
+            and (finalizer is None or not finalizer.is_alive())
+            and (pretest is None or not pretest.is_alive())
+            and not self.actuation_worker.isRunning()
+            and not self.worker.isRunning()
+            and not self.flow_worker.isRunning()
+        )
+
+    def _prepare_session_for_global_stop(self, reason: str) -> bool:
+        if self.session_state.status == SessionStatus.RECORDING:
+            if not self.session_state.begin_close(reason):
+                return False
+            self._session_close_pending_reason = reason
+            self._session_global_stop_in_progress = True
+            self.actuation_interlock.update(
+                recording_ready=False,
+                session_closing=True,
+            )
+            return True
+        closing = self.session_state.status == SessionStatus.CLOSING
+        if closing:
+            self._session_global_stop_in_progress = True
+            return True
+        return False
+
+    def _finish_session_after_global_stop(self, event: dict) -> None:
+        safe_to_publish = (
+            event.get("result") == "success"
+            and self.actuation_worker.protocol_state.active_valve is None
+            and not self.actuation_worker.protocol_state.possibly_open_valves
+            and not self.actuation_worker.isRunning()
+            and bool(getattr(self.actuation_worker, "_do_handed_off", False))
+        )
+        if not safe_to_publish:
+            writer = self.session_writer
+            if writer is not None:
+                writer.fail_from_producer(
+                    stage="unsafe_shutdown",
+                    message=(
+                        "硬件安全关闭、阀门状态或 owner handoff 未完整确认；"
+                        "禁止发布 complete 会话。"
+                    ),
+                )
+                if not self._session_finalize_started:
+                    self._session_finalize_started = True
+                    self._start_session_finalizer(name="session-finalize-abort")
+            self._session_global_stop_in_progress = False
+            return
+        if self._session_controller_fenced:
+            self._session_global_stop_in_progress = False
+            return
+        self._post_controller_session_event(
+            event="shutdown",
+            source=str(event.get("source") or "shutdown"),
+            result=str(event.get("result") or "unknown"),
+            message="硬件安全关闭完成。",
+            payload=dict(event),
+        )
+        self._session_global_stop_in_progress = False
+        self._begin_session_finalization()
 
     @Slot(bool, int)
     def handle_calibration_request(self, active: bool, duration: int) -> None:
@@ -534,6 +736,7 @@ class MainController(QObject):
             args=(mode, [int(ch) for ch in channels], float(a), float(b), float(c)),
             daemon=True,
         )
+        self._pretest_thread = thread
         thread.start()
 
     def _run_pretest_sequence(
@@ -833,8 +1036,753 @@ class MainController(QObject):
         self._start_or_request_self_check()
         self._refresh_toolbar_state()
 
+    def _session_boundary_rejection(self) -> str:
+        if self._pending_protocol_load is not None:
+            return "协议加载仍在等待动作 owner 的安全清理确认，请等待加载完成。"
+        if self._protocol_start_pending or self._protocol_master_prepare_pending:
+            return "协议启动或主阀预备仍在等待硬件确认，请等待安全收敛。"
+        if self._pretest_sequence_in_progress:
+            return "预检序列仍在执行，请等待阀门和流量安全收敛。"
+        pending_kinds = {
+            str(context.get("kind", ""))
+            for context in self._pending_plan_ui.values()
+        }
+        if pending_kinds & {
+            "protocol_master_prepare",
+            "pretest",
+            "manual",
+            "sequence",
+        }:
+            return "阀门动作计划仍在等待回执，请等待安全收敛。"
+        protocol_state = self.actuation_worker.protocol_state
+        if (
+            protocol_state.pending_open_command_id is not None
+            or protocol_state.pending_close_command_id is not None
+        ):
+            return "阀门动作仍在等待回执，请等待安全收敛。"
+        open_channels = [
+            channel
+            for channel in self.valve_service.active_map()
+            if self.valve_service.is_open(channel)
+        ]
+        if self.valve_service.master_is_open() or open_channels:
+            return "主阀或手动阀门仍处于开启状态，请先执行安全关闭。"
+        return ""
+
+    @Slot(str, str, object)
+    def handle_session_start_requested(
+        self,
+        subject: str,
+        condition: str,
+        output_dir: str | Path,
+    ) -> bool:
+        prepared = self.session_state.status == SessionStatus.PREPARED
+        previous_writer = self.session_writer
+        if previous_writer is not None and previous_writer.isRunning():
+            self._set_session_status(
+                "上一会话 writer 尚未终止，禁止建立新 generation；请等待安全收尾。"
+            )
+            return False
+        if self.session_state.status in {
+            SessionStatus.RECORDING,
+            SessionStatus.CLOSING,
+        }:
+            message = "当前会话仍在活动或关闭中，请先完成结束流程。"
+            self._set_session_status(message)
+            return False
+        document = self.state.loaded_protocol
+        if document is None:
+            self._set_session_status("请先加载有效协议，再开始会话。")
+            return False
+        if (
+            self.actuation_worker.protocol_state.active_valve is not None
+            or self.actuation_worker.protocol_state.possibly_open_valves
+        ):
+            self._set_session_status(
+                "仍有活动或可能开启的阀门，请先执行安全停止再新建会话。"
+            )
+            return False
+        boundary_rejection = self._session_boundary_rejection()
+        if boundary_rejection:
+            self._set_session_status(boundary_rejection)
+            return False
+        if prepared:
+            descriptor = self.session_state.descriptor
+            if (
+                descriptor is None
+                or self._session_protocol_document is not document
+                or descriptor.subject_original != str(subject)
+                or descriptor.condition_original != str(condition)
+                or descriptor.paths.output_dir
+                != Path(output_dir).expanduser().resolve(strict=False)
+            ):
+                self._set_session_status(
+                    "已锁定的会话身份或协议已变化，禁止开始记录。"
+                )
+                return False
+        else:
+            self._session_generation += 1
+            try:
+                preview = self.session_file_service.preview(
+                    output_dir=output_dir,
+                    subject=subject,
+                    condition=condition,
+                )
+                descriptor = self.session_file_service.reserve(
+                    output_dir=output_dir,
+                    subject=subject,
+                    condition=condition,
+                    generation=self._session_generation,
+                    protocol_source=document.source_name,
+                    protocol_metadata=dict(document.metadata),
+                    preview=preview,
+                )
+            except SessionFileError as exc:
+                self._set_session_status(str(exc))
+                return False
+            requires_confirmation = (
+                self.view is not None and hasattr(self.view, "session_view")
+            )
+            if requires_confirmation:
+                if not self.session_state.prepare(descriptor):
+                    self._set_session_status("会话路径锁定失败，请重新尝试。")
+                    return False
+                self._session_protocol_document = document
+                self._session_preview = None
+                self._set_session_status(
+                    "会话路径已锁定，请核对最终路径后点击“确认开始记录”。"
+                )
+                return True
+
+        metrics_config = self.actuation_worker.metrics.config
+        recording_started = datetime.now().astimezone()
+        started_payload = {
+            "recording_started_at": recording_started.isoformat(
+                timespec="milliseconds"
+            ),
+            "declared_trigger_mode": (
+                None
+                if self.protocol_executor.state.declared_mode is None
+                else self.protocol_executor.state.declared_mode.value
+            ),
+            "current_trigger_mode": (
+                None
+                if self.protocol_executor.state.current_mode is None
+                else self.protocol_executor.state.current_mode.value
+            ),
+            "inhale_threshold": self.state.inhale_threshold,
+            "exhale_threshold": self.state.exhale_threshold,
+            "low_flow_threshold": self.state.low_flow_threshold,
+            "hardware_variant": self.state.hardware_variant,
+            "hardware_mode": (
+                "simulation" if self.state.simulation_mode else "real"
+            ),
+            "ai_epoch_available": bool(getattr(self.worker, "_last_ai_epoch", -1) > 0),
+            "actuation_quality_config": {
+                "target_ms": metrics_config.target_ms,
+                "single_limit_ms": metrics_config.single_limit_ms,
+                "window_size": metrics_config.window_size,
+                "min_samples": metrics_config.min_samples,
+            },
+        }
+        writer = SessionWriterWorker(
+            descriptor=descriptor,
+            config=SessionWriterConfig.from_mapping(self.config),
+            expected_producers=("hardware", "actuation", "controller"),
+            session_started_payload=started_payload,
+            readiness_latch=self.recorder_readiness,
+            failure_callback=self._wake_actuation_for_recorder_failure,
+        )
+        ingress = SessionRecorderIngress(writer, self.recorder_readiness)
+        writer.failure_ready.connect(self._handle_session_writer_failure)
+        writer.finished.connect(
+            lambda staging=descriptor.paths.staging_dir: (
+                self.session_file_service.mark_inactive(staging)
+            )
+        )
+        self.session_writer = writer
+        if not writer.start_and_wait():
+            failure = writer.failure
+            message = (
+                failure.message
+                if failure is not None
+                else "会话文件初始化失败，请检查输出目录。"
+            )
+            stopped = writer.wait(
+                SessionWriterConfig.from_mapping(self.config).close_timeout_ms
+            )
+            if stopped:
+                self.session_file_service.mark_inactive(
+                    descriptor.paths.staging_dir
+                )
+            self.session_state.fail_start(
+                descriptor,
+                message,
+                recovery_required=True,
+            )
+            self._session_preview = None
+            self._set_session_status(message)
+            return False
+        boundary_rejection = self._session_boundary_rejection()
+        if boundary_rejection:
+            writer.fail_from_producer(
+                stage="session_boundary_changed",
+                message=boundary_rejection,
+            )
+            stopped = writer.wait(
+                SessionWriterConfig.from_mapping(self.config).close_timeout_ms
+            )
+            if stopped:
+                self.session_file_service.mark_inactive(
+                    descriptor.paths.staging_dir
+                )
+            self.session_state.fail_start(
+                descriptor,
+                boundary_rejection,
+                recovery_required=True,
+            )
+            self._session_preview = None
+            self._set_session_status(boundary_rejection)
+            return False
+        if not self.actuation_worker.bind_session_recorder(
+            ingress,
+            generation=descriptor.generation,
+            timeout_ms=SessionWriterConfig.from_mapping(
+                self.config
+            ).close_timeout_ms,
+        ):
+            writer.fail_from_producer(
+                stage="actuation_recorder_bind",
+                message="动作 owner 未确认 recorder bind，已拒绝开始会话。",
+            )
+            stopped = writer.wait(
+                SessionWriterConfig.from_mapping(self.config).close_timeout_ms
+            )
+            if stopped:
+                self.session_file_service.mark_inactive(
+                    descriptor.paths.staging_dir
+                )
+            self.session_state.fail_start(
+                descriptor,
+                "动作 owner 未确认 recorder bind，已拒绝开始会话。",
+                recovery_required=True,
+            )
+            self._session_preview = None
+            self._set_session_status(self.session_state.failure_message)
+            return False
+        if not self.worker.bind_session_recorder(
+            ingress,
+            generation=descriptor.generation,
+            timeout_ms=SessionWriterConfig.from_mapping(
+                self.config
+            ).close_timeout_ms,
+        ):
+            self.actuation_worker.post_recorder_fence(wait=True, timeout_ms=1000)
+            writer.fail_from_producer(
+                stage="hardware_recorder_bind",
+                message="采集 owner 未确认 recorder bind，已拒绝开始会话。",
+            )
+            stopped = writer.wait(
+                SessionWriterConfig.from_mapping(self.config).close_timeout_ms
+            )
+            if stopped:
+                self.session_file_service.mark_inactive(
+                    descriptor.paths.staging_dir
+                )
+            self.session_state.fail_start(
+                descriptor,
+                "采集 owner 未确认 recorder bind，已拒绝开始会话。",
+                recovery_required=True,
+            )
+            self._session_preview = None
+            self._set_session_status(self.session_state.failure_message)
+            return False
+        if not self.session_state.begin(descriptor):
+            self.actuation_worker.post_recorder_fence(wait=True, timeout_ms=1000)
+            self.worker.post_session_fence()
+            writer.fail_from_producer(
+                stage="state_transition",
+                message="会话状态转换失败，未进入 recording。",
+            )
+            writer.wait(1000)
+            self._set_session_status("会话状态转换失败，未进入 recording。")
+            return False
+
+        self.session_ingress = ingress
+        self._session_protocol_document = document
+        self._session_controller_sequence = 0
+        self._session_controller_fenced = False
+        self._session_close_pending_reason = ""
+        self._session_finalize_started = False
+        self._session_global_stop_in_progress = False
+        self._session_finalize_event.clear()
+        self._session_finalize_result = None
+        self._session_preview = None
+        self.actuation_interlock.update(
+            recording_ready=True,
+            recorder_generation=descriptor.generation,
+            session_closing=False,
+        )
+        self.actuation_worker.post_recorder_ready(descriptor.generation)
+        self._drain_actuation_if_not_running()
+        if not self._post_controller_session_event(
+            event="protocol_bound",
+            source="session",
+            result="success",
+            message="当前协议已绑定到会话。",
+            payload={
+                "protocol_source": document.source_name,
+                "protocol_metadata": dict(document.metadata),
+            },
+        ):
+            return False
+        self._render_protocol_execution_state()
+        self._set_session_status(f"会话记录已开始：{descriptor.stem}")
+        return True
+
+    @Slot(str, str, str)
+    def handle_session_preview_requested(
+        self,
+        subject: str,
+        condition: str,
+        output_dir: str,
+    ) -> None:
+        if self.session_state.status in {
+            SessionStatus.PREPARED,
+            SessionStatus.RECORDING,
+            SessionStatus.CLOSING,
+        }:
+            self._render_session_snapshot()
+            return
+        if not output_dir:
+            self._session_preview = None
+            self._render_session_snapshot("请选择本地输出目录。")
+            return
+        output_path = Path(output_dir).expanduser().resolve(strict=False)
+        if output_path.is_dir():
+            self._start_recovery_scan(output_path)
+        try:
+            self._session_preview = self.session_file_service.preview(
+                output_dir=output_path,
+                subject=subject,
+                condition=condition,
+            )
+        except SessionFileError as exc:
+            self._session_preview = None
+            self._render_session_snapshot(str(exc))
+            return
+        self._render_session_snapshot("文件名与路径预览已更新，尚未创建会话文件。")
+
+    def _start_recovery_scan(self, output_path: Path) -> None:
+        worker = self._recovery_scan_worker
+        if worker is not None:
+            self._pending_recovery_output = output_path
+            return
+        self._recovery_scan_request += 1
+        worker = RecoveryScanWorker(
+            self.session_file_service,
+            output_path,
+            self._recovery_scan_request,
+        )
+        self._recovery_scan_worker = worker
+        worker.completed.connect(self._handle_recovery_scan_completed)
+        worker.start()
+
+    @Slot(object, object, object)
+    def _handle_recovery_scan_completed(
+        self,
+        request_id: int,
+        output_path: Path,
+        result,
+    ) -> None:
+        completed_worker = self.sender()
+        if not isinstance(completed_worker, RecoveryScanWorker):
+            completed_worker = None
+        if completed_worker is not None:
+            completed_worker.wait(1000)
+            completed_worker.deleteLater()
+        if completed_worker is not self._recovery_scan_worker:
+            return
+        self._recovery_scan_worker = None
+        if isinstance(result, Exception):
+            self._session_recovery_messages = (
+                f"恢复扫描失败：{result}。下一步：请检查输出目录权限。",
+            )
+        elif int(request_id) == self._recovery_scan_request:
+            self._session_recovery_messages = tuple(
+                (
+                    f"发现未完成会话：{item.original_path}；原因：{item.reason}；"
+                    + (
+                        f"最后成功序号：{item.last_sequence}；"
+                        if item.last_sequence is not None
+                        else "最后成功序号：不可用；"
+                    )
+                    + (
+                        f"已隔离至 {item.quarantined_path}。"
+                        if item.quarantined_path is not None
+                        else "无法移动，已原地保留 .session.part。"
+                    )
+                    + " 下一步：打开恢复目录或另存分析。"
+                )
+                for item in result
+            )
+            self._last_recovery_output = output_path
+            self._last_recovery_location = None
+            if result:
+                latest = result[-1]
+                self._last_recovery_location = (
+                    latest.quarantined_path
+                    if latest.quarantined_path is not None
+                    else latest.original_path
+                )
+        self._render_session_snapshot()
+        pending = self._pending_recovery_output
+        self._pending_recovery_output = None
+        if pending is not None:
+            self._start_recovery_scan(pending)
+
+    @Slot()
+    def handle_session_recovery_requested(self) -> None:
+        if self._last_recovery_location is not None:
+            if self._last_recovery_location.exists():
+                self._open_with_system(self._last_recovery_location)
+                return
+            self._set_session_status("记录的恢复位置已不存在，请重新扫描输出目录。")
+            return
+        if self._last_recovery_output is None:
+            self._set_session_status("当前没有可打开的恢复目录。")
+            return
+        recovery = self._last_recovery_output / "recovery"
+        if not recovery.is_dir():
+            self._set_session_status("恢复目录不存在；不完整数据可能仍在原 .session.part。")
+            return
+        self._open_with_system(recovery)
+
+    @Slot(str)
+    def handle_session_end_requested(self, reason: str = "user_end") -> bool:
+        if self.session_state.status == SessionStatus.PREPARED:
+            descriptor = self.session_state.descriptor
+            if descriptor is None:
+                return False
+            self.session_file_service.mark_inactive(
+                descriptor.paths.staging_dir
+            )
+            message = (
+                "已取消尚未开始记录的会话准备；未完成工作目录不会冒充完整会话，"
+                "请从恢复位置检查或另存分析。"
+            )
+            if not self.session_state.cancel_prepared(message):
+                return False
+            self._session_protocol_document = None
+            self._session_preview = None
+            self._set_session_status(message)
+            self._start_recovery_scan(descriptor.paths.output_dir)
+            return True
+        if not self.session_state.begin_close(reason):
+            return False
+        self._session_close_pending_reason = str(reason)
+        self.actuation_interlock.update(
+            recording_ready=False,
+            session_closing=True,
+        )
+        self._set_session_status("会话正在安全结束并等待全部 producer fence。")
+        active = self.protocol_executor.state.status in {
+            ProtocolExecutionStatus.WAITING_TRIGGER,
+            ProtocolExecutionStatus.WAITING_EXHALE,
+            ProtocolExecutionStatus.TRIGGERED,
+            ProtocolExecutionStatus.PAUSED,
+            ProtocolExecutionStatus.BLOCKED,
+        }
+        boundary_rejection = self._session_boundary_rejection()
+        if active or boundary_rejection:
+            self.actuation_worker.post_stop(
+                message=(
+                    "会话结束请求已停止协议执行并等待全部阀门计划安全收敛。"
+                )
+            )
+            self._drain_actuation_if_not_running()
+        self._maybe_begin_session_finalization()
+        return True
+
+    def _maybe_begin_session_finalization(self) -> None:
+        if (
+            self.session_state.status != SessionStatus.CLOSING
+            or self._session_global_stop_in_progress
+            or self._session_boundary_rejection()
+            or self.actuation_worker.protocol_state.active_valve is not None
+            or self.actuation_worker.protocol_state.possibly_open_valves
+            or self.protocol_executor.state.status
+            in {
+                ProtocolExecutionStatus.WAITING_TRIGGER,
+                ProtocolExecutionStatus.WAITING_EXHALE,
+                ProtocolExecutionStatus.TRIGGERED,
+                ProtocolExecutionStatus.PAUSED,
+            }
+        ):
+            return
+        self._begin_session_finalization()
+
+    def wait_for_session_finalization(self, timeout: float = 5.0):
+        wait_seconds = max(0.0, float(timeout))
+        started = time.monotonic()
+        self._session_finalize_event.wait(wait_seconds)
+        thread = self._session_finalize_thread
+        if thread is not None and thread is not threading.current_thread():
+            remaining = max(0.0, wait_seconds - (time.monotonic() - started))
+            thread.join(remaining)
+        return self._session_finalize_result
+
+    def _post_controller_session_event(
+        self,
+        *,
+        event: str,
+        source: str,
+        result: str,
+        message: str,
+        payload: dict | None = None,
+    ) -> bool:
+        ingress = self.session_ingress
+        if ingress is None or self._session_controller_fenced:
+            return False
+        self._session_controller_sequence += 1
+        return ingress.post_session_event(
+            event=event,
+            producer_sequence=self._session_controller_sequence,
+            source=source,
+            result=result,
+            message=message,
+            payload=payload,
+        )
+
+    def _begin_session_finalization(self) -> None:
+        if self._session_finalize_started or self.session_writer is None:
+            return
+        self._session_finalize_started = True
+        self._post_controller_session_event(
+            event="session_ending",
+            source="controller",
+            result="success",
+            message="会话已停止普通提交，正在等待 producer fence。",
+            payload={"reason": self._session_close_pending_reason},
+        )
+        self.worker.post_session_fence()
+        self.actuation_worker.post_recorder_fence()
+        self._drain_actuation_if_not_running()
+        if not self.actuation_worker.isRunning():
+            self.actuation_worker.finalize_recorder_after_owner_stopped()
+        if self.session_ingress is not None:
+            self._session_controller_fenced = self.session_ingress.post_fence(
+                "controller",
+                producer_sequence=self._session_controller_sequence,
+            )
+            if not self._session_controller_fenced:
+                self.session_writer.fail_from_producer(
+                    stage="controller_fence",
+                    message="Controller producer fence 提交失败，禁止发布会话。",
+                )
+                self._start_session_finalizer(
+                    name="session-finalize-fence-failure"
+                )
+                return
+        self._start_session_finalizer(name="session-finalize-waiter")
+
+    def _start_session_finalizer(self, *, name: str) -> None:
+        writer = self.session_writer
+        descriptor = self.session_state.descriptor
+        if writer is None or descriptor is None:
+            return
+        reason = self._session_close_pending_reason or "closed"
+        thread = threading.Thread(
+            target=self._finalize_session_writer,
+            kwargs={
+                "writer": writer,
+                "descriptor": descriptor,
+                "reason": reason,
+            },
+            name=name,
+            daemon=False,
+        )
+        self._session_finalize_thread = thread
+        thread.start()
+
+    def _finalize_session_writer(
+        self,
+        *,
+        writer: SessionWriterWorker,
+        descriptor,
+        reason: str,
+    ) -> None:
+        result = writer.close(
+            reason=reason,
+        )
+        current = self.session_state.descriptor
+        identity_matches = (
+            self.session_writer is writer
+            and current is not None
+            and current.session_id == descriptor.session_id
+            and current.generation == descriptor.generation
+        )
+        if not writer.isRunning():
+            self.session_file_service.mark_inactive(
+                descriptor.paths.staging_dir
+            )
+        if not identity_matches:
+            LOG.warning(
+                "Ignoring stale session finalizer result for %s/%s",
+                descriptor.session_id,
+                descriptor.generation,
+            )
+            return
+        self._session_finalize_result = result
+        if result.complete:
+            self.session_state.mark_closed(descriptor.paths.final_dir)
+        else:
+            self.session_state.fail(result.message, recovery_required=True)
+        self.actuation_interlock.update(
+            recording_ready=False,
+            session_closing=False,
+        )
+        self._session_finalized.emit(result)
+        self._session_finalize_event.set()
+
+    def _wake_actuation_for_recorder_failure(self, failure) -> None:
+        self.actuation_interlock.update(
+            recording_ready=False,
+            recorder_failed=True,
+            recorder_generation=failure.session_generation,
+        )
+        self.session_state.fail(failure.message, recovery_required=True)
+        self.actuation_worker.post_recorder_failed(failure.message)
+        self.actuation_worker.post_stop(
+            message="会话写入失败，Controller 已请求安全停止。"
+        )
+        self.worker.post_session_fence()
+        self.actuation_worker.post_recorder_fence()
+
+    @Slot(object)
+    def _handle_session_writer_failure(self, failure) -> None:
+        self._set_session_status(failure.message)
+        if self.view and hasattr(self.view, "render_actuation_alert"):
+            self.view.render_actuation_alert(failure.message, severe=True)
+
+    @Slot(object)
+    def _handle_session_finalized(self, result) -> None:
+        message = (
+            f"会话已完整发布：{result.final_dir}"
+            if result.complete
+            else result.message
+        )
+        self._set_session_status(message)
+        self._render_protocol_execution_state()
+
+    def _set_session_status(self, message: str) -> None:
+        self.state.update_status(message)
+        if self.view:
+            self.view.update_status(message)
+        self._render_session_snapshot(message)
+
+    def _render_session_snapshot(self, message: str | None = None) -> None:
+        if self.view is None or not hasattr(self.view, "session_view"):
+            return
+        status = self.session_state.status
+        descriptor = self.session_state.descriptor
+        active = status in {SessionStatus.RECORDING, SessionStatus.CLOSING}
+        inputs_locked = active or status == SessionStatus.PREPARED
+        preview = self._session_preview
+        if descriptor is not None and (
+            inputs_locked or preview is None
+        ):
+            subject_original = descriptor.subject_original
+            subject_clean = descriptor.subject_clean
+            condition_original = descriptor.condition_original
+            condition_clean = descriptor.condition_clean
+            stem = descriptor.stem
+            staging_path = str(descriptor.paths.staging_dir)
+            final_path = str(descriptor.paths.final_dir)
+            raw_path = str(descriptor.paths.final_raw_path)
+            log_path = str(descriptor.paths.final_log_path)
+            session_id = descriptor.session_id
+            generation = descriptor.generation
+        elif preview is not None:
+            subject_original = preview.subject_original
+            subject_clean = preview.subject_clean
+            condition_original = preview.condition_original
+            condition_clean = preview.condition_clean
+            stem = preview.stem
+            staging_path = str(preview.staging_dir)
+            final_path = str(preview.final_dir)
+            raw_path = str(preview.final_raw_path)
+            log_path = str(preview.final_log_path)
+            session_id = ""
+            generation = 0
+        else:
+            subject_original = subject_clean = ""
+            condition_original = condition_clean = ""
+            stem = staging_path = final_path = raw_path = log_path = ""
+            session_id = ""
+            generation = 0
+        has_protocol = self.state.loaded_protocol is not None
+        safe_to_start = (
+            (
+                status == SessionStatus.PREPARED
+                and descriptor is not None
+                or preview is not None
+            )
+            and has_protocol
+            and not active
+            and not self._session_boundary_rejection()
+            and self.actuation_worker.protocol_state.active_valve is None
+            and not self.actuation_worker.protocol_state.possibly_open_valves
+            and not self._unsafe_shutdown_latched
+        )
+        if message is not None:
+            self._session_display_message = message
+        elif self._session_display_message:
+            message = self._session_display_message
+        else:
+            message = {
+                SessionStatus.IDLE: "请填写会话信息并预览路径。",
+                SessionStatus.PREPARED: "会话路径已锁定，请确认开始记录。",
+                SessionStatus.RECORDING: "会话正在记录；协议与路径已冻结。",
+                SessionStatus.CLOSING: "会话正在等待安全关闭与 producer fence。",
+                SessionStatus.CLOSED: "会话已完整发布，可以预览并新建会话。",
+                SessionStatus.FAILED: self.session_state.failure_message,
+                SessionStatus.RECOVERY_REQUIRED: self.session_state.failure_message,
+            }[status]
+        self.view.session_view.render_snapshot(
+            SessionViewSnapshot(
+                status=status,
+                status_text=message,
+                session_id=session_id,
+                generation=generation,
+                subject_original=subject_original,
+                subject_clean=subject_clean,
+                condition_original=condition_original,
+                condition_clean=condition_clean,
+                stem=stem,
+                staging_path=staging_path,
+                final_path=final_path,
+                raw_path=raw_path,
+                log_path=log_path,
+                can_start=safe_to_start,
+                can_end=status
+                in {SessionStatus.PREPARED, SessionStatus.RECORDING},
+                inputs_enabled=not inputs_locked,
+                has_protocol=has_protocol,
+                recovery_messages=self._session_recovery_messages,
+            )
+        )
+
     @Slot(str)
     def handle_protocol_file_selected(self, path: str | Path) -> bool:
+        if (
+            self.session_state.descriptor is not None
+            and self.session_state.status
+            not in {SessionStatus.IDLE, SessionStatus.CLOSED}
+        ):
+            message = "活动或失败会话仍绑定当前协议，请先安全结束当前会话。"
+            self._set_session_status(message)
+            return False
         try:
             document = parse_protocol_file(path, valve_map=self.state.get_active_valve_map())
         except ProtocolParseError as exc:
@@ -879,6 +1827,22 @@ class MainController(QObject):
             self._block_for_unsafe_shutdown(
                 "上次关闭失败尚未人工确认；禁止预备主阀或启动协议。"
             )
+            return
+        session_ready = (
+            self.session_state.status == SessionStatus.RECORDING
+            and self.recorder_readiness.read().recording_ready
+            and self._session_protocol_document is not None
+            and self._session_protocol_document is self.state.loaded_protocol
+        )
+        if not session_ready and not (
+            self._allow_test_actuation_bridge
+            and self.session_state.descriptor is None
+        ):
+            message = (
+                "协议开始被拒绝：请先成功建立 recording 会话，"
+                "并确认当前协议已绑定；在此之前 owner worker 不会接单。"
+            )
+            self._set_session_status(message)
             return
         if not self.actuation_worker.isRunning() and not self._allow_test_actuation_bridge:
             message = "动作 worker 未运行，已保守阻止协议开始。"
@@ -954,13 +1918,42 @@ class MainController(QObject):
             self._submit_valve_plan(
                 plan_or_message,
                 category=ActuationCategory.WARMUP,
-                ui_context={"kind": "protocol_master_prepare", "document": document},
+                ui_context={
+                    "kind": "protocol_master_prepare",
+                    "document": document,
+                    "session_id": (
+                        None
+                        if self.session_state.descriptor is None
+                        else self.session_state.descriptor.session_id
+                    ),
+                    "session_generation": (
+                        0
+                        if self.session_state.descriptor is None
+                        else self.session_state.descriptor.generation
+                    ),
+                },
             )
             return
         self._begin_protocol_start(document=document)
 
     def _begin_protocol_start(self, *, document) -> None:
         """Acquire the serial lease and arm only after master preparation is confirmed."""
+        session_reason = self._protocol_start_session_rejection(
+            document=document,
+            session_id=(
+                None
+                if self.session_state.descriptor is None
+                else self.session_state.descriptor.session_id
+            ),
+            session_generation=(
+                0
+                if self.session_state.descriptor is None
+                else self.session_state.descriptor.generation
+            ),
+        )
+        if session_reason:
+            self._set_session_status(session_reason)
+            return
         readiness = self._execution_readiness()
         reason = readiness.rejection_reason(
             has_protocol=bool(document or self._protocol_snapshot.has_protocol)
@@ -987,6 +1980,38 @@ class MainController(QObject):
             lease_epoch=lease_epoch,
         )
         self._drain_actuation_if_not_running()
+
+    def _protocol_start_session_rejection(
+        self,
+        *,
+        document,
+        session_id: str | None,
+        session_generation: int,
+    ) -> str:
+        if self._allow_test_actuation_bridge and self.session_state.descriptor is None:
+            return ""
+        descriptor = self.session_state.descriptor
+        readiness = self.recorder_readiness.read()
+        if (
+            descriptor is None
+            or self.session_state.status != SessionStatus.RECORDING
+            or not readiness.recording_ready
+            or readiness.failed
+            or descriptor.session_id != session_id
+            or descriptor.generation != int(session_generation)
+            or readiness.session_id != descriptor.session_id
+            or readiness.generation != descriptor.generation
+            or self._session_protocol_document is not self.state.loaded_protocol
+            or (
+                document is not None
+                and document is not self._session_protocol_document
+            )
+        ):
+            return (
+                "主阀预备完成后会话身份、generation、协议或 recording readiness "
+                "已变化，协议未布防。"
+            )
+        return ""
 
     @Slot()
     def handle_protocol_manual_trigger_requested(self) -> None:
@@ -1039,6 +2064,9 @@ class MainController(QObject):
 
     @Slot()
     def handle_protocol_stop_requested(self) -> None:
+        if self.session_state.status == SessionStatus.RECORDING:
+            self.handle_session_end_requested("protocol_stopped")
+            return
         self.actuation_worker.post_stop()
         self._drain_actuation_if_not_running()
 
@@ -1061,6 +2089,7 @@ class MainController(QObject):
         if self.view:
             self.view.update_status(self.state.status_message)
 
+        finalize_session = self._prepare_session_for_global_stop("reset")
         self.actuation_worker.post_stop(message="硬件重置请求已停止门控流程。")
         self._drain_actuation_if_not_running()
         event = self.shutdown_service.shutdown(
@@ -1069,6 +2098,8 @@ class MainController(QObject):
             force=True,
         )
         self._handle_shutdown_event(event, success_message="重置完成：阀门关闭，准备重新自检")
+        if finalize_session:
+            self._finish_session_after_global_stop(event)
 
         if event.get("result") != "success":
             self._block_for_unsafe_shutdown(
@@ -1103,6 +2134,7 @@ class MainController(QObject):
             self.worker.request_self_check()
 
     def stop_hardware(self) -> None:
+        finalize_session = self._prepare_session_for_global_stop("global_stop")
         self.actuation_worker.post_stop(message="用户停止硬件，门控流程已停止。")
         self._drain_actuation_if_not_running()
         self.state.update_status("正在安全停止，关闭阀门并释放资源...")
@@ -1114,6 +2146,8 @@ class MainController(QObject):
             force=True,
         )
         self._handle_shutdown_event(event, success_message="已停止/已关闭阀门")
+        if finalize_session:
+            self._finish_session_after_global_stop(event)
         if hasattr(self, "valve_service"):
             self.valve_service.reset_cached_state()
         self._connect_in_progress = False
@@ -1531,7 +2565,19 @@ class MainController(QObject):
         elif context.get("kind") == "protocol_master_prepare":
             self._protocol_master_prepare_pending = False
             if bool(result.get("success")):
-                self._begin_protocol_start(document=context.get("document"))
+                rejection = self._protocol_start_session_rejection(
+                    document=context.get("document"),
+                    session_id=context.get("session_id"),
+                    session_generation=int(context.get("session_generation", 0)),
+                )
+                if rejection:
+                    message = (
+                        f"{rejection}；晚到的主阀预备成功已触发补偿安全关闭。"
+                    )
+                    self.actuation_worker.post_stop(message=message)
+                    self._drain_actuation_if_not_running()
+                else:
+                    self._begin_protocol_start(document=context.get("document"))
             else:
                 message = message or "主阀预备失败，协议未布防。"
         elif context.get("kind") in {"manual", "sequence"}:
@@ -1553,9 +2599,21 @@ class MainController(QObject):
             self.state.update_status(message)
             if self.view:
                 self.view.update_status(message)
+        self._maybe_begin_session_finalization()
 
     @Slot(object)
     def _handle_protocol_snapshot(self, snapshot) -> None:
+        session_ready = (
+            self.session_state.status == SessionStatus.RECORDING
+            and self.recorder_readiness.read().recording_ready
+            and self._session_protocol_document is self.state.loaded_protocol
+        )
+        if snapshot.can_start and not session_ready:
+            snapshot = replace(
+                snapshot,
+                can_start=False,
+                readiness_reason="请先在“文件”页成功建立 recording 会话。",
+            )
         self._protocol_snapshot = snapshot
         active = snapshot.status.value in {
             "waiting_trigger",
@@ -1596,13 +2654,59 @@ class MainController(QObject):
         self._publish_interlock_from_state()
         if self.view and hasattr(self.view, "protocol_view"):
             self.view.protocol_view.render_execution_state(snapshot)
+        self._render_session_snapshot()
+        if (
+            snapshot.status == ProtocolExecutionStatus.COMPLETED
+            and self.session_state.status == SessionStatus.RECORDING
+        ):
+            self.handle_session_end_requested("protocol_completed")
+        else:
+            self._maybe_begin_session_finalization()
 
     @Slot(object)
     def _handle_document_result(self, result: dict) -> None:
         document = result.get("document")
         success = bool(result.get("success"))
+        pending = self._pending_protocol_load
+        if document is not pending:
+            message = "已忽略迟到或不属于当前请求的协议加载回执。"
+            LOG.warning(
+                "%s pending=%s result=%s",
+                message,
+                getattr(pending, "source_name", None),
+                getattr(document, "source_name", None),
+            )
+            self.state.update_status(message)
+            if self.view:
+                self.view.update_status(message)
+            self._render_session_snapshot()
+            return
+
         self._last_document_load_success = success
         self._pending_protocol_load = None
+        active_session = self.session_state.status in {
+            SessionStatus.PREPARED,
+            SessionStatus.RECORDING,
+            SessionStatus.CLOSING,
+        }
+        if success and active_session:
+            self._last_document_load_success = False
+            bound_document = self._session_protocol_document
+            message = "活动会话已锁定协议；已拒绝迟到的协议加载成功回执。"
+            self.state.update_status(message)
+            if self.view:
+                self.view.update_status(message)
+            LOG.error(
+                "%s bound=%s rejected=%s",
+                message,
+                getattr(bound_document, "source_name", None),
+                getattr(document, "source_name", None),
+            )
+            if bound_document is not None and bound_document is not document:
+                self.actuation_worker.post_load(bound_document)
+                self._drain_actuation_if_not_running()
+            self._render_session_snapshot()
+            return
         if success:
             self.state.loaded_protocol = document
             self._publish_interlock_from_state()
@@ -1618,7 +2722,9 @@ class MainController(QObject):
                 document.source_path,
                 len(document.trials),
             )
+            self._render_session_snapshot()
             return
+        self._render_session_snapshot()
         message = str(result.get("message") or "安全清理未确认，协议未替换。")
         self.state.update_status(message)
         if self.view:
@@ -1910,6 +3016,19 @@ class MainController(QObject):
             "safety_state": self.state.telemetry.safety_state,
         }
         self._breath_logger.info("threshold_update | %s", log_entry)
+        if self.session_state.status == SessionStatus.RECORDING:
+            self._post_controller_session_event(
+                event="threshold_changed",
+                source="controller",
+                result="success",
+                message="呼吸阈值已更新。",
+                payload={
+                    "threshold": name,
+                    "old": old_val,
+                    "new": new_val,
+                    "unit": "V",
+                },
+            )
 
         self._persist_config_values(
             {
@@ -1947,6 +3066,17 @@ class MainController(QObject):
 
         # 持久化配置
         self._persist_threshold(new_value)
+        if self.session_state.status == SessionStatus.RECORDING:
+            self._post_controller_session_event(
+                event="threshold_changed",
+                source="controller",
+                result="success",
+                message="低流量阈值已更新。",
+                payload={
+                    "threshold": "low_flow",
+                    "new": new_value,
+                },
+            )
         return True
 
     def _persist_threshold(self, value: float) -> None:

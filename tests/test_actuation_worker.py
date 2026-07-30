@@ -2,18 +2,24 @@ from __future__ import annotations
 
 import threading
 from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
 
 from app.models import (
     ActuationAction,
     ActuationCategory,
     ActuationCommand,
+    ActuationQualitySnapshot,
     ActuationReceipt,
     ActuationResult,
+    ActuationStreamSnapshot,
     AppState,
     ProtocolDocument,
     ProtocolExecutionReadiness,
     ProtocolExecutionState,
     ProtocolExecutionStatus,
+    ProtocolGateEvent,
     ProtocolTrial,
     SafetyState,
     TriggerMode,
@@ -34,6 +40,56 @@ from app.workers.actuation_worker import (
 from app.workers.flow_worker import FlowCommand, FlowCommandResult
 
 
+class SessionIngressSpy:
+    def __init__(self) -> None:
+        self.calls = []
+
+    def post_receipt(self, receipt, *, producer_sequence: int) -> bool:
+        self.calls.append(("receipt", producer_sequence, receipt))
+        return True
+
+    def post_protocol_event(self, event, *, producer_sequence: int) -> bool:
+        self.calls.append(("protocol", producer_sequence, event))
+        return True
+
+    def post_quality_event(
+        self,
+        *,
+        event: str,
+        snapshot,
+        producer_sequence: int,
+        command_id: str | None,
+        message: str,
+        transitions=(),
+        timestamp=None,
+        monotonic_ns=None,
+    ) -> bool:
+        self.calls.append(
+            (
+                "quality",
+                producer_sequence,
+                event,
+                snapshot,
+                command_id,
+                message,
+                transitions,
+                timestamp,
+                monotonic_ns,
+            )
+        )
+        return True
+
+    def post_fence(
+        self,
+        producer: str,
+        *,
+        producer_sequence: int,
+        final_payload=None,
+    ) -> bool:
+        self.calls.append(("fence", producer, producer_sequence))
+        return True
+
+
 class FakeClock:
     def __init__(self, value: int = 1_000_000_000) -> None:
         self.value = value
@@ -51,6 +107,7 @@ def _safe_snapshot(**changes) -> InterlockSnapshot:
         "ttl_input_ready": True,
         "has_protocol": True,
         "device_lease": "protocol",
+        "recording_ready": True,
     }
     values.update(changes)
     return InterlockSnapshot(**values)
@@ -101,6 +158,407 @@ def _worker(clock: FakeClock, writer, *, capacity: int = 256):
         normal_queue_capacity=capacity,
     )
     return worker, state, ingress
+
+
+def test_owner_direct_recorder_ingress_precedes_qt_receipt_signal() -> None:
+    clock = FakeClock()
+    worker, _, _ = _worker(clock, lambda _command: None)
+    recorder = SessionIngressSpy()
+    emitted = []
+    worker.set_session_recorder(recorder)
+    worker.receipt_ready.connect(lambda receipt: emitted.append(receipt))
+    command = _command(
+        command_id="canonical",
+        sequence=1,
+        expected_ns=clock.value,
+    )
+    receipt = ActuationReceipt.from_write(
+        command=command,
+        started_ns=clock.value,
+        actual_ns=clock.value,
+        wall_timestamp=10.0,
+        result=ActuationResult.SUCCESS,
+    )
+
+    worker._emit_receipt(receipt)
+
+    assert recorder.calls == [("receipt", 1, receipt)]
+    assert emitted == [receipt]
+
+
+def test_owner_assigns_protocol_event_identity_and_fence_after_last_event() -> None:
+    clock = FakeClock()
+    worker, _, _ = _worker(clock, lambda _command: None)
+    recorder = SessionIngressSpy()
+    worker.set_session_recorder(recorder)
+    event = ProtocolGateEvent(
+        event="trigger_accepted",
+        timestamp=10.0,
+        result="accepted",
+        message="已接受",
+    )
+
+    worker._emit_executor_result(SimpleNamespace(events=[event]))
+    worker._emit_recorder_fence()
+
+    assert recorder.calls[0] == ("protocol", 1, event)
+    assert recorder.calls[1] == ("fence", "actuation", 1)
+
+
+def test_recorder_fence_cannot_overtake_earlier_owner_messages() -> None:
+    clock = FakeClock()
+    worker, _, _ = _worker(clock, lambda _command: None)
+    processed: list[str] = []
+    worker._handle_message = (  # type: ignore[method-assign]
+        lambda kind, _payload: processed.append(kind)
+    )
+
+    batch = BreathSampleBatch.from_frames(
+        (
+            AnalogInputFrame(
+                timestamp=10.0,
+                ai0=0.1,
+                monotonic_ns=clock.value,
+                ai_epoch=1,
+                sample_sequence=1,
+            ),
+        )
+    )
+    worker._post_message("ai_batch", {"batch": batch, "readiness": None})
+    worker._post_message("ttl_pulse", {"marker": "ttl"})
+    worker._post_message("snapshot", {})
+    worker._post_message("recorder_fence", {"ack": None, "result": {}})
+
+    assert worker.process_ready(max_items=4) == 4
+    assert processed == ["ai_batch", "ttl_pulse", "snapshot", "recorder_fence"]
+
+
+def test_recorder_bind_cannot_overtake_pre_cutover_owner_messages() -> None:
+    clock = FakeClock()
+    worker, _, _ = _worker(clock, lambda _command: None)
+    processed: list[str] = []
+    ack = threading.Event()
+    payload = {
+        "recorder": object(),
+        "generation": 7,
+        "ack": ack,
+        "cancelled": threading.Event(),
+        "result": {},
+    }
+    worker._handle_message = (  # type: ignore[method-assign]
+        lambda kind, _payload: processed.append(kind)
+    )
+    batch = BreathSampleBatch.from_frames(
+        (
+            AnalogInputFrame(
+                timestamp=10.0,
+                ai0=0.1,
+                monotonic_ns=clock.value,
+                ai_epoch=1,
+                sample_sequence=1,
+            ),
+        )
+    )
+    worker._post_message("ai_batch", {"batch": batch, "readiness": None})
+    worker._post_message("ttl_pulse", {"marker": "pre-cutover"})
+    worker._post_message("recorder_bind", payload)
+
+    assert worker.process_ready(max_items=3) == 3
+    assert processed == ["ai_batch", "ttl_pulse", "recorder_bind"]
+
+
+def test_recorder_fence_waits_for_earlier_action_receipt() -> None:
+    clock = FakeClock()
+
+    def write(command: ActuationCommand) -> ActuationReceipt:
+        return ActuationReceipt.from_write(
+            command=command,
+            started_ns=clock.value,
+            actual_ns=clock.value,
+            wall_timestamp=10.0,
+            result=ActuationResult.SUCCESS,
+        )
+
+    worker, _, _ = _worker(clock, write)
+    recorder = SessionIngressSpy()
+    assert worker.set_session_recorder(recorder)
+    command = _command(
+        command_id="before-fence",
+        sequence=1,
+        expected_ns=clock.value,
+        duration_ns=None,
+    )
+    assert worker.submit(command)
+    worker._post_message("recorder_fence", {"ack": None, "result": {}})
+
+    for _ in range(10):
+        processed = worker.process_ready(max_items=1)
+        if any(call[0] == "fence" for call in recorder.calls):
+            break
+        if not processed:
+            clock.value += 1_000_000_000
+
+    fence_index = next(
+        index for index, call in enumerate(recorder.calls) if call[0] == "fence"
+    )
+    receipt_index = next(
+        index
+        for index, call in enumerate(recorder.calls)
+        if call[0] == "receipt" and call[2].command_id == "before-fence"
+    )
+    assert receipt_index < fence_index
+    assert fence_index == len(recorder.calls) - 1
+
+
+@pytest.mark.parametrize(
+    "category",
+    [
+        ActuationCategory.NORMAL,
+        ActuationCategory.MANUAL,
+        ActuationCategory.PRETEST,
+        ActuationCategory.WARMUP,
+    ],
+)
+def test_recorder_failure_rejects_every_non_safety_category(category) -> None:
+    clock = FakeClock()
+    writes = []
+
+    def writer(command):
+        writes.append(command)
+        return ActuationReceipt.from_write(
+            command=command,
+            started_ns=clock.value,
+            actual_ns=clock.value,
+            wall_timestamp=10.0,
+            result=ActuationResult.SUCCESS,
+        )
+
+    worker, _, ingress = _worker(clock, writer)
+    generation = ingress.update(
+        recorder_failed=True,
+        recording_ready=False,
+        recorder_generation=3,
+    )
+    command = _command(
+        command_id=f"failed-{category.value}",
+        sequence=1,
+        expected_ns=clock.value,
+        category=category,
+        safety_generation=generation,
+    )
+
+    assert worker.submit(command)
+    worker.process_ready()
+
+    assert writes == []
+
+
+@pytest.mark.parametrize(
+    "category",
+    [
+        ActuationCategory.NORMAL,
+        ActuationCategory.MANUAL,
+        ActuationCategory.PRETEST,
+        ActuationCategory.WARMUP,
+    ],
+)
+def test_session_closing_rejects_every_non_safety_category(category) -> None:
+    clock = FakeClock()
+    writes = []
+
+    def writer(command):
+        writes.append(command)
+        return ActuationReceipt.from_write(
+            command=command,
+            started_ns=clock.value,
+            actual_ns=clock.value,
+            wall_timestamp=10.0,
+            result=ActuationResult.SUCCESS,
+        )
+
+    worker, _, ingress = _worker(clock, writer)
+    generation = ingress.update(
+        session_closing=True,
+        recording_ready=False,
+        recorder_generation=3,
+    )
+    command = _command(
+        command_id=f"closing-{category.value}",
+        sequence=1,
+        expected_ns=clock.value,
+        category=category,
+        safety_generation=generation,
+    )
+
+    assert worker.submit(command)
+    worker.process_ready()
+
+    assert writes == []
+
+
+def test_recorder_bind_and_unbind_are_serialized_by_actuation_owner() -> None:
+    clock = FakeClock()
+    worker, _, _ = _worker(clock, lambda _command: None)
+    calls: list[tuple[str, int]] = []
+
+    class Recorder(SessionIngressSpy):
+        def post_fence(
+            self,
+            producer: str,
+            *,
+            producer_sequence: int,
+            final_payload=None,
+        ) -> bool:
+            calls.append((producer, threading.get_ident()))
+            return True
+
+    recorder = Recorder()
+    caller_thread = threading.get_ident()
+    worker.start()
+    try:
+        assert worker.bind_session_recorder(recorder, generation=7, timeout_ms=1000)
+        assert worker.post_recorder_fence(wait=True, timeout_ms=1000)
+    finally:
+        assert worker.shutdown(1000)
+
+    assert calls
+    assert calls[0][0] == "actuation"
+    assert calls[0][1] != caller_thread
+
+
+def test_recorder_fence_ack_reports_ingress_rejection() -> None:
+    clock = FakeClock()
+    worker, _, _ = _worker(clock, lambda _command: None)
+    fence_called = threading.Event()
+
+    class RejectingRecorder(SessionIngressSpy):
+        def post_fence(
+            self,
+            producer: str,
+            *,
+            producer_sequence: int,
+            final_payload=None,
+        ) -> bool:
+            assert producer == "actuation"
+            fence_called.set()
+            return False
+
+    worker.start()
+    try:
+        assert worker.bind_session_recorder(
+            RejectingRecorder(),
+            generation=7,
+            timeout_ms=1000,
+        )
+        assert not worker.post_recorder_fence(wait=True, timeout_ms=1000)
+    finally:
+        assert worker.shutdown(1000)
+
+    assert fence_called.is_set()
+
+
+def test_timed_out_recorder_bind_is_cancelled_before_next_generation() -> None:
+    clock = FakeClock()
+    worker, _, _ = _worker(clock, lambda _command: None)
+    blocked = threading.Event()
+    release = threading.Event()
+    original_handle = worker._handle_message
+
+    def handle_message(kind, payload) -> None:
+        if kind == "test_bind_blocker":
+            blocked.set()
+            assert release.wait(2)
+            return
+        original_handle(kind, payload)
+
+    worker._handle_message = handle_message  # type: ignore[method-assign]
+    stale = SessionIngressSpy()
+    current = SessionIngressSpy()
+    worker.start()
+    try:
+        worker._post_message("test_bind_blocker", {})
+        assert blocked.wait(1)
+
+        assert not worker.bind_session_recorder(
+            stale,
+            generation=7,
+            timeout_ms=20,
+        )
+        release.set()
+
+        assert worker.bind_session_recorder(
+            current,
+            generation=8,
+            timeout_ms=1000,
+        )
+        assert worker._session_recorder is current
+        assert worker._session_recorder_generation == 8
+    finally:
+        release.set()
+        assert worker.shutdown(1000)
+
+
+def test_recorder_failure_still_allows_safety_emergency_close() -> None:
+    clock = FakeClock()
+    writes = []
+
+    def writer(command):
+        writes.append(command)
+        return ActuationReceipt.from_write(
+            command=command,
+            started_ns=clock.value,
+            actual_ns=clock.value,
+            wall_timestamp=10.0,
+            result=ActuationResult.SUCCESS,
+        )
+
+    worker, _, ingress = _worker(clock, writer)
+    generation = ingress.update(
+        recorder_failed=True,
+        recording_ready=False,
+        recorder_generation=3,
+    )
+    command = _command(
+        command_id="safety-after-recorder-failure",
+        sequence=1,
+        expected_ns=clock.value,
+        action=ActuationAction.CLOSE,
+        category=ActuationCategory.SAFETY,
+        duration_ns=None,
+        safety_generation=generation,
+    )
+
+    assert worker.submit(command)
+    worker.process_ready()
+
+    assert writes == [command]
+
+
+def test_hardware_telemetry_publication_preserves_recorder_interlock_fields() -> None:
+    ingress = ActuationInterlockIngress(
+        _safe_snapshot(
+            recording_ready=False,
+            recorder_failed=True,
+            recorder_generation=7,
+        )
+    )
+
+    ingress.publish_raw_telemetry(
+        airflow=1.0,
+        timestamp=10.0,
+        hardware_state="SAFE",
+        connected=True,
+        hardware_ready=True,
+        flow_setpoints_ready=True,
+        ttl_input_ready=True,
+        has_protocol=True,
+        device_lease="protocol",
+    )
+
+    snapshot = ingress.read()[1]
+    assert snapshot.recorder_failed
+    assert not snapshot.recording_ready
+    assert snapshot.recorder_generation == 7
 
 
 def test_deadlines_do_not_run_early_and_equal_deadlines_use_sequence_order() -> None:
@@ -1128,7 +1586,12 @@ def test_accepted_ttl_pulse_physically_disarms_before_next_manual_trial() -> Non
     worker.consume_ttl_arm_ack(armed_epoch, True)
 
     worker.post_ttl_pulse(
-        TtlPulse(timestamp=10.1, arm_epoch=armed_epoch, sequence=1),
+        TtlPulse(
+            timestamp=10.1,
+            arm_epoch=armed_epoch,
+            sequence=1,
+            monotonic_ns=clock.value,
+        ),
         readiness=readiness,
     )
     worker.process_ready()
@@ -1955,3 +2418,262 @@ def test_ttl_breath_timeout_uses_pulse_capture_monotonic_time() -> None:
     clock.value += 1
     assert worker.process_ready(max_items=1) == 1
     assert executor.state.status == ProtocolExecutionStatus.COMPLETED
+
+
+def test_owner_rejects_protocol_start_and_normal_action_without_recording_ready() -> None:
+    clock = FakeClock()
+    readiness = ProtocolExecutionReadiness(True, True, True, "SAFE", True)
+    document = ProtocolDocument(
+        source_path=Path("owner-gate.csv"),
+        source_name="owner-gate.csv",
+        trials=[ProtocolTrial("one", 0, 100, 1, TriggerMode.MANUAL)],
+    )
+    executor = ProtocolExecutor(
+        gating_service=GatingService(),
+        valve_writer=lambda *_: (True, "ok"),
+        deferred_actuation=True,
+        clock=lambda: 10.0,
+    )
+    writes: list[ActuationCommand] = []
+    receipts: list[ActuationReceipt] = []
+    worker = ActuationWorker(
+        protocol_executor=executor,
+        writer=lambda command: writes.append(command),
+        interlock=ActuationInterlockIngress(
+            _safe_snapshot(recording_ready=False)
+        ),
+        monotonic_ns_clock=clock,
+        wall_clock=lambda: 10.0,
+    )
+    worker.receipt_ready.connect(receipts.append)
+
+    worker.post_start(document=document, readiness=readiness)
+    worker.process_ready()
+    command = _command(
+        command_id="late-normal",
+        sequence=1,
+        expected_ns=clock.value,
+        execution_epoch=executor.state.execution_epoch,
+    )
+    assert worker.submit(command)
+    worker.process_ready()
+
+    assert executor.state.status != ProtocolExecutionStatus.WAITING_TRIGGER
+    assert writes == []
+    assert receipts[-1].result == ActuationResult.CANCELLED
+    assert "记录" in receipts[-1].message
+
+
+def test_owner_rejects_warmup_open_without_recording_ready() -> None:
+    clock = FakeClock()
+    writes: list[ActuationCommand] = []
+    receipts: list[ActuationReceipt] = []
+    worker, _, _ = _worker(clock, lambda command: writes.append(command))
+    generation = worker.interlock.update(recording_ready=False)
+    worker.receipt_ready.connect(receipts.append)
+    command = _command(
+        command_id="warmup-before-recording",
+        sequence=1,
+        expected_ns=clock.value,
+        category=ActuationCategory.WARMUP,
+        action=ActuationAction.OPEN,
+        safety_generation=generation,
+    )
+
+    assert worker.submit(command)
+    worker.process_ready()
+
+    assert writes == []
+    assert receipts[-1].result == ActuationResult.CANCELLED
+    assert "记录" in receipts[-1].message
+
+
+def test_ttl_protocol_event_preserves_capture_monotonic_time() -> None:
+    clock = FakeClock()
+    captured_ns = 9_876_543_210
+    readiness = ProtocolExecutionReadiness(True, True, True, "SAFE", True)
+    document = ProtocolDocument(
+        source_path=Path("ttl-envelope.csv"),
+        source_name="ttl-envelope.csv",
+        trials=[ProtocolTrial("ttl", 0, 100, 1, TriggerMode.TTL)],
+    )
+    executor = ProtocolExecutor(
+        gating_service=GatingService(),
+        valve_writer=lambda *_: (True, "ok"),
+        deferred_actuation=True,
+        clock=lambda: 10.0,
+    )
+    recorder = SessionIngressSpy()
+    worker = ActuationWorker(
+        protocol_executor=executor,
+        writer=lambda _command: None,
+        interlock=ActuationInterlockIngress(_safe_snapshot()),
+        monotonic_ns_clock=clock,
+        wall_clock=lambda: 10.0,
+    )
+    worker.set_session_recorder(recorder)
+    arm_requests: list[int] = []
+    worker.ttl_arm_requested.connect(arm_requests.append)
+    worker.post_start(document=document, readiness=readiness)
+    worker.process_ready()
+    worker.consume_ttl_arm_ack(arm_requests[-1], True)
+
+    worker.post_ttl_pulse(
+        TtlPulse(
+            timestamp=9.5,
+            arm_epoch=arm_requests[-1],
+            sequence=4,
+            monotonic_ns=captured_ns,
+        ),
+        readiness=readiness,
+    )
+    worker.process_ready()
+
+    ttl_events = [
+        call[2]
+        for call in recorder.calls
+        if call[0] == "protocol" and call[2].trigger_source == "ttl"
+    ]
+    assert ttl_events
+    assert ttl_events[-1].monotonic_ns == captured_ns
+
+
+@pytest.mark.parametrize(
+    "pulse",
+    [
+        SimpleNamespace(
+            timestamp=float("nan"),
+            arm_epoch=1,
+            sequence=1,
+            monotonic_ns=100,
+        ),
+        SimpleNamespace(
+            timestamp=9.5,
+            arm_epoch=0,
+            sequence=1,
+            monotonic_ns=100,
+        ),
+        SimpleNamespace(
+            timestamp=9.5,
+            arm_epoch=1,
+            sequence=0,
+            monotonic_ns=100,
+        ),
+        SimpleNamespace(
+            timestamp=9.5,
+            arm_epoch=1,
+            sequence=1,
+            monotonic_ns=0,
+        ),
+        SimpleNamespace(
+            timestamp=9.5,
+            arm_epoch=1,
+            sequence=1,
+            monotonic_ns=None,
+        ),
+        SimpleNamespace(
+            timestamp=9.5,
+            arm_epoch=1,
+            sequence=1,
+            monotonic_ns="invalid",
+        ),
+    ],
+)
+def test_invalid_ttl_identity_is_structurally_rejected_without_owner_exception(
+    pulse,
+) -> None:
+    clock = FakeClock()
+    readiness = ProtocolExecutionReadiness(True, True, True, "SAFE", True)
+    document = ProtocolDocument(
+        source_path=Path("invalid-ttl.csv"),
+        source_name="invalid-ttl.csv",
+        trials=[ProtocolTrial("ttl", 0, 100, 1, TriggerMode.TTL)],
+    )
+    executor = ProtocolExecutor(
+        gating_service=GatingService(),
+        valve_writer=lambda *_: (True, "ok"),
+        deferred_actuation=True,
+        clock=lambda: 10.0,
+    )
+    recorder = SessionIngressSpy()
+    worker = ActuationWorker(
+        protocol_executor=executor,
+        writer=lambda _command: None,
+        interlock=ActuationInterlockIngress(_safe_snapshot()),
+        monotonic_ns_clock=clock,
+        wall_clock=lambda: 10.0,
+    )
+    worker.set_session_recorder(recorder)
+    arm_requests: list[int] = []
+    worker.ttl_arm_requested.connect(arm_requests.append)
+    worker.post_start(document=document, readiness=readiness)
+    worker.process_ready()
+    worker.consume_ttl_arm_ack(arm_requests[-1], True)
+    pulse.arm_epoch = (
+        arm_requests[-1] if pulse.arm_epoch == 1 else pulse.arm_epoch
+    )
+
+    worker.post_ttl_pulse(pulse, readiness=readiness)
+    worker.process_ready()
+
+    rejected = [
+        call[2]
+        for call in recorder.calls
+        if call[0] == "protocol" and call[2].event == "ttl_pulse_rejected"
+    ]
+    assert rejected
+    assert rejected[-1].result == "rejected"
+    assert executor.state.current_trial is not None
+
+
+def test_quality_ack_events_use_quality_schema_and_preserve_event_time() -> None:
+    clock = FakeClock()
+    worker, state, _ = _worker(clock, lambda _command: None)
+    recorder = SessionIngressSpy()
+    worker.set_session_recorder(recorder)
+    state.quality = ActuationQualitySnapshot(
+        open=ActuationStreamSnapshot(sample_count=1, p95_ms=12.0),
+        close=ActuationStreamSnapshot(sample_count=1, p95_ms=13.0),
+        combined=ActuationStreamSnapshot(sample_count=2, p95_ms=13.0),
+        last_jitter_ms=13.0,
+        severe_latched=True,
+    )
+    events = [
+        ProtocolGateEvent(
+            event="actuation_receipt",
+            timestamp=12.5,
+            actual_ns=777,
+            command_id="command-1",
+            message="动作质量更新",
+        ),
+        ProtocolGateEvent(
+            event="quality_acknowledged",
+            timestamp=13.5,
+            monotonic_ns=888,
+            command_id="command-1",
+            message="严重质量锁存已确认",
+        ),
+        ProtocolGateEvent(
+            event="quality_ack_rejected",
+            timestamp=14.5,
+            monotonic_ns=999,
+            command_id="command-1",
+            result="rejected",
+            message="严重质量锁存确认被拒绝",
+        ),
+    ]
+
+    worker._emit_executor_result(SimpleNamespace(events=events))
+
+    quality_calls = [call for call in recorder.calls if call[0] == "quality"]
+    assert [call[2] for call in quality_calls] == [
+        "actuation_quality",
+        "quality_acknowledged",
+        "quality_ack_rejected",
+    ]
+    assert [(call[-2], call[-1]) for call in quality_calls] == [
+        (12.5, 777),
+        (13.5, 888),
+        (14.5, 999),
+    ]
+    assert not [call for call in recorder.calls if call[0] == "protocol"]

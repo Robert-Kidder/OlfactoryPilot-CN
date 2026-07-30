@@ -152,6 +152,7 @@ def test_controller_protocol_executor_trigger_uses_valve_service(controller):
         flow_setpoints_ready=True,
         safety_state="SAFE",
         has_protocol=True,
+        recording_ready=True,
     )
     commands = []
 
@@ -212,6 +213,7 @@ def test_controller_protocol_close_uses_safety_close_path(controller):
         flow_setpoints_ready=True,
         safety_state="SAFE",
         has_protocol=True,
+        recording_ready=True,
     )
     commands = []
 
@@ -271,6 +273,7 @@ def test_protocol_start_waits_for_confirmed_master_prepare(controller):
         flow_setpoints_ready=True,
         safety_state="SAFE",
         has_protocol=True,
+        recording_ready=True,
     )
     commands = []
 
@@ -330,6 +333,7 @@ def test_protocol_start_stays_disarmed_when_master_prepare_fails(controller):
         flow_setpoints_ready=True,
         safety_state="SAFE",
         has_protocol=True,
+        recording_ready=True,
     )
 
     def writer(command):

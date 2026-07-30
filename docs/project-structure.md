@@ -51,12 +51,19 @@ app/
   workers/
 ```
 
-- `app/main.py`：应用入口，解析启动参数，读取配置，创建 Qt 应用和主窗口。
+- `app/main.py`：应用入口，持有 Windows 全局 named mutex 以强制单实例，解析启动参数，读取配置，创建 Qt 应用和主窗口。
 - `app/controllers/`：控制器层，编排 UI、状态、服务和 Worker。
 - `app/models/`：模型层，保存配置、会话、硬件状态和安全状态等结构化数据。
 - `app/views/`：界面层，负责 PySide6 组件展示和用户输入。
 - `app/services/`：服务层，包含 HAL、硬件自检、安全联锁、阀门、流量、校准等业务逻辑。
 - `app/workers/`：后台线程层，负责硬件轮询、状态推送和低抖动执行。
+
+Story 3.5 的会话记录文件：
+
+- `app/models/session.py`：不可变 session descriptor/path/envelope/fence、受控状态机和文件页 snapshot。
+- `app/services/session_file_service.py`：Windows 命名、staging bundle 预留、ownership marker、可取消的流式 manifest/bundle 验证和 recovery quarantine。
+- `app/workers/session_writer.py`：唯一 session 文件句柄 owner、有界 ingress、raw/JSONL 写入、fence barrier 与单目录发布。
+- `app/views/session_view.py`：中文“文件”页，只发布 subject/condition/output/start/end/recovery 意图。
 
 原则：
 
@@ -240,7 +247,8 @@ python -m PyInstaller pyinstaller.spec
 - 新硬件或业务服务：`app/services/`。
 - 新后台线程：`app/workers/`。
 - 动作命令/回执模型：`app/models/actuation.py`；动作统计与 HAL adapter：`app/services/actuation_metrics.py`、`app/services/actuation_do_adapter.py`。
-- 单写者线程：`app/workers/actuation_worker.py`（DO/协议状态）与 `app/workers/flow_worker.py`（serial/MFC）；`hardware_worker.py` 只负责 AI producer。
+- 单写者线程：`app/workers/actuation_worker.py`（DO/协议状态）、`app/workers/flow_worker.py`（serial/MFC）与 `app/workers/session_writer.py`（raw/log/manifest）；`hardware_worker.py` 只负责 AI producer。
+- 会话成功输出：用户选择目录下的 `<stem>/<stem>.raw`、`<stem>/<stem>.log`、`<stem>/manifest.json`；活动/失败输出保留在 `.<stem>.session.part/` 或 `recovery/`。
 - 新通用配置项：`config/default_config.json`。
 - 新本机硬件/端口/校准覆盖：`config/local_config.json`，并视需要同步更新 `config/local_config.example.json`。
 - 新测试：`tests/test_*.py`。

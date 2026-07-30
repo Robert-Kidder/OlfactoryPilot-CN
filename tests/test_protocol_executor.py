@@ -7,6 +7,7 @@ import pytest
 from app.models import ProtocolDocument, ProtocolTrial, TriggerMode
 from app.models.protocol_execution import ProtocolExecutionReadiness, ProtocolExecutionStatus
 from app.services.gating_service import GatingService, GatingState
+from app.services.hal import AnalogInputFrame, BreathSampleBatch
 from app.services.protocol_executor import ProtocolExecutionConfig, ProtocolExecutor
 
 
@@ -650,6 +651,38 @@ def test_exhale_transition_opens_current_valve_and_tick_closes_then_advances() -
     assert closed.state.status == ProtocolExecutionStatus.WAITING_TRIGGER
     assert closed.state.current_trial.trial_id == "trial-2"
     assert closed.state.current_mode == TriggerMode.TTL
+
+
+def test_deferred_open_event_preserves_trigger_sample_monotonic_identity() -> None:
+    executor = ProtocolExecutor(
+        gating_service=GatingService(inhale_threshold=0.5, exhale_threshold=-0.5),
+        valve_writer=lambda _channel, _open_state: (True, "ok"),
+        config=ProtocolExecutionConfig(breath_gate_timeout_ms=5000),
+        clock=lambda: 10.0,
+        deferred_actuation=True,
+    )
+    _start_manual(executor)
+    batch = BreathSampleBatch.from_frames(
+        (
+            AnalogInputFrame(
+                timestamp=10.1,
+                ai0=-0.6,
+                ai6=0.0,
+                monotonic_ns=987_654_321,
+                ai_epoch=4,
+                sample_sequence=12,
+            ),
+        )
+    )
+
+    result = executor.process_breath_samples(
+        batch,
+        safety_state="SAFE",
+    )
+
+    event = next(item for item in result.events if item.event == "open_requested")
+    assert event.monotonic_ns == 987_654_321
+    assert result.action_requests[0].expected_ns == 987_654_321
 
 
 def test_wait_timeout_skips_without_new_breath_samples() -> None:

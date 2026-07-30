@@ -78,6 +78,17 @@ tests/                 # 自动化测试
 - 会话记录服务：负责 `.raw` 信号和 `.log` 事件输出。
 - 执行控制器：处理手动触发、TTL 触发、呼吸门控和暂停/停止。
 
+### 会话 bundle 与单写者记录
+
+- Windows GUI 入口以全局 named mutex 强制单实例；mutex 句柄覆盖完整 Qt event loop，并在正常退出或进程崩溃时由操作系统释放。第二实例在创建 Controller/HAL 前显示中文提示并退出，避免跨进程 recovery 误隔离活动 staging，也避免争用 NI/serial owner。
+- 每次成功会话发布为 `<output>/<stem>/` 单目录 bundle，包含同 stem 的 `.raw`、`.log` 和 `manifest.json`。活动或失败数据只存在于同父目录 `.<stem>.session.part/` 或 `recovery/`，不得用最终目录冒充完成。
+- `SessionFileService` 负责 Windows NFC/非法字符/保留名清洗、240 UTF-16 code unit 路径预算、独占 staging 目录碰撞预留及只读 recovery 验证；staging 创建后先写本程序 ownership marker，使 raw/log/manifest 部分创建失败仍可被可靠识别，同时不把普通用户 `.session.part` 当成本程序数据。View 不生成文件名也不探测磁盘。
+- `SessionWriterWorker` 是第四个单写者，只拥有 raw/log/manifest 文件句柄、会话序列、流式 SHA-256 和目录发布状态，不持有 HAL 或任何硬件引用。
+- `HardwareWorker` 仍先把原始 `BreathSampleBatch` 交给 `ActuationWorker`，再以 `put_nowait` 直投 writer ingress，最后发 UI signal；`ActuationWorker` 在 owner 线程直投 canonical receipt 与结构化 protocol/quality event。producer 路径不做序列化、flush、fsync、hash 或等待磁盘。
+- recorder failure 先锁存 `recording_ready=False` 与 generation，再唤醒动作 owner；NORMAL/MANUAL/PRETEST/WARMUP 被拒绝，SAFETY/emergency close 继续执行。Controller 同时沿既有 `post_stop()` 安全路径收敛。
+- 关闭以 Hardware/Actuation/Controller 三个 producer fence 为 barrier。writer 消费 fence 前已接收的最后 batch/event/receipt 后写 `session_closed`，按 raw/log flush→fsync→close、manifest 临时文件 replace、staging 单目录 rename 的顺序发布。
+- `manifest.status=complete`、raw/log count/byte/SHA-256 全部验证通过且 JSONL 无空白行的最终目录才显示为完整会话；recovery 的 active-staging 锁只保护登记快照，流式文件验证在锁外执行并逐行响应 cancel。不完整目录只隔离和报告，不自动续写、补全或删除。
+
 ## 5. 配置来源
 
 默认配置位于 `config/default_config.json`，作为仓库内通用默认来源提交到 Git。该文件必须能在没有真实硬件的开发电脑上启动，默认使用 Mock HAL。

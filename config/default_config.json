@@ -17,6 +17,9 @@
   "actuation_write_timeout_ms": 100,
   "actuation_emergency_close_timeout_ms": 500,
   "actuation_shutdown_timeout_ms": 2000,
+  "session_writer_queue_capacity": 4096,
+  "session_writer_flush_every_records": 100,
+  "session_writer_close_timeout_ms": 5000,
   "safety_state": "SAFE",
   "hardware_variant": "20-channel",
   "valve_mapping": {

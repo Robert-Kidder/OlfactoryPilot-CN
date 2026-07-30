@@ -48,6 +48,7 @@ class ProtocolExecutionReadiness:
 class ProtocolGateEvent:
     event: str
     timestamp: float
+    monotonic_ns: int | None = None
     trial_id: str | None = None
     trial_index: int | None = None
     valve: int | None = None
@@ -84,6 +85,7 @@ class ProtocolGateEvent:
     warning: bool = False
     severe: bool = False
     measurement_point: str | None = None
+    quality_transitions: tuple[tuple[str, str, float], ...] = ()
 
     def as_dict(self) -> dict:
         return {
@@ -92,6 +94,7 @@ class ProtocolGateEvent:
             "trial_index": self.trial_index,
             "valve": self.valve,
             "timestamp": self.timestamp,
+            "monotonic_ns": self.monotonic_ns,
             "gate_state": self.gate_state,
             "sample_value": self.sample_value,
             "exhale_threshold": self.exhale_threshold,
@@ -125,6 +128,14 @@ class ProtocolGateEvent:
             "warning": self.warning,
             "severe": self.severe,
             "measurement_point": self.measurement_point,
+            "quality_transitions": [
+                {
+                    "stream": stream,
+                    "direction": direction,
+                    "p95_ms": p95_ms,
+                }
+                for stream, direction, p95_ms in self.quality_transitions
+            ],
         }
 
 

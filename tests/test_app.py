@@ -1,4 +1,5 @@
 import os
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -10,7 +11,14 @@ from PySide6.QtWidgets import QApplication
 import app.main as main_module
 from app.controllers import MainController
 from app.main import DEFAULT_CONFIG, build_application, load_config, save_config
-from app.models import AppState, SafetyState
+from app.models import (
+    AppState,
+    ProtocolDocument,
+    ProtocolTrial,
+    SafetyState,
+    TriggerMode,
+)
+from app.models.session import SessionStatus
 from app.services import MockHAL, SafetyManager, ShutdownService
 from app.services.hardware_check_service import HardwareCheckService, SelfCheckResult
 from app.services.real_hal import RealHAL
@@ -47,11 +55,157 @@ def wait_until(qt_app, predicate, timeout: float = 1.0) -> None:
     assert predicate()
 
 
+def _session_lifecycle_controller(tmp_path: Path) -> MainController:
+    state = AppState(simulation_mode=True)
+    state.valve_variants = {"20-channel": {1: "Dev1/P0.0"}}
+    state.loaded_protocol = ProtocolDocument(
+        source_path=Path("demo.csv"),
+        source_name="demo.csv",
+        trials=[
+            ProtocolTrial(
+                trial_id="1",
+                timing_ms=0,
+                duration_ms=100,
+                valve=1,
+                trigger=TriggerMode.MANUAL,
+            )
+        ],
+    )
+    state.hardware_ready = True
+    state.flow_setpoints_ready = True
+    state.telemetry.connected = True
+    state.telemetry.safety_state = "SAFE"
+    state.telemetry.airflow = 1.0
+    controller = MainController(
+        state,
+        HardwareWorker(hal=MockHAL(), simulation=True),
+        allow_test_actuation_bridge=True,
+    )
+    controller.protocol_executor.reset(state.loaded_protocol)
+    assert controller.handle_session_start_requested("S01", "A", tmp_path)
+    return controller
+
+
+@pytest.mark.parametrize("action", ["stop", "reset", "exit"])
+def test_global_lifecycle_closes_session_after_shutdown_receipts(
+    tmp_path: Path,
+    action: str,
+) -> None:
+    controller = _session_lifecycle_controller(tmp_path)
+    descriptor = controller.session_state.descriptor
+    assert descriptor is not None
+    if action == "stop":
+        controller.stop_hardware()
+    elif action == "reset":
+        controller._start_or_request_self_check = lambda: None
+        controller.reset_hardware()
+    else:
+        controller.shutdown()
+
+    result = controller.wait_for_session_finalization(2.0)
+
+    assert result is not None and result.complete
+    records = [
+        __import__("json").loads(line)
+        for line in descriptor.paths.final_log_path.read_text(encoding="utf-8").splitlines()
+    ]
+    shutdown_index = next(
+        index for index, record in enumerate(records) if record["event"] == "shutdown"
+    )
+    close_index = next(
+        index
+        for index, record in enumerate(records)
+        if record["event"] == "session_closed"
+    )
+    safety_receipts = [
+        record
+        for record in records
+        if record["record_type"] == "receipt" and record["category"] == "safety"
+    ]
+    assert safety_receipts
+    assert shutdown_index < close_index
+
+
+def test_unsafe_global_shutdown_never_publishes_complete_session(
+    tmp_path: Path,
+) -> None:
+    controller = _session_lifecycle_controller(tmp_path)
+    descriptor = controller.session_state.descriptor
+    assert descriptor is not None
+    controller.shutdown_service.shutdown = lambda **_kwargs: {  # type: ignore[method-assign]
+        "schema": "olfactorypilot.shutdown",
+        "schema_version": 1,
+        "source": "stop",
+        "result": "unsafe",
+        "error": "owner handoff failed",
+        "timestamp": "2026-07-27T18:00:00+08:00",
+    }
+
+    controller.stop_hardware()
+    result = controller.wait_for_session_finalization(2.0)
+
+    assert result is not None and not result.complete
+    assert result.status == SessionStatus.RECOVERY_REQUIRED
+    assert not descriptor.paths.final_dir.exists()
+    assert descriptor.paths.staging_dir.exists()
+
+
+def test_unsafe_shutdown_cancels_publish_after_finalization_started(
+    tmp_path: Path,
+) -> None:
+    controller = _session_lifecycle_controller(tmp_path)
+    writer = controller.session_writer
+    descriptor = controller.session_state.descriptor
+    assert writer is not None and descriptor is not None
+    finalize_entered = threading.Event()
+    release_finalize = threading.Event()
+
+    def block_finalize(stage: str, _path: Path) -> None:
+        if stage == "manifest_write":
+            finalize_entered.set()
+            assert release_finalize.wait(2)
+
+    writer._fault_injector = block_finalize
+    assert controller.handle_session_end_requested("user_end")
+    assert finalize_entered.wait(2)
+    controller.shutdown_service.shutdown = lambda **_kwargs: {  # type: ignore[method-assign]
+        "schema": "olfactorypilot.shutdown",
+        "schema_version": 1,
+        "source": "stop",
+        "result": "unsafe",
+        "error": "owner handoff failed",
+        "timestamp": "2026-07-29T12:00:00+08:00",
+    }
+
+    controller.stop_hardware()
+    release_finalize.set()
+    result = controller.wait_for_session_finalization(2.0)
+
+    assert result is not None and not result.complete
+    assert not descriptor.paths.final_dir.exists()
+
+
 def test_load_config_and_state():
     config = load_config(DEFAULT_CONFIG)
     state = AppState.from_config(config)
     assert state.language == "zh-CN"
     assert "OlfactoryPilot" in state.window_title
+    assert config["session_writer_queue_capacity"] > 0
+    assert config["session_writer_flush_every_records"] > 0
+    assert config["session_writer_close_timeout_ms"] > 0
+
+
+def test_session_types_are_exported_from_public_packages() -> None:
+    from app.models import SessionDescriptor, SessionViewSnapshot
+    from app.services import SessionFileService
+    from app.views import SessionView
+    from app.workers import SessionWriterWorker
+
+    assert SessionDescriptor
+    assert SessionViewSnapshot
+    assert SessionFileService
+    assert SessionWriterWorker
+    assert SessionView
 
 
 def test_main_window_builds(qt_app):
@@ -59,6 +213,183 @@ def test_main_window_builds(qt_app):
     assert window.windowTitle()
     assert window.tabs.count() >= 3
     assert not hasattr(window, "_recheck_button")
+
+
+def test_main_rejects_second_instance_before_building_hardware(
+    monkeypatch,
+) -> None:
+    calls = []
+    guard = SimpleNamespace(
+        acquire=lambda: calls.append("acquire") or False,
+        release=lambda: calls.append("release"),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "SingleInstanceGuard",
+        lambda: guard,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "build_application",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("第二实例不得初始化应用或硬件")
+        ),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "report_duplicate_instance",
+        lambda: calls.append("reported"),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "report_startup_error",
+        lambda exc: calls.append(f"startup-error:{exc}"),
+    )
+
+    result = main_module.main(["--no-worker", "--simulation"])
+
+    assert result == 2
+    assert calls == ["acquire", "reported"]
+
+
+def test_main_holds_single_instance_ownership_until_event_loop_exits(
+    monkeypatch,
+) -> None:
+    calls = []
+    guard = SimpleNamespace(
+        acquire=lambda: calls.append("acquire") or True,
+        release=lambda: calls.append("release"),
+    )
+    fake_app = SimpleNamespace(exec=lambda: calls.append("exec") or 0)
+    fake_window = SimpleNamespace(show=lambda: calls.append("show"))
+    monkeypatch.setattr(
+        main_module,
+        "SingleInstanceGuard",
+        lambda: guard,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "build_application",
+        lambda *_args, **_kwargs: (fake_app, fake_window),
+    )
+
+    result = main_module.main(["--no-worker", "--simulation"])
+
+    assert result == 0
+    assert calls == ["acquire", "show", "exec", "release"]
+
+
+def test_main_releases_single_instance_ownership_when_build_fails(
+    monkeypatch,
+) -> None:
+    calls = []
+    guard = SimpleNamespace(
+        acquire=lambda: calls.append("acquire") or True,
+        release=lambda: calls.append("release"),
+    )
+    monkeypatch.setattr(main_module, "SingleInstanceGuard", lambda: guard)
+    monkeypatch.setattr(
+        main_module,
+        "build_application",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("synthetic build failure")
+        ),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "report_startup_error",
+        lambda exc: calls.append(f"reported:{exc}"),
+    )
+
+    result = main_module.main(["--no-worker", "--simulation"])
+
+    assert result == 1
+    assert calls == [
+        "acquire",
+        "reported:synthetic build failure",
+        "release",
+    ]
+
+
+def test_main_retains_mutex_when_teardown_leaves_owner_alive(
+    monkeypatch,
+) -> None:
+    calls = []
+    guard = SimpleNamespace(
+        acquire=lambda: calls.append("acquire") or True,
+        release=lambda: calls.append("release"),
+    )
+    controller = SimpleNamespace(lifecycle_stopped=lambda: False)
+    fake_app = SimpleNamespace(exec=lambda: calls.append("exec") or 0)
+    fake_window = SimpleNamespace(
+        show=lambda: calls.append("show"),
+        controller=controller,
+    )
+    monkeypatch.setattr(main_module, "SingleInstanceGuard", lambda: guard)
+    monkeypatch.setattr(
+        main_module,
+        "build_application",
+        lambda *_args, **_kwargs: (fake_app, fake_window),
+    )
+
+    result = main_module.main(["--no-worker", "--simulation"])
+
+    assert result == 0
+    assert calls == ["acquire", "show", "exec"]
+
+
+@pytest.mark.parametrize("failure_phase", ["show", "exec", "lifecycle_check"])
+def test_main_exception_paths_retain_mutex_while_owner_liveness_is_unknown(
+    monkeypatch,
+    failure_phase: str,
+) -> None:
+    calls: list[str] = []
+    guard = SimpleNamespace(
+        acquire=lambda: calls.append("acquire") or True,
+        release=lambda: calls.append("release"),
+    )
+
+    def lifecycle_stopped() -> bool:
+        calls.append("lifecycle")
+        if failure_phase == "lifecycle_check":
+            raise RuntimeError("synthetic lifecycle check failure")
+        return False
+
+    def show() -> None:
+        calls.append("show")
+        if failure_phase == "show":
+            raise RuntimeError("synthetic show failure")
+
+    def execute() -> int:
+        calls.append("exec")
+        if failure_phase == "exec":
+            raise RuntimeError("synthetic exec failure")
+        return 0
+
+    controller = SimpleNamespace(lifecycle_stopped=lifecycle_stopped)
+    fake_window = SimpleNamespace(show=show, controller=controller)
+    fake_app = SimpleNamespace(exec=execute)
+    monkeypatch.setattr(main_module, "SingleInstanceGuard", lambda: guard)
+    monkeypatch.setattr(
+        main_module,
+        "build_application",
+        lambda *_args, **_kwargs: (fake_app, fake_window),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "report_startup_error",
+        lambda exc: calls.append(f"reported:{exc}"),
+    )
+    monkeypatch.setattr(main_module, "_LINGERING_INSTANCE_GUARDS", [])
+
+    result = main_module.main(["--no-worker", "--simulation"])
+
+    assert result == (0 if failure_phase == "lifecycle_check" else 1)
+    assert "release" not in calls
+    assert main_module._LINGERING_INSTANCE_GUARDS == [guard]
 
 
 def test_hardware_worker_start_stop(qt_app):

@@ -19,6 +19,7 @@ from app.models import AppState, Telemetry
 from app.views.calibration_view import CalibrationView
 from app.views.pretest_view import PreTestView
 from app.views.protocol_view import ProtocolView
+from app.views.session_view import SessionView
 
 if TYPE_CHECKING:
     from app.controllers import MainController
@@ -70,6 +71,7 @@ class MainWindow(QMainWindow):
             signal_gain=self.state.signal_gain,
         )
         self.protocol_view = ProtocolView()
+        self.session_view = SessionView()
         self.pretest_view.toggle_requested.connect(self.controller.handle_valve_toggle_request)
         self.pretest_view.apply_requested.connect(self.controller.handle_apply_request)
         self.pretest_view.valve_sequence_requested.connect(self.controller.handle_valve_sequence_request)
@@ -93,7 +95,20 @@ class MainWindow(QMainWindow):
         self.protocol_view.resume_requested.connect(
             self.controller.handle_protocol_resume_requested
         )
+        self.session_view.preview_requested.connect(
+            self.controller.handle_session_preview_requested
+        )
+        self.session_view.start_requested.connect(
+            self.controller.handle_session_start_requested
+        )
+        self.session_view.end_requested.connect(
+            self.controller.handle_session_end_requested
+        )
+        self.session_view.recovery_requested.connect(
+            self.controller.handle_session_recovery_requested
+        )
         self.tabs.addTab(self._build_tab("概览", "硬件连接、安全状态概览"), "概览")
+        self.tabs.addTab(self.session_view, "文件")
         self.tabs.addTab(self.calibration_view, "校准")
         self.tabs.addTab(self.pretest_view, "预检")
         self.tabs.addTab(self.protocol_view, "协议")
