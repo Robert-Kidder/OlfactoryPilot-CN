@@ -1,5 +1,5 @@
 ﻿# 故事 1.3: Global Safety Toolbar
-Status: Ready for Review
+Status: real-hardware-review
 Epic: 1 - Safe Hardware Foundations
 Story Key: 1-3-global-safety-toolbar
 Story ID: 1.3

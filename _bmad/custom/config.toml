@@ -1,0 +1,8 @@
+# Team override for BMAD artifact routing.
+# This file is the only tracked file under _bmad/; installed tooling remains local.
+# Tables deep-merge over the local base configuration.
+
+[modules.bmm]
+planning_artifacts = "{project-root}/docs"
+implementation_artifacts = "{project-root}/docs/sprint-artifacts"
+project_knowledge = "{project-root}/docs"

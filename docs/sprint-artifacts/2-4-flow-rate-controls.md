@@ -1,6 +1,6 @@
 ﻿# Story 2.4: Flow Rate Controls（流量控制）
 
-Status: ready-for-review  
+Status: done
 Epic: 2 - 校准与手动控制  
 Story Key: 2-4-flow-rate-controls  
 Story ID: 2.4

@@ -1,6 +1,6 @@
 ﻿# Story 1.5: Hardware Simulation Layer (Mock HAL)
 
-Status: Ready for Review
+Status: real-hardware-review
 
 ## Story
 

@@ -9,8 +9,8 @@ OlfactoryPilot-CN 是一个面向嗅觉刺激实验的 Windows 桌面软件，�
 - `app/`：应用主代码，包含 `controllers/`、`models/`、`views/`、`workers/`、`services/`。
 - `config/default_config.json`：仓库内通用默认配置，默认使用 Mock HAL，可在没有真实硬件的电脑上启动。
 - `config/local_config.example.json`：本机真实硬件配置模板。
-- `docs/`：产品需求、架构、UX、项目结构、开发故事、真实硬件记录和 sprint 状态文档。这些是项目知识，应提交到 Git。
-- `scripts/`：本地 CI、sprint 状态生成、Alicat 串口探测等辅助脚本。
+- `docs/`：产品需求、架构、UX、项目结构、开发故事、真实硬件记录和 sprint 状态文档；入口见 `docs/index.md`。这些是项目知识，应提交到 Git。
+- `scripts/`：本地 CI、NI HIL 基准和 Alicat 串口探测等辅助脚本。
 - `tests/`：pytest 自动化测试。
 - `.github/workflows/ci.yml`：GitHub Actions 持续集成流程。
 - `requirements.txt`：运行软件所需依赖。
@@ -72,17 +72,17 @@ python -m app.main --local-config config/local_config.json
 ## 质量检查
 
 ```powershell
-python -m ruff check app tests
+python -m ruff check .
 python -m pytest
 ```
 
 本地也可以使用统一脚本：
 
 ```powershell
-pwsh scripts/run-ci.ps1 lint
-pwsh scripts/run-ci.ps1 test
-pwsh scripts/run-ci.ps1 build
-pwsh scripts/run-ci.ps1 ci
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run-ci.ps1 lint
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run-ci.ps1 test
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run-ci.ps1 build
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run-ci.ps1 ci
 ```
 
 `ci` 会依次执行代码检查、测试和 PyInstaller 打包。打包产物位于 `dist/OlfactoryPilot/`。
@@ -91,7 +91,7 @@ pwsh scripts/run-ci.ps1 ci
 
 需要同步到 Git 的 BMAD 项目知识已经放在 `docs/` 下，包括 PRD、架构、UX、epics、sprint artifacts、workflow/status 文档和真实硬件验证记录。
 
-`.agents/` 和 `_bmad/` 是本机 BMAD/Codex 工具安装与配置目录，不提交到 Git。`_bmad-output/` 是 BMAD 工作流可能生成的本地输出工作区，不作为本仓库长期资料的权威来源；需要长期保存、协作和追踪的项目资料应整理进 `docs/` 或 `docs/sprint-artifacts/` 后再提交。
+`.agents/` 和 `_bmad/` 主要是本机 BMAD/Codex 工具安装目录；唯一例外是团队共享的 `_bmad/custom/config.toml`，它把 BMAD 的长期规划与实施工件路由到仓库内的 `docs/`。`_bmad-output/` 是本地临时输出工作区，不作为长期资料的权威来源；需要长期保存、协作和追踪的资料应整理进 `docs/` 或 `docs/sprint-artifacts/` 后再提交。
 
 在另一台电脑克隆代码后，可以重新安装 BMAD 工具链，例如：
 

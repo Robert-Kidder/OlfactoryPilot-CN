@@ -1,5 +1,7 @@
 # OlfactoryPilot-CN 功能清单
 
+> 历史快照，已停止维护。当前需求以 `../prd.md` 和 `../epics.md` 为准，实施状态只以 `../sprint-artifacts/sprint-status.yaml` 为准。
+
 ## 已完成或基本完成
 
 - PySide6 桌面应用骨架。

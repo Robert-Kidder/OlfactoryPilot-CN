@@ -1,5 +1,7 @@
 # OlfactoryPilot-CN 实施就绪检查报告
 
+> 这是 2025-12-08 的规划门禁记录，不代表当前实施进度；当前状态只以 `docs/sprint-artifacts/sprint-status.yaml` 为准。
+
 检查日期：2025-12-08  
 最近校正：2026-07-09  
 项目：OlfactoryPilot-CN

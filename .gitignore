@@ -29,6 +29,13 @@ dist/
 _bmad/
 _bmad-output/
 
+# Keep the shared BMAD artifact-routing override under version control.
+!_bmad/
+_bmad/*
+!_bmad/custom/
+_bmad/custom/*
+!_bmad/custom/config.toml
+
 # Local hardware/developer overrides
 config/local_config.json
 

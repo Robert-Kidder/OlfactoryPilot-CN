@@ -1,5 +1,5 @@
 ﻿# Story 2.3: Valve Matrix Manual Control
-Status: Ready for Review
+Status: done
 Epic: 2 - Calibration & Manual Control
 Story Key: 2-3-valve-matrix-manual-control
 Story ID: 2.3

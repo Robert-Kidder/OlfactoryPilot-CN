@@ -1,5 +1,5 @@
 ﻿# 故事 1.4: Safe Shutdown and Valve Reset
-Status: Ready for Review
+Status: real-hardware-review
 Epic: 1 - Safe Hardware Foundations
 Story Key: 1-4-safe-shutdown-and-valve-reset
 Story ID: 1.4

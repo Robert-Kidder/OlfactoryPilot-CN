@@ -71,7 +71,7 @@ tests/                 # 自动化测试
 
 ### 协议与数据
 
-协议文件解析与执行能力按 Epic 3 逐步实现，具体完成状态以 `docs/sprint-artifacts/sprint-status.yaml` 为准。相关模块包括：
+协议文件解析与执行能力已由 Epic 3 建立；后续变更仍以 `docs/sprint-artifacts/sprint-status.yaml` 为状态依据。相关模块包括：
 
 - 协议模型：保存 trial、timing、valve、trigger、metadata。
 - 协议解析服务：负责 `.txt`、`.csv` 解析和错误定位。

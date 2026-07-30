@@ -23,7 +23,7 @@ OlfactoryPilot-CN/
   tests/                  # 自动化测试
   .github/workflows/      # GitHub Actions 持续集成配置
   .agents/                # 当前 Codex/BMAD 技能文件，本机工具目录，不提交
-  _bmad/                  # 当前 BMAD 本地配置和安装文件，不提交
+  _bmad/                  # BMAD 本地安装；仅 custom/config.toml 作为团队路由配置提交
   _bmad-output/           # BMAD 本地输出工作区，不提交；长期资料整理进 docs/
   logs/                   # 运行日志，本地生成目录
 ```
@@ -91,7 +91,8 @@ Story 3.5 的会话记录文件：
 - `docs/architecture.md`：架构文档，说明软件如何组织。
 - `docs/ux-design.md`：UX 设计说明，说明界面结构和交互规则。
 - `docs/epics.md`：Epic 和 Story 拆分。
-- `docs/FeatureList.md`：功能清单。
+- `docs/index.md`：项目文档索引与归档入口。
+- `docs/archive/FeatureList-legacy.md`：已停止维护的历史功能清单快照。
 - `docs/project-structure.md`：本文档。
 - `docs/bmm-workflow-status.yaml`：BMAD 规划阶段状态。
 - `docs/sprint-artifacts/`：开发 story、sprint 状态、回顾、验证报告。
@@ -104,7 +105,7 @@ Story 3.5 的会话记录文件：
 
 - `scripts/run-ci.ps1`：本地执行 `lint`、`test`、`build` 或完整 `ci` 流程。
 - `scripts/probe_alicat.py`：Alicat 串口设备探测辅助脚本。
-- `scripts/generate_sprint_status.py`：根据 `docs/epics.md` 生成或维护 sprint 状态。
+- `scripts/hil_actuation_benchmark.py`：真实 NI HIL 动作时延与抖动基准脚本。
 
 脚本原则：
 
@@ -130,7 +131,7 @@ Story 3.5 的会话记录文件：
 python -m pytest
 ```
 
-测试的意义是防止后续开发破坏已经完成的 Epic 1 和 Epic 2 功能，并允许无真实硬件的 CI 环境验证核心逻辑。
+测试的意义是防止后续开发破坏 Epic 1–3 已建立的硬件安全、校准、协议执行和 session 记录能力，并允许无真实硬件的 CI 环境验证核心逻辑。真实 NI 时序结论仍须由 HIL Gate 证明。
 
 ## 8. requirements.txt 与 requirements-dev.txt
 
@@ -179,7 +180,7 @@ ruff 是代码检查工具，配置文件是 `ruff.toml`。
 运行：
 
 ```powershell
-python -m ruff check app tests
+python -m ruff check .
 ```
 
 ### CI
@@ -216,7 +217,7 @@ python -m PyInstaller pyinstaller.spec
 - `_bmad/`
 - `_bmad-output/`
 
-`.agents/` 和 `_bmad/` 是工具安装、技能和本机配置目录。`_bmad-output/` 是 BMAD 工作流可能生成的本地输出工作区，不是本仓库长期项目资料的权威来源。三者均不纳入 Git。
+`.agents/` 和 `_bmad/` 主要是工具安装、技能和本机配置目录。团队共享的 `_bmad/custom/config.toml` 是唯一纳入 Git 的 `_bmad/` 文件，用于把长期 planning/implementation artifacts 路由到 `docs/`。`_bmad-output/` 是临时工作区，不是长期项目资料的权威来源。
 
 长期项目资料应整理并保存在：
 
@@ -264,7 +265,7 @@ python -m pip install -r requirements-dev.txt
 python -m app.main
 python -m app.main --simulation
 python -m pytest
-python -m ruff check app tests
+python -m ruff check .
 python -m PyInstaller pyinstaller.spec
 ```
 
@@ -273,7 +274,8 @@ python -m PyInstaller pyinstaller.spec
 建议每个 BMAD 技能使用新的对话窗口，以减少旧上下文干扰。
 
 1. 使用 `docs/sprint-artifacts/sprint-status.yaml` 或 `bmad-sprint-status` 确认 sprint 状态。
-2. 根据状态文件选择下一条 story，再使用对应 BMAD 技能创建、更新或执行 story。
-3. 开发前阅读对应 story、`docs/architecture.md`、`docs/project-context.md` 和相关测试。
+2. 若上一 Epic 复盘要求修改下一 Epic 的边界，先运行 `bmad-correct-course`，再创建下一条 story。
+3. 使用 `bmad-create-story` 创建并校验 story；随后在新窗口使用 `bmad-dev-story` 实施。
+4. 开发前阅读对应 story、`docs/architecture.md`、`docs/project-context.md` 和相关测试。
 
 每次准备新开窗口前，应让当前窗口更新“下一步应该找哪个智能体、要说什么、目的是什么”的说明。

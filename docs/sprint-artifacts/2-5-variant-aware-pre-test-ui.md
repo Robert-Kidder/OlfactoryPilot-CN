@@ -1,6 +1,6 @@
 ﻿# Story 2.5: Variant-Aware Pre-Test UI
 
-Status: ready-for-review  
+Status: done
 Epic: 2 - Calibration & Manual Control  
 Story Key: 2-5-variant-aware-pre-test-ui  
 Story ID: 2.5

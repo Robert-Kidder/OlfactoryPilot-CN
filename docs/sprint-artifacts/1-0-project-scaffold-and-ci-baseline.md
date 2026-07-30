@@ -1,5 +1,5 @@
 ﻿# 故事 1.0：Project Scaffold and CI Baseline
-Status: review
+Status: real-hardware-pass
 Epic: 1 - Safe Hardware Foundations
 Story Key: 1-0-project-scaffold-and-ci-baseline
 

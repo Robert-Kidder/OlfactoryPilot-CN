@@ -14,7 +14,7 @@ try {
     }
 
     function Invoke-Lint {
-        python -m ruff check app tests
+        python -m ruff check .
     }
 
     function Invoke-Test {
@@ -27,8 +27,8 @@ try {
         $files | Select-Object FullName, Length | Sort-Object Length -Descending | Select-Object -First 5
         $exe = $files | Where-Object { $_.Extension -eq ".exe" } | Select-Object -First 1
         if ($exe) {
-            Write-Host "可执行文件产物: $($exe.FullName)"
-            Write-Host ("大小: {0:N2} MB" -f ($exe.Length / 1MB))
+            Write-Host "Executable artifact: $($exe.FullName)"
+            Write-Host ("Size: {0:N2} MB" -f ($exe.Length / 1MB))
             Get-FileHash $exe.FullName -Algorithm SHA256
         }
     }

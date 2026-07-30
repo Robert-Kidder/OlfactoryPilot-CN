@@ -1,8 +1,10 @@
 ﻿# 故事 1.1: Device Self-Check and Status Report
-Status: Ready for Review
+Status: real-hardware-pass
 Epic: 1 - Safe Hardware Foundations
 Story Key: 1-1-device-self-check-and-status-report
 Story ID: 1.1
+
+> 2026-07-30 硬件基线校正：本文保留 Story 形成时对 USB-6501 的历史表述；当前生产基线只有 `Dev1`、`Dev2` 两台 USB-6001，具体以 `docs/project-context.md` 为准。
 
 ## Story
 作为实验室技术员，  

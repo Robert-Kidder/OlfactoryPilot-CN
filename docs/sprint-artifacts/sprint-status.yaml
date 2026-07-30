@@ -27,13 +27,13 @@ development_status:
   2-7-calibration-ui-optimization: done
   epic-2-retrospective: done
 
-  epic-3: in-progress
+  epic-3: done
   3-1-protocol-file-parsing-txtcsv: done
   3-2-breath-gated-stimulation: done
   3-3-manual-vs-ttl-trigger-modes: done
   3-4-low-jitter-actuation-20ms: done
   3-5-session-file-naming-and-logging: done
-  epic-3-retrospective: optional
+  epic-3-retrospective: done
 
   epic-4: backlog
   4-1-cleaning-automation: backlog
@@ -41,3 +41,51 @@ development_status:
   4-3-chinese-ui-localization: backlog
   4-4-compensation-logic-automation: backlog
   epic-4-retrospective: optional
+
+action_items:
+  - epic: 3
+    action: "对齐 BMM artifact 配置与项目权威 docs/sprint-artifacts 状态源。"
+    owner: "Jing + Amelia"
+    status: done
+    completed: 2026-07-30
+    evidence: "_bmad/custom/config.toml + docs/bmm-workflow-status.yaml"
+  - epic: 3
+    action: "在 Story 4.2 定义冻结前更新 PRD/Epics 的 Dev1/Dev2 必需、Dev3 可选硬件基线。"
+    owner: "John + Winston"
+    status: done
+    completed: 2026-07-30
+    evidence: "docs/prd.md + docs/epics.md + docs/sprint-artifacts/evidence/spec-update-dev3-hardware-inventory-20260730.md"
+  - epic: 3
+    action: "在 Story 4.1 开发前固定 CLEANING category、设备租约、记录和恢复矩阵。"
+    owner: "Winston + Amelia + Murat"
+    status: open
+  - epic: 3
+    action: "在 Story 4.4 开发前固定 flow→master→odor 状态机和 receipt identity。"
+    owner: "Winston + Amelia"
+    status: open
+  - epic: 3
+    action: "为 Epic 4 建立 Event/Barrier/fake-clock/fault-injection 确定性并发测试清单。"
+    owner: "Murat + Amelia"
+    status: open
+  - epic: 3
+    action: "在首个 Epic 4 硬件 Story 开发前建立变更触发式真实 Windows/NI HIL 矩阵。"
+    owner: "Murat + Jing"
+    status: open
+  - epic: 3
+    action: "在实验室发布候选确认前完成 PyInstaller 干跑、资源审计与产物留证。"
+    owner: "Amelia + Paige"
+    status: done
+    completed: 2026-07-30
+    evidence: "docs/sprint-artifacts/evidence/release-packaging-gate-20260730.md"
+  - epic: 3
+    action: "在实验室发布候选确认前补全协议、session、安全与 recovery 中文操作指引。"
+    owner: "Paige + Murat"
+    status: open
+  - epic: 3
+    action: "在 Story 4.2 开发前完成断开态配置事务、回滚和 owner handoff 测试设计。"
+    owner: "Amelia + Murat"
+    status: open
+  - epic: 3
+    action: "在 Story 4.3 验收前增加用户可见中文与乱码自动化审计。"
+    owner: "Paige + Amelia"
+    status: open

@@ -1,9 +1,11 @@
 ﻿# Epic 1 真实硬件复核清单
 
-Status: In Progress
+Status: Historical Record — Epic 1 Verification Still Open
 Epic: 1 - Safe Hardware Foundations
 Trigger: 已接入真实硬件开发环境，需要从 Epic 1 开始逐个 story 复核是否真实开发完成。
 Mode: Incremental
+
+> **2026-07-30 后续校正：** 当前实验台只有 `Dev1`、`Dev2` 两台 USB-6001，未安装 USB-6501。本文 2026-06-12 记录中的“Dev3/USB-6501 PASS”无法由后续实物与 NI MAX 复核支持，不得再作为硬件存在性证据。当前基线与自检要求以 `docs/project-context.md`、`docs/architecture.md` 和本机覆盖配置为准。
 
 ## 复核原则
 
@@ -16,7 +18,7 @@ Mode: Incremental
 
 - 应用可成功打开：是
 - HAL 模式：real
-- NI 设备配置：Dev1 / Dev2 / Dev3
+- 当前 NI 设备配置：Dev1 / Dev2（均为 USB-6001）
 - AI0 通道：Dev1/ai0
 - RS232 配置：COM6, 19200 baud
 - Alicat ID：A=a, B=b, C=c
@@ -71,7 +73,7 @@ Status: In Field Verification
 
 ### 核验目标
 
-确认真实 NI-USB-6001/6501 与 RS232/Alicat 自检能正确 Pass/Fail，并在 UI 中显示可操作的中文状态。
+确认配置中声明的真实 NI 设备与 RS232/Alicat 自检能正确 Pass/Fail，并在 UI 中显示可操作的中文状态。
 
 ### 前置条件
 
@@ -92,7 +94,7 @@ Status: In Field Verification
 - Connect/自检时间：待填写
 - NI Dev1 检测结果：待填写
 - NI Dev2 检测结果：待填写
-- NI Dev3 检测结果：待填写
+- NI Dev3：不适用；当前实验台未安装该设备
 - RS232 COM6 / 19200 检测结果：待填写
 - Alicat A/B/C 轮询结果：待填写
 - UI 中文提示：待填写
@@ -112,7 +114,7 @@ Status: In Field Verification
 - 2026-06-12 12:36:59 自检执行完成。
 - NI Dev1：PASS，原因为 USB-6001 连接正常。
 - NI Dev2：PASS，原因为 USB-6001 连接正常。
-- NI Dev3：PASS，原因为 USB-6501 连接正常。
+- NI Dev3：原记录称 USB-6501 PASS；该项已被 2026-07-30 实物与 NI MAX 复核推翻，不计入验收证据。
 - COM6 现场确认为 ATEN USB to Serial Bridge。
 - RS232 COM6：FAIL，原因为串口打开失败：`PermissionError(13, '拒绝访问。', None, 5)`。
 - 系统建议：关闭可能占用串口的程序后重试。
@@ -137,7 +139,7 @@ Status: In Field Verification
 - 用户提供日志：
   - `app.services.hardware_check_service | 设备=Dev1 | 类型=ni | 状态=PASS`
   - `app.services.hardware_check_service | 设备=Dev2 | 类型=ni | 状态=PASS`
-  - `app.services.hardware_check_service | 设备=Dev3 | 类型=ni | 状态=PASS`
+  - 原始日志曾包含 `设备=Dev3 | 类型=ni | 状态=PASS`；后续确认该记录不能证明现场存在 USB-6501，已作废。
   - `app.services.hardware_check_service | 设备=COM6 | 类型=serial | 状态=FAIL | 原因=串口打开失败: could not open port 'COM6': PermissionError(13, '拒绝访问。', None, 5)`
   - `app.workers.hardware_worker | 硬件自检完成 | ready=False | 项目数=4`
 

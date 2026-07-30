@@ -5,13 +5,15 @@
 # _bmad-output/ 是本地 BMAD 输出工作区，不纳入 Git；长期资料整理进 docs/。
 
 generated: "2025-12-08"
-updated: "2026-07-09"
+updated: "2026-07-30"
 project: "OlfactoryPilot-CN"
 project_type: "internal-tool"
 selected_track: "method"
 field_type: "brownfield"
 active_tooling: ".agents + _bmad"
 workflow_reference: "_bmad/_config/bmad-help.csv"
+current_phase: "implementation"
+current_status_source: "docs/sprint-artifacts/sprint-status.yaml"
 workflow_status:
   prd: docs/prd.md
   create-ux-design: docs/ux-design.md
