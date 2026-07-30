@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 import threading
@@ -27,11 +28,19 @@ from app.services import AnalogInputFrame, MockHAL
 from scripts.hil_actuation_benchmark import (
     AIOnlyHal,
     LatencyTrace,
+    ReceiptCollector,
     Runtime,
     evaluate_full_close,
     production_safety_paths_succeeded,
     run_authorized_close_check,
     run_benchmark,
+)
+
+FAILED_STORY35_HIL_RUN = (
+    Path(__file__).resolve().parents[1]
+    / "logs"
+    / "benchmarks"
+    / "story-3-5-20260730-183616-live"
 )
 
 
@@ -176,6 +185,174 @@ def test_latency_trace_is_bounded_and_flushes_only_after_collection(tmp_path) ->
     }
 
 
+def test_latency_trace_keeps_scheduled_close_visible_after_trial_scope_ends() -> None:
+    trace = LatencyTrace(enabled=True, run_id="diag")
+    trace.begin_trial("bench-0068-v9")
+    trace.record(
+        "actuation_submit_return",
+        command_id="protocol-9-close-1000283",
+        expected_ns=200,
+        accepted=True,
+    )
+    trace.end_trial()
+
+    assert trace.should_trace_command("protocol-9-close-1000283")
+    trace.record(
+        "actuation_execute_enter",
+        at_ns=230,
+        command_id="protocol-9-close-1000283",
+        expected_ns=200,
+    )
+    trace.record(
+        "writer_return",
+        at_ns=231,
+        command_id="protocol-9-close-1000283",
+        expected_ns=200,
+        hal_started_ns=230,
+        hal_actual_ns=231,
+        result="success",
+    )
+
+    close_events = [
+        event
+        for event in trace.events
+        if event.get("command_id") == "protocol-9-close-1000283"
+    ]
+    assert [event["event"] for event in close_events] == [
+        "actuation_submit_return",
+        "actuation_execute_enter",
+        "writer_return",
+    ]
+    assert all(event["trial_label"] == "bench-0068-v9" for event in close_events)
+    assert not trace.should_trace_command("protocol-9-close-1000283")
+
+
+@pytest.mark.skipif(
+    not FAILED_STORY35_HIL_RUN.is_dir(),
+    reason="本机未保留 2026-07-30 第二次 Story 3.5 HIL 失败证据",
+)
+def test_failed_story35_close_trace_and_abort_bundle_are_audited_read_only() -> None:
+    evidence_files = tuple(
+        path
+        for path in FAILED_STORY35_HIL_RUN.rglob("*")
+        if path.is_file()
+    )
+    before = {
+        path: (
+            path.stat().st_size,
+            path.stat().st_mtime_ns,
+            hashlib.sha256(path.read_bytes()).hexdigest(),
+        )
+        for path in evidence_files
+    }
+    receipts = [
+        json.loads(line)
+        for line in (FAILED_STORY35_HIL_RUN / "receipts.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    trigger = next(
+        item
+        for item in receipts
+        if item["command_id"] == "protocol-9-close-1000283"
+    )
+    trace = [
+        json.loads(line)
+        for line in (FAILED_STORY35_HIL_RUN / "latency-trace.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    target_trace = [
+        item
+        for item in trace
+        if item.get("command_id") == "protocol-9-close-1000283"
+    ]
+    bundle = next(
+        path
+        for path in (FAILED_STORY35_HIL_RUN / "session-output").iterdir()
+        if path.is_dir()
+    )
+    session_log = next(bundle.glob("*.log"))
+    records = [
+        json.loads(line)
+        for line in session_log.read_text(encoding="utf-8").splitlines()
+    ]
+    trigger_sequence = next(
+        item["session_sequence"]
+        for item in records
+        if item.get("command_id") == "protocol-9-close-1000283"
+        and item.get("record_type") == "receipt"
+    )
+    abort_closes = [
+        item
+        for item in records
+        if item.get("record_type") == "receipt"
+        and item["session_sequence"] > trigger_sequence
+        and str(item.get("command_id", "")).startswith("shutdown-close-")
+    ]
+    closed = records[-1]
+
+    assert (trigger["started_ns"] - trigger["expected_ns"]) / 1_000_000 == pytest.approx(
+        29.6321
+    )
+    assert (trigger["actual_ns"] - trigger["started_ns"]) / 1_000_000 == pytest.approx(
+        0.6845
+    )
+    assert [item["event"] for item in target_trace] == [
+        "actuation_submit_return"
+    ]
+    assert {item["valve"] for item in abort_closes} == set(range(21))
+    assert all(
+        item["result"] == "success"
+        and item["action"] == "close"
+        and item["category"] == "safety"
+        for item in abort_closes
+    )
+    assert max(item["session_sequence"] for item in abort_closes) < closed[
+        "session_sequence"
+    ]
+    assert closed["event"] == "session_closed"
+    assert closed["producer_fences"] == {
+        "actuation": 746,
+        "hardware": 2553,
+        "controller": 2,
+    }
+
+    after = {
+        path: (
+            path.stat().st_size,
+            path.stat().st_mtime_ns,
+            hashlib.sha256(path.read_bytes()).hexdigest(),
+        )
+        for path in evidence_files
+    }
+    assert after == before
+
+
+def test_receipt_collector_defers_diagnostic_jsonl_until_owner_has_stopped(
+    tmp_path,
+) -> None:
+    path = tmp_path / "not-yet-created" / "receipts.jsonl"
+    collector = ReceiptCollector(path)
+    receipt = _receipt(
+        valve=9,
+        device="Dev1",
+        line="P1.0",
+        command_id="protocol-9-close-1000283",
+    )
+
+    collector.record(receipt)
+
+    assert collector.receipts == [receipt]
+    assert not path.exists()
+
+    path.parent.mkdir()
+    collector.write_jsonl()
+    payload = json.loads(path.read_text(encoding="utf-8").strip())
+    assert payload["command_id"] == "protocol-9-close-1000283"
+    assert payload["result"] == "success"
+
+
 def test_ai0_latency_trace_preserves_modeled_frame_time_and_marks_software_source() -> None:
     frame = AnalogInputFrame(
         timestamp=time.time(),
@@ -218,6 +395,7 @@ def _receipt(
     valve: int,
     device: str,
     line: str,
+    command_id: str | None = None,
     action: ActuationAction = ActuationAction.CLOSE,
     category: ActuationCategory = ActuationCategory.SAFETY,
     result: ActuationResult = ActuationResult.SUCCESS,
@@ -225,7 +403,7 @@ def _receipt(
 ) -> ActuationReceipt:
     expected_ns = time.perf_counter_ns()
     command = ActuationCommand(
-        command_id=f"{trial_id}-{valve}-{action.value}",
+        command_id=command_id or f"{trial_id}-{valve}-{action.value}",
         execution_epoch=1,
         arm_epoch=1,
         sequence=valve + 1,
@@ -664,6 +842,154 @@ def test_aborted_benchmark_never_continues_to_safety_scenarios(monkeypatch) -> N
         benchmark_module.run_acceptance_scenarios(object(), object())
 
     assert safety_started is False
+
+
+def test_severe_benchmark_waits_for_all_abort_closes_before_raising(
+    monkeypatch,
+) -> None:
+    import scripts.hil_actuation_benchmark as benchmark_module
+
+    open_receipt = SimpleNamespace(jitter_ms=1.0)
+    close_receipt = SimpleNamespace(jitter_ms=30.3166)
+    close_checks: list[tuple[int, str]] = []
+
+    class RuntimeDouble:
+        def __init__(self) -> None:
+            self.collector = SimpleNamespace(receipts=[])
+            self.output_dir = Path("story-3-5-test-run")
+            self.valves = SimpleNamespace(
+                resolve_target=lambda _valve: ("Dev2", "P1.0")
+            )
+            self.metrics = SimpleNamespace(
+                config=SimpleNamespace(window_size=100, min_samples=20)
+            )
+            self._abort_close_confirmed = False
+
+        def close_everything(self, _label):
+            return []
+
+        def begin_story_35_recording(self, *_args, **_kwargs):
+            return None
+
+        def command(self, **_kwargs):
+            return object()
+
+        def submit_and_wait(self, _command):
+            return None
+
+        def wait_ms(self, _milliseconds):
+            return None
+
+        def start_protocol_document(self, _document):
+            return None
+
+        def trigger_current_trial_via_ai0(self, *, label):
+            assert label == "bench-0001-v1"
+            return open_receipt
+
+    runtime = RuntimeDouble()
+    monkeypatch.setattr(
+        benchmark_module,
+        "wait_protocol_trial",
+        lambda *_args, **_kwargs: (open_receipt, close_receipt),
+    )
+
+    def full_close(_runtime, *, after_index, scenario, timeout_s=3.0):
+        close_checks.append((after_index, scenario))
+        return {"all_configured_targets_closed": True}
+
+    monkeypatch.setattr(benchmark_module, "wait_for_full_close", full_close)
+    args = SimpleNamespace(
+        valves=[1, 9, 13],
+        cycles=1,
+        duration_ms=100.0,
+        inter_trial_ms=250.0,
+        story_3_5_recording=True,
+        candidate_commit="a" * 40,
+        live=False,
+    )
+
+    with pytest.raises(RuntimeError, match="严重超限"):
+        run_benchmark(runtime, args)
+
+    assert close_checks == [(0, "severe-abort")]
+    assert runtime._abort_close_confirmed is True
+
+
+def test_confirmed_abort_close_is_not_replaced_by_a_second_shutdown_close_set() -> None:
+    order: list[str] = []
+
+    class Actuation:
+        def isRunning(self):
+            return True
+
+        def emergency_close_all(self, _timeout_ms):
+            raise AssertionError("已确认 severe 全关后不得再生成第二组 shutdown-close")
+
+        def shutdown(self, _timeout_ms):
+            order.append("actuation_fence_and_shutdown")
+            return True
+
+    runtime = Runtime.__new__(Runtime)
+    runtime.config = {
+        "actuation_emergency_close_timeout_ms": 500,
+        "actuation_shutdown_timeout_ms": 2000,
+    }
+    runtime.actuation = Actuation()
+    runtime.hardware = SimpleNamespace(stop=lambda: order.append("hardware_fence"))
+    runtime.flow = SimpleNamespace(
+        shutdown=lambda _timeout_ms: order.append("flow_shutdown")
+    )
+    runtime._shutdown_completed = False
+    runtime._abort_close_confirmed = True
+
+    runtime.stop()
+
+    assert order == [
+        "actuation_fence_and_shutdown",
+        "hardware_fence",
+        "flow_shutdown",
+    ]
+
+
+def test_incomplete_shutdown_close_latches_story35_bundle_failure_before_finalize() -> None:
+    failures: list[tuple[str, str]] = []
+
+    class Actuation:
+        def isRunning(self):
+            return True
+
+        def emergency_close_all(self, _timeout_ms):
+            return False
+
+        def shutdown(self, _timeout_ms):
+            return True
+
+    runtime = Runtime.__new__(Runtime)
+    runtime.config = {
+        "actuation_emergency_close_timeout_ms": 500,
+        "actuation_shutdown_timeout_ms": 2000,
+    }
+    runtime.actuation = Actuation()
+    runtime.hardware = SimpleNamespace(stop=lambda: None)
+    runtime.flow = SimpleNamespace(shutdown=lambda _timeout_ms: None)
+    runtime._shutdown_completed = False
+    runtime._abort_close_confirmed = False
+    runtime._story_35_writer = SimpleNamespace(
+        fail_from_producer=lambda *, stage, message: failures.append(
+            (stage, message)
+        )
+    )
+
+    with pytest.raises(RuntimeError, match="未获得全部成功回执"):
+        runtime.stop()
+
+    assert failures == [
+        (
+            "shutdown_emergency_close",
+            "中止后未取得全部配置目标关闭回执，Story 3.5 bundle 禁止标记完整。",
+        )
+    ]
 
 
 @pytest.mark.parametrize(

@@ -122,15 +122,21 @@ class ReceiptCollector:
         return writer
 
     def record(self, receipt: ActuationReceipt) -> None:
-        payload = asdict(receipt)
-        payload["action"] = receipt.action.value
-        payload["category"] = receipt.category.value
-        payload["result"] = receipt.result.value
-        with self._jsonl_path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
         with self._condition:
             self._receipts.append(receipt)
             self._condition.notify_all()
+
+    def write_jsonl(self) -> None:
+        """Persist the diagnostic copy only after the actuation owner has stopped."""
+        with self._condition:
+            receipts = list(self._receipts)
+        with self._jsonl_path.open("w", encoding="utf-8") as handle:
+            for receipt in receipts:
+                payload = asdict(receipt)
+                payload["action"] = receipt.action.value
+                payload["category"] = receipt.category.value
+                payload["result"] = receipt.result.value
+                handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
 
     def wait_for(
         self,
@@ -170,6 +176,7 @@ class LatencyTrace:
         self._lock = threading.Lock()
         self._events: list[dict[str, object]] = []
         self._trial_label: str | None = None
+        self._command_trials: dict[str, str] = {}
         self._dropped_events = 0
 
     @property
@@ -177,7 +184,19 @@ class LatencyTrace:
         if not self.enabled:
             return None
         with self._lock:
-            return self._trial_label
+            if self._trial_label is not None:
+                return self._trial_label
+            labels = set(self._command_trials.values())
+            return next(iter(labels)) if len(labels) == 1 else None
+
+    def should_trace_command(self, command_id: str) -> bool:
+        if not self.enabled:
+            return False
+        with self._lock:
+            return (
+                self._trial_label is not None
+                or str(command_id) in self._command_trials
+            )
 
     @property
     def events(self) -> list[dict[str, object]]:
@@ -203,10 +222,27 @@ class LatencyTrace:
             return
         event_ns = time.perf_counter_ns() if at_ns is None else int(at_ns)
         with self._lock:
-            if self._trial_label is None:
+            command_id = str(fields.get("command_id") or "")
+            label = self._trial_label
+            if (
+                label is not None
+                and event == "actuation_submit_return"
+                and command_id
+                and fields.get("accepted") is True
+            ):
+                self._command_trials[command_id] = label
+            if label is None and command_id:
+                label = self._command_trials.get(command_id)
+            if label is None:
+                labels = set(self._command_trials.values())
+                if len(labels) == 1:
+                    label = next(iter(labels))
+            if label is None:
                 return
             if len(self._events) >= self.max_events:
                 self._dropped_events += 1
+                if event == "writer_return" and command_id:
+                    self._command_trials.pop(command_id, None)
                 return
             self._events.append(
                 {
@@ -214,11 +250,13 @@ class LatencyTrace:
                     "run_id": self.run_id,
                     "event": str(event),
                     "at_ns": event_ns,
-                    "trial_label": self._trial_label,
+                    "trial_label": label,
                     "thread_id": threading.get_ident(),
                     **fields,
                 }
             )
+            if event == "writer_return" and command_id:
+                self._command_trials.pop(command_id, None)
 
     def write_jsonl(self, path: Path) -> None:
         if not self.enabled:
@@ -426,6 +464,12 @@ class TracingActuationWorker(ActuationWorker):
         )
 
     def _handle_message(self, kind: str, payload: dict) -> None:
+        self._latency_trace.record(
+            "actuation_dequeue_message",
+            message_kind=kind,
+            normal_queue_size=self.normal_queue_size,
+            emergency_queue_size=self.emergency_queue_size,
+        )
         if kind == "ai_batch":
             self._latency_trace.record(
                 "actuation_dequeue_ai_batch",
@@ -448,12 +492,17 @@ class TracingActuationWorker(ActuationWorker):
         return accepted
 
     def _execute(self, command: ActuationCommand) -> None:
+        entered_ns = time.perf_counter_ns()
         self._latency_trace.record(
             "actuation_execute_enter",
+            at_ns=entered_ns,
             command_id=command.command_id,
             expected_ns=command.expected_ns,
             action=command.action.value,
             category=command.category.value,
+            dispatch_lateness_ms=(entered_ns - command.expected_ns) / 1_000_000,
+            normal_queue_size=self.normal_queue_size,
+            emergency_queue_size=self.emergency_queue_size,
         )
         super()._execute(command)
 
@@ -663,6 +712,7 @@ class Runtime:
         self.sequence = 0
         self._last_ui_ns = 0
         self._shutdown_completed = False
+        self._abort_close_confirmed = False
         self._story_35_file_service = None
         self._story_35_writer = None
         self._story_35_ingress = None
@@ -1001,6 +1051,7 @@ class Runtime:
             return
         self._last_ui_ns = now_ns
         quality = self.metrics.snapshot()
+        self.latency_trace.record("ui_render_enter", at_ns=now_ns)
         self.view.render_execution_state(
             ProtocolExecutionSnapshot(
                 status=self.protocol_state.status,
@@ -1021,6 +1072,7 @@ class Runtime:
                 quality_block_reason=self.protocol_state.quality_block_reason,
             )
         )
+        self.latency_trace.record("ui_render_return")
 
     def wait_ms(self, milliseconds: float) -> None:
         deadline = time.monotonic() + milliseconds / 1000.0
@@ -1274,13 +1326,39 @@ class Runtime:
             receipts.append(receipt)
         return receipts
 
+    def _fail_story_35_shutdown_close(self) -> None:
+        writer = getattr(self, "_story_35_writer", None)
+        if writer is not None:
+            writer.fail_from_producer(
+                stage="shutdown_emergency_close",
+                message=(
+                    "中止后未取得全部配置目标关闭回执，"
+                    "Story 3.5 bundle 禁止标记完整。"
+                ),
+            )
+
     def stop(self) -> None:
         try:
-            if self.actuation.isRunning() and not self._shutdown_completed:
-                closed = self.actuation.emergency_close_all(
-                    int(self.config.get("actuation_emergency_close_timeout_ms", 500)) * 4
-                )
+            if (
+                self.actuation.isRunning()
+                and not self._shutdown_completed
+                and not self._abort_close_confirmed
+            ):
+                try:
+                    closed = self.actuation.emergency_close_all(
+                        int(
+                            self.config.get(
+                                "actuation_emergency_close_timeout_ms",
+                                500,
+                            )
+                        )
+                        * 4
+                    )
+                except Exception:
+                    self._fail_story_35_shutdown_close()
+                    raise
                 if not closed:
+                    self._fail_story_35_shutdown_close()
                     raise RuntimeError("shutdown emergency close-all 未获得全部成功回执")
         finally:
             self.actuation.shutdown(int(self.config.get("actuation_shutdown_timeout_ms", 2000)))
@@ -1388,6 +1466,35 @@ def wait_for_full_close(
     return evidence
 
 
+def confirm_severe_abort_close(
+    runtime: Runtime,
+    *,
+    after_index: int,
+    timeout_s: float = 3.0,
+) -> dict:
+    """Wait for owner severe closes before fencing and finalizing the bundle."""
+    evidence = wait_for_full_close(
+        runtime,
+        after_index=after_index,
+        scenario="severe-abort",
+        timeout_s=timeout_s,
+    )
+    if not evidence["all_configured_targets_closed"]:
+        runtime.close_everything("severe-abort-recovery")
+        evidence = wait_for_full_close(
+            runtime,
+            after_index=after_index,
+            scenario="severe-abort",
+            timeout_s=timeout_s,
+        )
+    if not evidence["all_configured_targets_closed"]:
+        raise RuntimeError(
+            "正式 benchmark severe 中止未取得全部配置目标关闭回执，禁止完成 bundle"
+        )
+    runtime._abort_close_confirmed = True
+    return evidence
+
+
 def run_authorized_close_check(runtime: Runtime, *, timeout_ms: int) -> dict:
     """Close every DO target without requiring AI or serial owners to become ready."""
     marker = len(runtime.collector.receipts)
@@ -1482,13 +1589,26 @@ def run_benchmark(runtime: Runtime, args) -> dict:
     runtime.start_protocol_document(document)
     started = time.time()
     for index, trial in enumerate(trials):
+        abort_close_marker = len(runtime.collector.receipts)
         opened = runtime.trigger_current_trial_via_ai0(label=trial.trial_id)
-        _, closed = wait_protocol_trial(
-            runtime,
-            label=trial.trial_id,
-            opened=opened,
-        )
+        try:
+            _, closed = wait_protocol_trial(
+                runtime,
+                label=trial.trial_id,
+                opened=opened,
+            )
+        except Exception:
+            if runtime.metrics.severe_latched:
+                confirm_severe_abort_close(
+                    runtime,
+                    after_index=abort_close_marker,
+                )
+            raise
         if (opened.jitter_ms or 0) > 30.0 or (closed.jitter_ms or 0) > 30.0:
+            confirm_severe_abort_close(
+                runtime,
+                after_index=abort_close_marker,
+            )
             raise RuntimeError("正式 benchmark 发生单次 >30ms 严重超限，已停止")
         expected_status = (
             ProtocolExecutionStatus.COMPLETED
@@ -2117,6 +2237,7 @@ def main() -> int:
                 ):
                     exit_code = 1
             write_csv(output_dir / "receipts.csv", runtime.collector.receipts)
+            runtime.collector.write_jsonl()
             runtime.latency_trace.write_jsonl(output_dir / "latency-trace.jsonl")
         metadata["finished_at"] = time.time()
         (output_dir / "metadata.json").write_text(

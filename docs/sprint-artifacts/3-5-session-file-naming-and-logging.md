@@ -223,6 +223,10 @@ Status: review
   - [x] [AI-Review][High] live Story 3.5 `--candidate-commit` 必须解析为存在的 Git object、精确等于当前 HEAD 且 worktree/index clean；simulation smoke 保留明确 simulation 语义，不得冒充正式 candidate evidence。
   - [x] [AI-Review][Medium] 统一生产计划与 writer/validator 的 master_prepare 契约：合法 MANUAL/PRETEST 对配置主阀 target 的 `valve=0` receipt 可记录；错误 target、非法 action/category 与其他 `valve=0` 继续 fail closed。
   - [x] [AI-Review][Medium] Story 3.5 runner 必须保持单 session 单绑定协议，安全场景不得在 benchmark session 内加载不同 ProtocolDocument；session_closed 最终质量必须固定为正式 benchmark 质量，不得被最后一个安全场景的 metrics reset 覆盖，同时保留 canonical receipts、producer fences 与 validator。
+  - [x] [HIL][Evidence] 登记失败 candidate `7c4d971aa370056b8a70cee3592344bb54dd7ad7` 与只读正式运行目录 `logs/benchmarks/story-3-5-20260730-183616-live`：正常 open/close 各完成 `68/200`，已有 136 条正常 receipt 均为 success；`protocol-9-close-1000283`（trial `bench-0068-v9`、valve 9 close）jitter `30.3166 ms` 超过 severe limit 后中止，未继续剩余正常动作及四个安全场景。中止 bundle writer/validator 均 complete、`dropped_count=0`、queue high-water=5、sequence `1..750`、三 producer fences 与 raw/log hash/byte/count 均一致。初始 finding 报告 severe 后缺少完整 emergency-close；后续只读逐序复核确认 sequence `728..748` 实际保存了同 run 的 21 条 `shutdown-close` success，且早于 actuation fence/controller event/`session_closed`，但 close-severe owner 分支自身没有生成 `severe-close`，安全收尾依赖 finally 通用 shutdown 补救。事后独立 close 目录 `logs/benchmarks/story-3-4-20260730-183741-live` 仅作额外安全佐证，不替代本 run 验收。
+  - [x] [HIL][High] 使用现有 latency trace 定位并修复 `protocol-9-close-1000283` 的 `30.3166 ms` 超限根因，重点审计 UI、SessionWriter、AI batch、owner queue 与 DAQ write 调度；不得删除样本、改变统计口径、降低 severe limit、增加未声明 warm-up 或挑选成功 run。
+  - [x] [HIL][High] 修复 severe abort → emergency close → receipt drain → producer fence → bundle finalize 顺序；正式 run 必须有界等待并在自身 bundle 持久化全部 21 个配置目标关闭回执，任何中止均不得继续后续安全场景，也不得依赖事后独立 close。
+  - [x] [HIL][Automated Gate] 为延迟超限和中止全关顺序先增加确定性 RED 测试，再做最小修复；完成 Story 定向测试、全量 `python -m pytest -q`、`python -m ruff check .` 与 `git diff --check`，仅使用 MockHAL/fake/只读证据，不连接或操作真实硬件、不运行真实 NI HIL。
   - [ ] [HIL][Acceptance] 以新的 40 位 candidate commit 在真实 Windows/NI 上从正式 `scripts/hil_actuation_benchmark.py --story-3-5-recording` 入口完成单次预声明验收：正常 open/close 各 `200/200`、全部 rolling/final-last-100 p95 Gate、四个安全场景、完整 producer fences 与最终 bundle validator 均通过；失败或中止不得继续后续安全场景。通过前 Story、Task 10 与 sprint-status 保持 `review`。
 
 ### Review Findings
@@ -400,6 +404,10 @@ GPT-5 Codex
 - Task 10 只读证据复核：中止 bundle 的 raw/log SHA-256、byte、count、last sequence、producer fences 与 `dropped_count=0` 均未变化；修复后的 validator 在配置 `Dev2/P1.0` 为 master 时接受该 bundle，未改写任何证据文件。
 - Task 10 MockHAL smoke：正式 runner 的 `--story-3-5-recording` 模式在 20 open/20 close 下完成 UI、SessionWriter、hardware/actuation/controller fences、四个安全场景与 bundle final validator；该运行仅用于软件路径验证，不构成真实 NI HIL 证据。
 - 本次独立复审 RED：HIL runner 的 candidate/performance/failure-callback/session-boundary/quality-preservation 5 个测试稳定得到 5 failed；writer/master 契约组合得到 9 failed、3 个既有非法类别场景已正确拒绝。所有 RED 均在修改对应实现前运行。
+- 2026-07-30 第二次真实 HIL 失败证据：candidate `7c4d971aa370056b8a70cee3592344bb54dd7ad7`；正式目录 `logs/benchmarks/story-3-5-20260730-183616-live` 只读；正常 open/close 各 `68/200`，触发 receipt `protocol-9-close-1000283` jitter `30.3166 ms`、result success，随后 severe latch 并中止。bundle 完整性 Gate 通过但 severe 后缺少完整 21 条 emergency-close receipts；独立 close 目录 `logs/benchmarks/story-3-4-20260730-183741-live` 只证明随后硬件 owner 最终关闭，不替代失败 run 自身的安全收尾证据。
+- 第二次 HIL trace 根因复核：触发 close 的 `started_ns - expected_ns = 29.6321 ms`，而 `actual_ns - started_ns = 0.6845 ms`，超限发生在 Actuation owner 调度、不是 NI DAQ write；旧 trace 在 open 后立即 `trial_trace_end`，比 close deadline 早约 `98.8 ms`，因此只留下 close submit、漏掉 close execute/UI/message 阶段。代码审计确认普通 deadline 被非安全 priority message 抢占，且 HIL `ReceiptCollector.record()` 在 receipt signal 路径同步打开/写 diagnostic JSONL；两项均违反 deadline/owner 隔离。修复后 close deadline 在到期前 5 ms 保留 owner 窗口、到期后先于非安全 message，安全 stop/interlock/recorder failure 仍优先；diagnostic receipts 改为 owner 停止后落盘，canonical SessionWriter ingress 不变。
+- 第二次 HIL 安全顺序复核：历史 bundle 的 sequence `728..748` 是 21 条 `shutdown-close` success，早于 actuation fence `746`、controller event 与 `session_closed=750`，证据文件 hash/size/mtime 在回归前后不变；缺陷是正常 close severe 分支未提交 `severe-close`。修复后 owner 立即提交全部配置目标 `severe-close`，runner 有界确认完整 target set 后才标记 abort close confirmed；随后 Actuation shutdown 发 fence、Hardware 发 fence、Controller 发 fence并 finalize。全关不完整时 writer 先锁存 `shutdown_emergency_close` failure，禁止 complete bundle。
+- 第二次 HIL follow-up RED→GREEN：deadline reservation、延迟 close trace、owner 路径无 diagnostic 磁盘写、close-severe 全目标回执/fence 顺序及 runner 中止等待首轮稳定得到 5 failed；最小修复后相关 5 passed，扩展受影响整文件 108 passed。
 
 ### Completion Notes List
 
@@ -496,6 +504,7 @@ GPT-5 Codex
 - 独立复审 Medium-2 闭环：benchmark 通过性能 Gate 后先以其即时 quality snapshot、三 producer fences 和 validator 封存独立 bundle；四个安全协议各自使用独立 recording session/document/bundle，禁止活动 session 加载不同 ProtocolDocument。MockHAL 20/20 smoke 生成 benchmark + 4 safety 共 5 个 complete bundle，benchmark `session_closed.final_quality` 保留正式样本 20 open/20 close，不受 severe/shutdown metrics reset 覆盖。
 - 本次独立复审最终 Gate：新增/扩展确定性测试全部 GREEN；Story 定向集合 454 passed；全量 `python -m pytest -q` 625 passed；`python -m ruff check .` 与 `git diff --check` 通过。只使用 MockHAL、temp Git repo 与只读历史证据，未连接或运行真实 NI HIL。
 - 新的真实 Windows/NI Acceptance 仍未执行且保持未勾选；Task 10 父项、Story 与 sprint-status 继续为 `review`。未提交、未推送。
+- 2026-07-30 第二次真实 Windows/NI Acceptance 失败已登记并完成自动化 follow-up：正常 open/close 各 `68/200` 后，valve 9 close jitter `30.3166 ms` 触发 severe 中止；性能样本与四个安全场景均未完成。只读复核将延迟定位到 owner dispatch（`29.6321 ms`）而非 DAQ write（`0.6845 ms`），并确认历史 bundle 已由 finally 保存 21 条 `shutdown-close`，真正契约缺口为 close-severe 未自行生成 `severe-close`。现已完成 deadline owner reservation、diagnostic I/O 隔离、延迟 close trace、severe 全目标关闭/有界 drain/fence/finalize 及 incomplete bundle fail-closed；Story 定向 462 passed、全量 633 passed、ruff/diff check 通过。新的真实 HIL Acceptance 仍未完成；Task 10、Story 与 sprint-status 继续保持 `review`。
 
 ### File List
 
@@ -545,6 +554,7 @@ GPT-5 Codex
 - 2026-07-30：登记 candidate `c9baff6e6910266621fb2a36c6b62f880f42a27e` 的真实 Windows/NI HIL 失败：首个正式动作 jitter `33.0973 ms` 后 severe 中止并安全关闭 21/21 目标；记录 master `valve=0` complete-bundle validator 契约缺陷与正式 HIL runner 缺口，新增未完成 Task 10。Story 与 sprint-status 保持 `review`。
 - 2026-07-30：完成 Task 10 的自动化 review continuation：修复 owner trigger cutover 前 AI backlog 被首个正式动作消费、统一 master `valve=0` writer/validator 契约，并将 Story 3.5 SessionWriter/fence/final-validator 生命周期纳入正式 HIL runner；新增确定性 RED→GREEN、当前中止 bundle 只读回归与 MockHAL smoke。真实 Windows/NI 验收仍未运行，Task 10、Story 与 sprint-status 保持 `review`，未提交、未推送。
 - 2026-07-30：处理 Story 3.5 HIL follow-up 独立复审的 4 High、2 Medium：冲突 duplicate receipt fail closed、writer failure 直达 interlock、性能 Gate 前置、live candidate Git 绑定、MANUAL/PRETEST master_prepare 契约及单 session 单协议/质量隔离全部闭环；定向 454 passed、全量 625 passed、ruff/diff check 通过。真实 HIL Acceptance 仍未运行，Task 10、Story 与 sprint-status 保持 `review`，未提交、未推送。
+- 2026-07-30：登记并处理 candidate `7c4d971aa370056b8a70cee3592344bb54dd7ad7` 的第二次真实 Windows/NI HIL 失败：正常 open/close 各 `68/200` 后 `protocol-9-close-1000283` jitter `30.3166 ms` 触发 severe 中止。只读 trace 将超限定位到 owner dispatch 并暴露延迟 close trace 缺口；只读 bundle 复核确认已有 21 条 finally `shutdown-close`，同时证明 close-severe owner 分支未自行全关。完成 deadline reservation、diagnostic receipt I/O 隔离、trace 补齐、severe 21/21 有界 drain/fence/finalize 与 incomplete bundle fail-closed；定向 462 passed、全量 633 passed、ruff/diff check 通过。新的真实 HIL Acceptance 仍未完成，Story、Task 10 与 sprint-status 保持 `review`。
 
 ## Senior Developer Review (AI)
 

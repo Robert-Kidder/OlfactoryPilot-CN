@@ -237,6 +237,8 @@ class ProtocolStartAck:
 class ActuationWorker(QThread):
     """Single owner for protocol actuation state, quality metrics and DO scheduling."""
 
+    _NORMAL_DEADLINE_RESERVE_NS = 5_000_000
+
     receipt_ready = Signal(object)
     snapshot_ready = Signal(object)
     status_message = Signal(str)
@@ -1201,6 +1203,40 @@ class ActuationWorker(QThread):
             if self._emergency:
                 command = self._emergency.popleft()
                 return command
+            safety_priority_message_kinds = {
+                "emergency_close_all",
+                "input_error",
+                "interlock_changed",
+                "recorder_failed",
+                "stop",
+            }
+            for index, message in enumerate(self._messages):
+                if message[0] in {"recorder_bind", "recorder_fence"}:
+                    break
+                if message[0] in safety_priority_message_kinds:
+                    del self._messages[index]
+                    return message
+            now_ns = int(self._clock_ns())
+            normal_head = self._normal_heap[0][:3] if self._normal_heap else None
+            deadline_head = self._deadline_heap[0][:3] if self._deadline_heap else None
+            if deadline_head is not None and deadline_head[0] <= now_ns and (
+                normal_head is None or deadline_head <= normal_head
+            ):
+                _, _, _, kind, payload = heapq.heappop(self._deadline_heap)
+                return kind, payload
+            if self._normal_heap and self._normal_heap[0][0] <= now_ns:
+                return heapq.heappop(self._normal_heap)[3]
+            next_due_ns = (
+                self._normal_heap[0][0]
+                if self._normal_heap
+                and self._normal_heap[0][3].action == ActuationAction.CLOSE
+                else None
+            )
+            if (
+                next_due_ns is not None
+                and next_due_ns - now_ns <= self._NORMAL_DEADLINE_RESERVE_NS
+            ):
+                return None
             priority_message_kinds = {
                 "emergency_close_all",
                 "flow_result",
@@ -1223,16 +1259,6 @@ class ActuationWorker(QThread):
                 if message[0] in priority_message_kinds:
                     del self._messages[index]
                     return message
-            now_ns = int(self._clock_ns())
-            normal_head = self._normal_heap[0][:3] if self._normal_heap else None
-            deadline_head = self._deadline_heap[0][:3] if self._deadline_heap else None
-            if deadline_head is not None and deadline_head[0] <= now_ns and (
-                normal_head is None or deadline_head <= normal_head
-            ):
-                _, _, _, kind, payload = heapq.heappop(self._deadline_heap)
-                return kind, payload
-            if self._normal_heap and self._normal_heap[0][0] <= now_ns:
-                return heapq.heappop(self._normal_heap)[3]
             if self._messages:
                 if self._messages[0][0] == "recorder_fence" and (
                     self._normal_heap
@@ -2253,7 +2279,13 @@ class ActuationWorker(QThread):
             if trial_id:
                 self.protocol_state.executed_quality_failed_trials.add(trial_id)
             self.protocol_state.quality_resume_status = self.protocol_state.status
-            self._block("关闭动作时序严重超限；阀门已确认关闭，请显式重新布防。")
+            self._block(
+                "关闭动作时序严重超限；已请求全部配置目标紧急关闭，请确认后重新布防。"
+            )
+            self._submit_all_configured_closes(
+                reason=self.protocol_state.quality_block_reason,
+                prefix="severe-close",
+            )
         elif receipt.action == ActuationAction.CLOSE and receipt.result != ActuationResult.SUCCESS:
             self.submit_emergency_close(
                 receipt.valve,

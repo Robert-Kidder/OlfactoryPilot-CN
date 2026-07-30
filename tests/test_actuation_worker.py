@@ -599,6 +599,42 @@ def test_deadlines_do_not_run_early_and_equal_deadlines_use_sequence_order() -> 
     assert calls == ["first", "second"]
 
 
+def test_imminent_normal_deadline_reserves_owner_ahead_of_non_safety_messages() -> None:
+    clock = FakeClock()
+    calls = []
+
+    def writer(command: ActuationCommand) -> ActuationReceipt:
+        calls.append(command.command_id)
+        return ActuationReceipt.from_write(
+            command=command,
+            started_ns=clock.value,
+            actual_ns=clock.value,
+            wall_timestamp=10.0,
+            result=ActuationResult.SUCCESS,
+        )
+
+    worker, _, _ = _worker(clock, writer)
+    close = _command(
+        command_id="scheduled-close",
+        sequence=1,
+        expected_ns=clock.value + 2_000_000,
+        action=ActuationAction.CLOSE,
+        category=ActuationCategory.NORMAL,
+        duration_ns=None,
+    )
+    readiness = ProtocolExecutionReadiness(True, True, True, "SAFE", True)
+
+    assert worker.submit(close)
+    worker.post_manual_trigger(readiness=readiness)
+
+    assert worker.process_ready(max_items=1) == 0
+    assert calls == []
+
+    clock.value = close.expected_ns
+    assert worker.process_ready(max_items=1) == 1
+    assert calls == ["scheduled-close"]
+
+
 def test_manual_trigger_bypasses_ai_backlog_without_dropping_samples() -> None:
     clock = FakeClock()
     worker, _, _ = _worker(clock, lambda _command: None)
@@ -1486,6 +1522,97 @@ def test_severe_close_advances_final_trial_then_explicit_ack_completes_without_r
     worker.process_ready()
     assert executor.state.status == ProtocolExecutionStatus.COMPLETED
     assert executor.state.trial_index == 1
+
+
+def test_severe_normal_close_enqueues_every_configured_emergency_close_before_fence() -> None:
+    clock = FakeClock()
+    readiness = ProtocolExecutionReadiness(True, True, True, "SAFE", True)
+    document = ProtocolDocument(
+        source_path=Path("severe-close-all.csv"),
+        source_name="severe-close-all.csv",
+        trials=[ProtocolTrial("one", 0, 100, 1, TriggerMode.MANUAL)],
+    )
+    executor = ProtocolExecutor(
+        gating_service=GatingService(exhale_threshold=-0.5),
+        valve_writer=lambda *_: (_ for _ in ()).throw(
+            AssertionError("sync writer")
+        ),
+        deferred_actuation=True,
+        clock=lambda: 10.0,
+    )
+    recorder = SessionIngressSpy()
+
+    def writer(command):
+        delay = (
+            31_000_000
+            if command.action == ActuationAction.CLOSE
+            and command.category == ActuationCategory.NORMAL
+            else 0
+        )
+        return ActuationReceipt.from_write(
+            command=command,
+            started_ns=command.expected_ns,
+            actual_ns=command.expected_ns + delay,
+            wall_timestamp=10.0,
+            result=ActuationResult.SUCCESS,
+        )
+
+    worker = ActuationWorker(
+        protocol_executor=executor,
+        writer=writer,
+        interlock=ActuationInterlockIngress(_safe_snapshot()),
+        metrics=ActuationMetrics(),
+        valve_service=_configured_valve_service(),
+        monotonic_ns_clock=clock,
+        wall_clock=lambda: 10.0,
+    )
+    worker.set_session_recorder(recorder)
+    batch = BreathSampleBatch.from_frames(
+        (
+            AnalogInputFrame(
+                10.0,
+                -0.6,
+                monotonic_ns=clock.value,
+                ai_epoch=1,
+                sample_sequence=1,
+            ),
+        )
+    )
+    worker.post_start(document=document, readiness=readiness)
+    worker.post_manual_trigger(readiness=readiness)
+    worker.post_ai_batch(batch, readiness=readiness)
+    worker.process_ready()
+    clock.value = executor.state.close_deadline_ns
+
+    assert worker.process_ready(max_items=1) == 1
+    severe_closes = list(worker._emergency)
+    assert {
+        (item.valve, item.target_device, item.target_line)
+        for item in severe_closes
+    } == {
+        (0, "Dev2", "P1.0"),
+        (1, "Dev1", "P0.0"),
+        (2, "Dev1", "P0.1"),
+    }
+    assert all(
+        item.command_id.startswith("severe-close-")
+        and item.category == ActuationCategory.SAFETY
+        for item in severe_closes
+    )
+
+    worker.process_ready()
+    assert worker._emit_recorder_fence()
+    fence_index = next(
+        index for index, call in enumerate(recorder.calls) if call[0] == "fence"
+    )
+    emergency_receipt_indexes = [
+        index
+        for index, call in enumerate(recorder.calls)
+        if call[0] == "receipt"
+        and call[2].command_id.startswith("severe-close-")
+    ]
+    assert len(emergency_receipt_indexes) == 3
+    assert max(emergency_receipt_indexes) < fence_index
 
 
 def test_next_ttl_trial_rearms_physical_detector_only_after_close_receipt() -> None:
