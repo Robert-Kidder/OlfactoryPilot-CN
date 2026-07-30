@@ -618,7 +618,7 @@ def test_hardware_check_service_pass(monkeypatch):
 
     devices = [
         FakeDevice("Dev1", "NI USB-6001"),
-        FakeDevice("Dev2", "NI USB-6501"),
+        FakeDevice("Dev2", "NI USB-6001"),
     ]
     nidaqmx_loader = lambda: SimpleNamespace(  # noqa: E731
         System=SimpleNamespace(local=lambda: SimpleNamespace(devices=devices))
@@ -645,7 +645,6 @@ def test_hardware_check_service_pass(monkeypatch):
     )
 
     service = HardwareCheckService(
-        expected_ni_devices=["USB-6001", "USB-6501"],
         serial_port="COM6",
         baud_rate=115200,
         time_func=lambda: 123.0,
@@ -656,10 +655,41 @@ def test_hardware_check_service_pass(monkeypatch):
     results, ready = service.run_checks()
     assert ready is True
     ni_status = {r.name: r.status for r in results if r.type == "ni"}
-    assert ni_status == {"USB-6001": "PASS", "USB-6501": "PASS"}
+    assert ni_status == {"Dev1": "PASS", "Dev2": "PASS"}
     serial_result = next(r for r in results if r.type == "serial")
     assert serial_result.status == "PASS"
     assert serial_result.checked_at == 123.0
+
+
+@pytest.mark.parametrize(
+    "devices",
+    [
+        [
+            SimpleNamespace(name="Dev10", product_type="NI USB-6001"),
+            SimpleNamespace(name="Dev20", product_type="NI USB-6001"),
+        ],
+        [
+            SimpleNamespace(name="Dev1", product_type="NI USB-6501"),
+            SimpleNamespace(name="Dev2", product_type="NI USB-6001"),
+        ],
+    ],
+)
+def test_hardware_check_service_rejects_wrong_alias_or_model(devices):
+    nidaqmx_loader = lambda: SimpleNamespace(  # noqa: E731
+        System=SimpleNamespace(local=lambda: SimpleNamespace(devices=devices))
+    )
+    service = HardwareCheckService(
+        expected_ni_devices="Dev1",
+        serial_port=None,
+        baud_rate=None,
+        nidaqmx_loader=nidaqmx_loader,
+    )
+
+    results, ready = service.run_checks()
+
+    assert ready is False
+    dev1 = next(result for result in results if result.name == "Dev1")
+    assert dev1.status == "FAIL"
 
 
 def test_hardware_check_service_retries_serial_permission_error(monkeypatch):
@@ -911,7 +941,7 @@ def test_hardware_check_service_reports_failures(monkeypatch):
     )
 
     service = HardwareCheckService(
-        expected_ni_devices=["USB-6001", "USB-6501"],
+        expected_ni_devices=["Dev1", "Dev2"],
         serial_port="COM8",
         baud_rate=9600,
         nidaqmx_loader=failing_nidaqmx_loader,

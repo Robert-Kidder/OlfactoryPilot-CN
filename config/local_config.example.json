@@ -4,8 +4,7 @@
   "baud_rate": 19200,
   "ni_devices": [
     "Dev1",
-    "Dev2",
-    "Dev3"
+    "Dev2"
   ],
   "ai0_channel": "Dev1/ai0",
   "ttl_input_channel": "Dev1/ai6",

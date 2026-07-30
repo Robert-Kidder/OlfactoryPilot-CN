@@ -9,6 +9,11 @@ from app.models import SelfCheckResult
 
 LOG = logging.getLogger(__name__)
 
+REQUIRED_DEVICE_PRODUCTS = {
+    "dev1": "usb-6001",
+    "dev2": "usb-6001",
+}
+
 
 class HardwareCheckService:
     """Run startup self-checks for NI DAQ and RS232 serial connectivity."""
@@ -26,7 +31,13 @@ class HardwareCheckService:
         serial_open_retries: int = 1,
         serial_retry_interval_s: float = 0.25,
     ) -> None:
-        self.expected_ni_devices = [d for d in (expected_ni_devices or [])]
+        if isinstance(expected_ni_devices, str):
+            expected_ni_devices = [expected_ni_devices]
+        self.expected_ni_devices = [
+            str(device).strip()
+            for device in (expected_ni_devices or [])
+            if str(device).strip()
+        ]
         self.serial_port = serial_port
         self.baud_rate = baud_rate
         self._now = time_func
@@ -78,7 +89,7 @@ class HardwareCheckService:
     def _check_ni_devices(self) -> list[SelfCheckResult]:
         timestamp = self._now()
         results: list[SelfCheckResult] = []
-        expected = self.expected_ni_devices or ["USB-6001", "USB-6501"]
+        expected = self.expected_ni_devices or ["Dev1", "Dev2"]
         try:
             system = self._load_nidaqmx_system()
             devices = list(getattr(system.System.local(), "devices", []))
@@ -120,9 +131,14 @@ class HardwareCheckService:
             ]
 
         def _matches(device, target: str) -> bool:
-            target_lower = target.lower()
-            product = str(getattr(device, "product_type", "")).lower()
-            device_name = str(getattr(device, "name", "")).lower()
+            target_lower = target.casefold()
+            product = str(getattr(device, "product_type", "")).casefold()
+            device_name = str(getattr(device, "name", "")).casefold()
+            required_product = REQUIRED_DEVICE_PRODUCTS.get(target_lower)
+            if required_product is not None:
+                return device_name == target_lower and required_product in product
+            if target_lower.startswith("dev") and target_lower[3:].isdigit():
+                return device_name == target_lower
             return target_lower in product or target_lower in device_name
 
         for name in expected:

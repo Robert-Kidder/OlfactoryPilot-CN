@@ -66,8 +66,8 @@
   "serial_open_retries": 2,
   "serial_retry_interval_s": 0.25,
   "ni_devices": [
-    "USB-6001",
-    "USB-6501"
+    "Dev1",
+    "Dev2"
   ],
   "hal_mode": "mock",
   "ai0_channel": "Dev1/ai0",

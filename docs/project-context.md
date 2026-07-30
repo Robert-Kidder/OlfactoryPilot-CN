@@ -63,8 +63,9 @@ OlfactoryPilot-CN 是用于嗅觉刺激实验的 Windows 桌面控制软件，�
 - NI USB-6001 `Dev2`
   - `P1.0`：主阀控制，配置中写作 `Dev2/P1.0`，运行时转换为 NI-DAQmx 线路 `Dev2/port1/line0`。
   - `P0.0-P0.7`：气味通道 13-20，以 `config/default_config.json` 的 `valve_mapping` 为准。
-- NI USB-6501 `Dev3`
-  - 当前主要用于启动自检和后续扩展，实际阀门映射仍以默认配置为唯一运行来源。
+- 当前实验台未安装 NI USB-6501，生产配置中不要求 `Dev3`。
+  - `Dev3` 仅保留为历史预留名称；当前呼吸/TTL 采集、主阀和 20 通道气味阀全部由 `Dev1`、`Dev2` 承担。
+  - 若日后扩展 USB-6501，须先以设备铭牌和 NI MAX 确认型号与设备名，再通过本机 `config/local_config.json` 显式登记；不得在未确认用途时加入阀门映射。
 - Alicat RS232
   - MFC A：气味/补偿气路。
   - MFC B：载气气路。
