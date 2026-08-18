@@ -400,6 +400,7 @@ class ActuationWorker(QThread):
         self._manual_possibly_open: set[int] = set()
         self._manual_pending_flow_id: str | None = None
         self._manual_pending_flow_command: FlowCommand | None = None
+        self._manual_pending_flow_role = ""
         self._manual_flow_result: FlowCommandResult | None = None
 
     def set_session_recorder(self, recorder) -> bool:
@@ -869,7 +870,7 @@ class ActuationWorker(QThread):
         self,
         command: ActuationCommand,
     ) -> bool:
-        """Permit only the configured selector's odor route outside safe-stop plans."""
+        """Permit odor, plus the identity-bound manual post-A=0 compensation step."""
 
         if self.valve_service is None:
             return False
@@ -892,16 +893,32 @@ class ActuationWorker(QThread):
         elif command.category == ActuationCategory.MANUAL:
             expected = self._manual_expected.get(command.command_id)
             if expected is not None and (
-                expected.get("role") != "selector_odor"
+                expected.get("role") not in {"selector_odor", "selector_compensation"}
                 or expected.get("command") != command
             ):
                 return False
             if expected is None and command.command_id not in self._plan_by_command:
                 return False
+            if expected is not None and expected.get("role") == "selector_compensation":
+                plan = self._manual_plan
+                if (
+                    plan is None
+                    or not self._manual_snapshot.flow_zero_confirmed
+                    or command.operation_id != plan.identity.operation_id
+                    or command.generation != plan.identity.generation
+                ):
+                    return False
         elif command.command_id not in self._plan_by_command:
             return False
+        route = (
+            SelectorRoute.COMPENSATION
+            if command.category == ActuationCategory.MANUAL
+            and expected is not None
+            and expected.get("role") == "selector_compensation"
+            else SelectorRoute.ODOR
+        )
         try:
-            step = self.valve_service.selector_route_step(SelectorRoute.ODOR)
+            step = self.valve_service.selector_route_step(route)
         except ValueError:
             return False
         expected_action = ActuationAction.OPEN if step.state else ActuationAction.CLOSE
@@ -2414,9 +2431,21 @@ class ActuationWorker(QThread):
             self._background_safe_stop_flow_deadlines.clear()
             self._background_safe_stop_selector_id = None
             self._background_safe_stop_close_pending.clear()
+            if self._manual_snapshot.status is ManualExperimentStatus.RECOVERY_REQUIRED:
+                self._manual_snapshot = ManualExperimentSnapshot()
+                self._manual_plan = None
+                self._manual_lease_token = None
+                self._manual_expected.clear()
+                self._manual_receipts.clear()
+                self._manual_possibly_open.clear()
+                self._manual_pending_flow_id = None
+                self._manual_pending_flow_command = None
+                self._manual_pending_flow_role = ""
+                self._manual_flow_result = None
             self._accepting = True
         self._settle_cancelled_receipts(cancelled)
         self._reject_queued_messages(queued_messages)
+        self.manual_snapshot_ready.emit(self._manual_snapshot)
         return True
 
     def _pop_ready(self) -> ActuationCommand | tuple[str, dict[str, Any]] | None:
@@ -4209,6 +4238,9 @@ class ActuationWorker(QThread):
             ManualExperimentStatus.OPENING,
             ManualExperimentStatus.STIMULATING,
             ManualExperimentStatus.CLOSING,
+            ManualExperimentStatus.ZEROING_A,
+            ManualExperimentStatus.SELECTOR_COMPENSATION,
+            ManualExperimentStatus.RESTORING_SUPPLY,
         }
 
     def _manual_possibly_open_ports(self) -> tuple[int, ...]:
@@ -4305,6 +4337,7 @@ class ActuationWorker(QThread):
         self._manual_possibly_open.clear()
         self._manual_pending_flow_id = None
         self._manual_pending_flow_command = None
+        self._manual_pending_flow_role = ""
         self._manual_flow_result = None
         self._publish_manual(
             status=ManualExperimentStatus.FLOW_PENDING,
@@ -4322,6 +4355,9 @@ class ActuationWorker(QThread):
             possibly_open=(),
             recovery_reason="",
         )
+        if plan.supply_only:
+            self._submit_manual_post_close_zero()
+            return
         self._sequence += 1
         setpoints = plan.flow_setpoints
         command = FlowCommand(
@@ -4339,6 +4375,7 @@ class ActuationWorker(QThread):
         )
         self._manual_pending_flow_id = command.command_id
         self._manual_pending_flow_command = command
+        self._manual_pending_flow_role = "initial_supply"
         if self._flow_submitter(command) is False:
             self._fail_manual("手动实验流量命令未被 FlowWorker 接受。")
             return
@@ -4354,6 +4391,7 @@ class ActuationWorker(QThread):
     def _consume_manual_flow_result(self, wrapped: FlowCommandResult) -> None:
         plan = self._manual_plan
         command = self._manual_pending_flow_command
+        role = self._manual_pending_flow_role
         if plan is None:
             return
         if self._manual_flow_result is not None:
@@ -4363,7 +4401,6 @@ class ActuationWorker(QThread):
         if command is None or not self._manual_active():
             self._fail_manual("终态后收到未知或迟到的 manual flow receipt。")
             return
-        setpoints = plan.flow_setpoints
         identity_valid = bool(
             wrapped.command == command
             and wrapped.command.command_id == self._manual_pending_flow_id
@@ -4371,12 +4408,13 @@ class ActuationWorker(QThread):
             and not wrapped.stale
         )
         values_valid = bool(
-            math.isclose(wrapped.result.a, setpoints.sample_a_sccm, abs_tol=1e-9)
-            and math.isclose(wrapped.result.b, float(setpoints.main_b_sccm), abs_tol=1e-9)
-            and math.isclose(wrapped.result.c, setpoints.vacuum_c_sccm, abs_tol=1e-9)
+            math.isclose(wrapped.result.a, command.a, abs_tol=1e-9)
+            and math.isclose(wrapped.result.b, command.b, abs_tol=1e-9)
+            and math.isclose(wrapped.result.c, command.c, abs_tol=1e-9)
         )
         self._manual_pending_flow_id = None
         self._manual_pending_flow_command = None
+        self._manual_pending_flow_role = ""
         if not identity_valid or not wrapped.result.success or not values_valid:
             self._fail_manual(
                 wrapped.result.message
@@ -4384,6 +4422,17 @@ class ActuationWorker(QThread):
             )
             return
         self._manual_flow_result = wrapped
+        if role == "post_close_zero":
+            self._publish_manual(
+                status=ManualExperimentStatus.SELECTOR_COMPENSATION,
+                flow_zero_confirmed=True,
+            )
+            self._submit_manual_selector_compensation()
+            return
+        if role == "restore_supply":
+            self._publish_manual(supply_restored=True)
+            self._complete_manual()
+            return
         self.interlock.update(flow_setpoints_ready=True)
         if not self.interlock.clear_unsafe_latch():
             self._fail_manual("手动流量确认后安全锁存无法清除。")
@@ -4566,6 +4615,14 @@ class ActuationWorker(QThread):
             self._publish_manual(selector_odor_confirmed=True)
             self._submit_manual_open_cohort()
             return
+        if role == "selector_compensation":
+            self.valve_service.commit_receipt(receipt)
+            if self.valve_service.selector_route is not SelectorRoute.COMPENSATION:
+                self._fail_manual("selector compensation receipt 未形成可信路线状态。")
+                return
+            self._publish_manual(selector_compensation_confirmed=True)
+            self._submit_manual_restore_supply()
+            return
         target = expected["target"]
         if role == "open":
             self._manual_possibly_open.add(target.internal_valve)
@@ -4627,7 +4684,106 @@ class ActuationWorker(QThread):
                 possibly_open=self._manual_possibly_open_ports(),
             )
             if len(confirmed) == len(plan.targets):
-                self._complete_manual()
+                self._submit_manual_post_close_zero()
+
+    def _submit_manual_post_close_zero(self) -> None:
+        plan = self._manual_plan
+        if plan is None:
+            return
+        setpoints = plan.flow_setpoints
+        self._publish_manual(status=ManualExperimentStatus.ZEROING_A)
+        self._sequence += 1
+        command = FlowCommand(
+            command_id=f"manual-zero-a-{plan.identity.generation}-{self._sequence}",
+            execution_epoch=plan.identity.execution_epoch,
+            sequence=self._sequence,
+            mode="manual_post_close_a_zero",
+            a=0.0,
+            b=float(setpoints.main_b_sccm),
+            c=setpoints.vacuum_c_sccm,
+            source="manual:experiment",
+            operation_id=plan.identity.operation_id,
+            generation=plan.identity.generation,
+            lease_token=(None if self._manual_lease_token is None else self._manual_lease_token.token),
+        )
+        self._manual_pending_flow_id = command.command_id
+        self._manual_pending_flow_command = command
+        self._manual_pending_flow_role = "post_close_zero"
+        self._manual_flow_result = None
+        if self._flow_submitter(command) is False:
+            self._fail_manual("手动实验结束时 A=0 命令未被 FlowWorker 接受。")
+            return
+        self._schedule_manual_receipt_timeout("flow_zero", (command.command_id,))
+
+    def _submit_manual_selector_compensation(self) -> None:
+        plan = self._manual_plan
+        if plan is None:
+            return
+        try:
+            step = self.valve_service.selector_route_step(SelectorRoute.COMPENSATION)
+        except ValueError as exc:
+            self._fail_manual(str(exc))
+            return
+        self._sequence += 1
+        action = ActuationAction.OPEN if step.state else ActuationAction.CLOSE
+        command = ActuationCommand(
+            command_id=f"manual-selector-safe-{plan.identity.generation}-{self._sequence}",
+            execution_epoch=plan.identity.execution_epoch,
+            arm_epoch=self.protocol_state.arm_epoch,
+            sequence=self._sequence,
+            trial_id=None,
+            trial_index=None,
+            valve=0,
+            action=action,
+            category=ActuationCategory.MANUAL,
+            expected_ns=int(self._clock_ns()),
+            duration_ns=None,
+            wall_timestamp=float(self._wall_clock()),
+            safety_generation=self.interlock.read()[0],
+            target_device=step.device,
+            target_line=step.line,
+            operation_id=plan.identity.operation_id,
+            generation=plan.identity.generation,
+            step_id="selector_compensation",
+            action_kind=action,
+        )
+        self._manual_expected[command.command_id] = {
+            "role": "selector_compensation",
+            "command": command,
+        }
+        if not self.submit(command):
+            self._fail_manual("A=0 后 selector compensation 命令未被动作 owner 接受。")
+            return
+        self._schedule_manual_receipt_timeout("selector_compensation", (command.command_id,))
+
+    def _submit_manual_restore_supply(self) -> None:
+        plan = self._manual_plan
+        if plan is None:
+            return
+        setpoints = plan.flow_setpoints
+        self._publish_manual(status=ManualExperimentStatus.RESTORING_SUPPLY)
+        self._sequence += 1
+        command = FlowCommand(
+            command_id=f"manual-restore-supply-{plan.identity.generation}-{self._sequence}",
+            execution_epoch=plan.identity.execution_epoch,
+            sequence=self._sequence,
+            mode="manual_restore_supply",
+            a=setpoints.sample_a_sccm,
+            b=float(setpoints.main_b_sccm),
+            c=setpoints.vacuum_c_sccm,
+            source="manual:experiment",
+            operation_id=plan.identity.operation_id,
+            generation=plan.identity.generation,
+            lease_token=(None if self._manual_lease_token is None else self._manual_lease_token.token),
+        )
+        self._manual_pending_flow_id = command.command_id
+        self._manual_pending_flow_command = command
+        self._manual_pending_flow_role = "restore_supply"
+        self._manual_flow_result = None
+        if self._flow_submitter(command) is False:
+            self._fail_manual("selector compensation 后供气恢复命令未被 FlowWorker 接受。")
+            return
+        self._schedule_manual_receipt_timeout("restore_supply", (command.command_id,))
 
     def _handle_manual_deadline(
         self,
@@ -4746,6 +4902,7 @@ class ActuationWorker(QThread):
         )
         self._manual_pending_flow_id = None
         self._manual_pending_flow_command = None
+        self._manual_pending_flow_role = ""
         self._deadline_heap = [
             item
             for item in self._deadline_heap

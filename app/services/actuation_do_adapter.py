@@ -81,8 +81,24 @@ class ActuationDOAdapter:
                 ActuationCategory.PRETEST,
             }
         )
+        selector_manual_compensation = bool(
+            configured_selector_target
+            and command.category == ActuationCategory.MANUAL
+            and command.action
+            == (
+                ActuationAction.CLOSE
+                if self.selector_odor_level
+                else ActuationAction.OPEN
+            )
+            and command.operation_id
+            and command.generation is not None
+            and command.step_id == "selector_compensation"
+            and command.action_kind == command.action
+        )
         if command.valve == 0 and not (
-            selector_safety_route or selector_business_route
+            selector_safety_route
+            or selector_business_route
+            or selector_manual_compensation
         ):
             return ActuationReceipt.from_write(
                 command=command,

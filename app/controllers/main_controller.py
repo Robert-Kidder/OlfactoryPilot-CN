@@ -18,6 +18,7 @@ from PySide6.QtCore import QObject, Qt, QThread, QTimer, Signal, Slot
 from app.models import (
     ActuationCategory,
     AppState,
+    ChannelVerification,
     CleaningConfigSnapshot,
     CleaningOperationIdentity,
     CleaningOutcome,
@@ -27,12 +28,21 @@ from app.models import (
     CleaningViewSnapshot,
     DeviceLeaseKind,
     ExclusiveDeviceLease,
+    HardwareProfile,
     MaintenanceLeaseReleaseEvidence,
+    ManualExperimentIdentity,
+    ManualExperimentIntent,
+    ManualExperimentPlan,
+    ManualExperimentResult,
+    ManualExperimentSnapshot,
+    ManualExperimentStatus,
+    ManualSupplyIntent,
     ProtocolExecutionReadiness,
     ProtocolExecutionSnapshot,
     ProtocolExecutionStatus,
     SafeStopIdentity,
     SafetyState,
+    VerificationStatus,
 )
 from app.models.session import SessionState, SessionStatus, SessionViewSnapshot
 from app.services import (
@@ -45,6 +55,7 @@ from app.services import (
     FlowApplyResult,
     FlowService,
     GatingService,
+    HardwareProfileStore,
     MockHAL,
     ProtocolExecutor,
     ProtocolExecutorResult,
@@ -358,6 +369,29 @@ class MainController(QObject):
         self._session_finalized.connect(self._handle_session_finalized)
         self._maintenance_finalized.connect(self._handle_maintenance_finalized)
         self._cleaning_config_saved.connect(self._handle_cleaning_config_saved)
+        self.actuation_worker.manual_snapshot_ready.connect(
+            self._handle_manual_snapshot
+        )
+        self.actuation_worker.manual_result_ready.connect(self._handle_manual_result)
+        self._manual_generation = 0
+        self._manual_lease_token = None
+        self._manual_snapshot = self.actuation_worker.manual_snapshot
+        self._manual_supply_intent: ManualSupplyIntent | None = None
+        self._manual_supply_identity: ManualExperimentIdentity | None = None
+        self._hardware_profile_store: HardwareProfileStore | None = None
+        local_profile_path = (
+            self.config.get("_local_config_path")
+            or self.config.get("_config_write_path")
+            or self.config.get("_user_config_path")
+        )
+        if local_profile_path:
+            try:
+                self._hardware_profile_store = HardwareProfileStore(
+                    local_config_path=Path(local_profile_path),
+                    effective_config=self.config,
+                )
+            except Exception as exc:
+                LOG.error("HardwareProfile 配置事务初始化失败：%s", exc)
         self._breath_logger = logging.getLogger("breath_viz")
         self._protocol_tick_timer = QTimer(self)
         self._protocol_tick_timer.setInterval(50)
@@ -413,6 +447,8 @@ class MainController(QObject):
         self._refresh_toolbar_state()
         self._render_session_snapshot()
         self._render_cleaning_snapshot()
+        self._render_manual_snapshot()
+        self._render_hardware_profile()
         if hasattr(self.view, "pretest_view"):
             self.view.pretest_view.flow_sequence_requested.connect(self.handle_flow_sequence_request)
         if hasattr(self.view, "calibration_view"):
@@ -452,6 +488,9 @@ class MainController(QObject):
                 "动作 owner 未完成 DO session 交接，已阻止硬件重启。"
             )
             return False
+        if self.flow_worker.lease_snapshot.kind is DeviceLeaseKind.IDLE:
+            self._manual_lease_token = None
+            self._manual_supply_identity = None
         if start_flow:
             LOG.info("Starting serial flow worker thread")
             self.flow_worker.start()
@@ -697,6 +736,10 @@ class MainController(QObject):
             self.view.update_status(self.state.status_message)
             if hasattr(self.view, "pretest_view"):
                 self.view.pretest_view.update_airflow(self.state.telemetry.airflow)
+            if hasattr(self.view, "manual_experiment_view"):
+                self.view.manual_experiment_view.update_a_observation(
+                    self.state.telemetry.airflow
+                )
         self._refresh_toolbar_state()
         self._render_cleaning_snapshot()
 
@@ -3065,7 +3108,344 @@ class MainController(QObject):
         if was_running:
             self.worker.request_self_check()
 
+    @Slot(object)
+    def handle_manual_release_requested(self, intent: ManualExperimentIntent) -> bool:
+        if not isinstance(intent, ManualExperimentIntent):
+            self._set_manual_status("启动失败：请求类型无效；安全动作：未产生硬件 intent；下一步：重新填写参数。")
+            return False
+        if not self.simulation_mode:
+            self._set_manual_status(
+                "启动失败：真实硬件尚未获得 Story 4.6 授权；安全动作：未操作 NI/Alicat；下一步：切换 Mock 模式。"
+            )
+            return False
+        if self._manual_lease_token is not None or self._manual_snapshot.status not in {
+            ManualExperimentStatus.IDLE,
+            ManualExperimentStatus.COMPLETED,
+        }:
+            self._set_manual_status("启动失败：手动实验正在运行或需要恢复；安全动作：未重复提交；下一步：等待完成或执行全局停止。")
+            return False
+        if (
+            not self.state.telemetry.connected
+            or not self.state.hardware_ready
+            or self.state.telemetry.safety_state != "SAFE"
+        ):
+            self._set_manual_status("启动失败：Mock 连接、自检或安全状态未就绪；安全动作：未开阀；下一步：先连接并完成自检。")
+            return False
+        if self.device_lease.snapshot.kind is not DeviceLeaseKind.IDLE:
+            self._set_manual_status("启动失败：设备已被其他流程占用；安全动作：未开阀；下一步：完成当前流程后重试。")
+            return False
+        try:
+            profile = self.state.hardware_profile
+            registry = self.state.channel_registry
+            if profile is None or registry is None or self.state.selector is None:
+                raise ValueError("HardwareProfile、ChannelRegistry 或 selector 未加载。")
+            setpoints = profile.flow_setpoints(
+                total_sccm=intent.total_sccm,
+                sample_a_sccm=intent.sample_a_sccm,
+                vacuum_c_sccm=intent.vacuum_c_sccm,
+            )
+            self._manual_generation += 1
+            operation_id = f"manual-{uuid.uuid4().hex}"
+            identity = ManualExperimentIdentity(
+                operation_id,
+                self._manual_generation,
+                self.actuation_worker.protocol_state.execution_epoch,
+            )
+            plan = ManualExperimentPlan.from_registry(
+                identity=identity,
+                flow_setpoints=setpoints,
+                selector=self.state.selector,
+                registry=registry,
+                external_ports=intent.external_ports,
+                duration_ns=intent.duration_ns,
+                allow_mock=True,
+            )
+        except Exception as exc:
+            self._set_manual_status(f"启动失败：{exc}；安全动作：未产生硬件 intent；下一步：修正气口或流量参数。")
+            return False
+        token = self.flow_worker.acquire_manual_lease(
+            operation_id,
+            self._manual_generation,
+        )
+        if token is None:
+            self._set_manual_status("启动失败：Flow/Device MANUAL lease 未能一致取得；安全动作：未开阀；下一步：等待 owner 空闲。")
+            return False
+        self._manual_lease_token = token
+        self.actuation_interlock.update(device_lease=DeviceLeaseKind.MANUAL.value)
+        if not self.actuation_worker.post_manual_start(plan, lease_token=token):
+            self.flow_worker.release_lease(token)
+            self._manual_lease_token = None
+            self.actuation_interlock.update(device_lease=DeviceLeaseKind.IDLE.value)
+            self._set_manual_status("启动失败：Actuation owner 拒绝请求；安全动作：已释放 MANUAL lease；下一步：检查恢复状态。")
+            return False
+        self._drain_actuation_if_not_running()
+        return True
+
+    @Slot(object)
+    def handle_manual_supply_requested(self, intent: ManualSupplyIntent) -> bool:
+        if not isinstance(intent, ManualSupplyIntent):
+            return False
+        if not intent.enabled:
+            self._manual_supply_intent = None
+            self.stop_hardware()
+            return True
+        if not self.simulation_mode:
+            self._set_manual_status("供气失败：真实硬件尚未授权；安全动作：未操作 NI/Alicat；下一步：使用 Mock。")
+            return False
+        if self._manual_lease_token is not None or self._manual_snapshot.status not in {
+            ManualExperimentStatus.IDLE,
+            ManualExperimentStatus.COMPLETED,
+        }:
+            self._set_manual_status("供气失败：manual owner 正忙或需要恢复；安全动作：未重复提交；下一步：等待安全终态。")
+            return False
+        if (
+            not self.state.telemetry.connected
+            or not self.state.hardware_ready
+            or self.state.telemetry.safety_state != "SAFE"
+            or self.device_lease.snapshot.kind is not DeviceLeaseKind.IDLE
+        ):
+            self._set_manual_status("供气失败：Mock 安全状态或 owner lease 未就绪；安全动作：未改变流量；下一步：连接并完成自检。")
+            return False
+        try:
+            profile = self.state.hardware_profile
+            if profile is None or self.state.selector is None:
+                raise ValueError("HardwareProfile 或 selector 未加载")
+            setpoints = profile.flow_setpoints(
+                total_sccm=intent.total_sccm,
+                sample_a_sccm=intent.sample_a_sccm,
+                vacuum_c_sccm=intent.vacuum_c_sccm,
+            )
+            self._manual_generation += 1
+            operation_id = f"manual-supply-{uuid.uuid4().hex}"
+            identity = ManualExperimentIdentity(
+                operation_id,
+                self._manual_generation,
+                self.actuation_worker.protocol_state.execution_epoch,
+            )
+            plan = ManualExperimentPlan.for_supply(
+                identity=identity,
+                flow_setpoints=setpoints,
+                selector=self.state.selector,
+            )
+        except Exception as exc:
+            self._set_manual_status(f"供气失败：{exc}；安全动作：未改变流量；下一步：修正 T/A/C。")
+            return False
+        token = self.flow_worker.acquire_manual_lease(operation_id, self._manual_generation)
+        if token is None:
+            self._set_manual_status("供气失败：MANUAL lease 获取失败；安全动作：未改变流量；下一步：等待 owner 空闲。")
+            return False
+        self._manual_lease_token = token
+        self._manual_supply_identity = identity
+        self._manual_supply_intent = intent
+        self.actuation_interlock.update(device_lease=DeviceLeaseKind.MANUAL.value)
+        if not self.actuation_worker.post_manual_start(plan, lease_token=token):
+            self.flow_worker.release_lease(token)
+            self._manual_lease_token = None
+            self._manual_supply_identity = None
+            self._manual_supply_intent = None
+            self.actuation_interlock.update(device_lease=DeviceLeaseKind.IDLE.value)
+            return False
+        self._drain_actuation_if_not_running()
+        return True
+
+    @Slot()
+    def handle_manual_stop_requested(self) -> bool:
+        accepted = self.actuation_worker.post_manual_stop(reason="用户请求停止手动实验。")
+        if accepted:
+            self._drain_actuation_if_not_running()
+        return accepted
+
+    @Slot(object)
+    def _handle_manual_snapshot(self, snapshot: ManualExperimentSnapshot) -> None:
+        self._manual_snapshot = snapshot
+        self._render_manual_snapshot()
+
+    @Slot(object)
+    def _handle_manual_result(self, result: ManualExperimentResult) -> None:
+        if self._manual_snapshot.identity != result.identity:
+            return
+        token = self._manual_lease_token
+        if result.completed and token is not None:
+            if self.flow_worker.release_lease(token):
+                self._manual_lease_token = None
+                self.actuation_interlock.update(device_lease=DeviceLeaseKind.IDLE.value)
+            else:
+                self._set_manual_status("收尾失败：MANUAL lease 未完成 owner handoff；安全动作：继续保持独占；下一步：执行全局停止。")
+                return
+        if result.completed and result.identity == self._manual_supply_identity:
+            self._manual_supply_identity = None
+            if self.view is not None and hasattr(self.view, "manual_experiment_view"):
+                renderer = getattr(self.view.manual_experiment_view, "render_supply_state", None)
+                if callable(renderer):
+                    renderer(True, "供气已确认：A 路经 compensation，T/A/B/C setpoints 已恢复。")
+        elif result.identity == self._manual_supply_identity:
+            self._manual_supply_identity = None
+            self._manual_supply_intent = None
+        self._render_manual_snapshot()
+
+    def _render_manual_snapshot(self) -> None:
+        if self.view is None or not hasattr(self.view, "manual_experiment_view"):
+            return
+        manual = self.view.manual_experiment_view
+        if hasattr(manual, "set_registry") and self.state.channel_registry is not None:
+            manual.set_registry(self.state.channel_registry, allow_mock=self.simulation_mode)
+        manual.render_snapshot(self._manual_snapshot)
+
+    def _set_manual_status(self, message: str) -> None:
+        self.state.update_status(message)
+        if self.view is not None:
+            self.view.update_status(message)
+
+    def _configuration_gate_reason(self) -> str:
+        if self.state.telemetry.connected or self.state.hardware_ready:
+            return "硬件仍处于连接或就绪状态"
+        if self.device_lease.snapshot.kind is not DeviceLeaseKind.IDLE:
+            return f"设备 lease 当前属于 {self.device_lease.snapshot.kind.value}"
+        if self.session_state.status in {
+            SessionStatus.PREPARED,
+            SessionStatus.RECORDING,
+            SessionStatus.CLOSING,
+        }:
+            return "会话仍处于活动状态"
+        if self._manual_snapshot.status not in {
+            ManualExperimentStatus.IDLE,
+            ManualExperimentStatus.COMPLETED,
+        }:
+            return "手动实验未处于可保存终态"
+        if self._cleaning_runtime.status not in {
+            CleaningStatus.IDLE,
+            CleaningStatus.COMPLETED,
+        }:
+            return "maintenance/清洗尚未完成"
+        if any(owner.isRunning() for owner in (self.worker, self.flow_worker, self.actuation_worker)):
+            return "硬件 owner 尚未 handoff"
+        if self.flow_worker.has_in_flight_command:
+            return "Flow owner 仍有进行中命令"
+        return ""
+
+    @Slot(object, int)
+    def handle_hardware_profile_save_requested(self, candidate, expected_revision: int) -> bool:
+        store = self._hardware_profile_store
+        reason = self._configuration_gate_reason()
+        if store is None:
+            reason = "没有可写的 local_config.json"
+        if reason:
+            self._render_hardware_profile(f"保存失败：{reason}；安全动作：旧配置保持发布；下一步：安全停止并断开后重试。")
+            return False
+        token = self.device_lease.acquire(
+            DeviceLeaseKind.CONFIG_CHANGE,
+            operation_id=f"config-{uuid.uuid4().hex}",
+            generation=int(expected_revision),
+        )
+        if token is None:
+            self._render_hardware_profile("保存失败：CONFIG_CHANGE lease 获取失败；安全动作：旧配置保持发布；下一步：等待 owner 空闲。")
+            return False
+        try:
+            saved = store.save(candidate, expected_revision=int(expected_revision))
+        except Exception as exc:
+            self._render_hardware_profile(f"保存失败：{exc}；安全动作：磁盘与运行时旧配置保持不变；下一步：修正候选或重新加载 revision。")
+            return False
+        finally:
+            self.device_lease.release(token)
+        self._publish_hardware_profile(saved)
+        self._render_hardware_profile("保存成功：已原子发布 HardwareProfile；安全动作：保持断开；下一步：可在 Mock 下重新连接验证。")
+        return True
+
+    @Slot(int)
+    def handle_hardware_profile_rollback_requested(self, expected_revision: int) -> bool:
+        store = self._hardware_profile_store
+        reason = self._configuration_gate_reason()
+        if store is None:
+            reason = "没有可回滚的配置存储"
+        if reason:
+            self._render_hardware_profile(f"回滚失败：{reason}；安全动作：当前配置保持不变；下一步：完成断开与 owner handoff。")
+            return False
+        token = self.device_lease.acquire(
+            DeviceLeaseKind.CONFIG_CHANGE,
+            operation_id=f"config-rollback-{uuid.uuid4().hex}",
+            generation=int(expected_revision),
+        )
+        if token is None:
+            return False
+        try:
+            restored = store.rollback(expected_revision=int(expected_revision))
+        except Exception as exc:
+            self._render_hardware_profile(f"回滚失败：{exc}；安全动作：当前配置保持不变；下一步：检查 revision 与 last-known-good。")
+            return False
+        finally:
+            self.device_lease.release(token)
+        self._publish_hardware_profile(restored)
+        self._render_hardware_profile("回滚成功：已恢复上一版 HardwareProfile；安全动作：保持断开；下一步：重新检查映射。")
+        return True
+
+    @Slot(int, object)
+    def handle_hardware_mock_verify_requested(self, external_port: int, candidate) -> None:
+        try:
+            profile = candidate if isinstance(candidate, HardwareProfile) else HardwareProfile.from_config(candidate)
+            channels = list(profile.channels)
+            index = int(external_port) - 1
+            channel = channels[index]
+            if not channel.enabled or not channel.mapping_fingerprint:
+                raise ValueError("气口尚未启用或映射不完整")
+            channels[index] = replace(
+                channel,
+                verification=ChannelVerification(
+                    status=VerificationStatus.MOCK_VERIFIED,
+                    fingerprint=channel.mapping_fingerprint,
+                    verified_at=datetime.now().astimezone().isoformat(timespec="seconds"),
+                    note="Mock 离线验证，不代表物理气路验证",
+                ),
+            )
+            verified = replace(profile, channels=tuple(channels))
+        except Exception as exc:
+            self._render_hardware_profile(f"Mock 验证失败：{exc}；安全动作：未写入物理验证；下一步：补全映射。")
+            return
+        self._render_hardware_profile(
+            "Mock 验证完成：仅候选标记 mock_verified；安全动作：未操作真实硬件；下一步：保存候选后重启仍可恢复。",
+            profile=verified,
+        )
+
+    @Slot(int)
+    def handle_hardware_physical_verify_requested(self, external_port: int) -> None:
+        self._render_hardware_profile(
+            f"物理验证未执行：机外气口 {external_port} 需要另行现场授权；安全动作：未操作 NI/Alicat；下一步：继续使用 Mock 验证。"
+        )
+
+    def _publish_hardware_profile(self, profile: HardwareProfile) -> None:
+        self.state.hardware_profile = profile
+        self.state.channel_registry = profile.registry
+        self.config["hardware_profile"] = profile.to_dict()
+
+    def _render_hardware_profile(
+        self,
+        message: str = "",
+        *,
+        profile: HardwareProfile | None = None,
+    ) -> None:
+        if self.view is None or not hasattr(self.view, "hardware_settings_view"):
+            return
+        store = self._hardware_profile_store
+        active = profile or (self.state.hardware_profile if store is None else store.profile)
+        if active is None:
+            return
+        revision = 0 if store is None else store.revision
+        self.view.hardware_settings_view.render_profile(
+            active,
+            revision=revision,
+            can_save=not bool(self._configuration_gate_reason()) and store is not None,
+            message=message,
+            rollback_available=False if store is None else store.rollback_available,
+        )
+
     def stop_hardware(self) -> None:
+        self._manual_supply_intent = None
+        self._manual_supply_identity = None
+        if self.view is not None and hasattr(self.view, "manual_experiment_view"):
+            renderer = getattr(self.view.manual_experiment_view, "render_supply_state", None)
+            if callable(renderer):
+                renderer(False, "正在统一安全停止并释放供气 lease。")
+        if self.actuation_worker.post_manual_stop(reason="全局停止抢占手动实验。"):
+            self._drain_actuation_if_not_running()
         finalize_session = self._prepare_session_for_global_stop("global_stop")
         self.state.update_status("正在安全停止，关闭阀门并释放资源...")
         if self.view:

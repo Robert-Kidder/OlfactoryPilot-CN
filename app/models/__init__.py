@@ -40,11 +40,13 @@ from .lease import (
 )
 from .manual_experiment import (
     ManualExperimentIdentity,
+    ManualExperimentIntent,
     ManualExperimentOutcome,
     ManualExperimentPlan,
     ManualExperimentResult,
     ManualExperimentSnapshot,
     ManualExperimentStatus,
+    ManualSupplyIntent,
     ManualValveTarget,
 )
 from .protocol import ProtocolDocument, ProtocolMetadata, ProtocolTrial, TriggerMode
@@ -113,11 +115,13 @@ __all__ = [
     "HardwareProfile",
     "MaintenanceLeaseReleaseEvidence",
     "ManualExperimentIdentity",
+    "ManualExperimentIntent",
     "ManualExperimentOutcome",
     "ManualExperimentPlan",
     "ManualExperimentResult",
     "ManualExperimentSnapshot",
     "ManualExperimentStatus",
+    "ManualSupplyIntent",
     "ManualValveTarget",
     "MaintenanceDescriptor",
     "MaintenancePaths",

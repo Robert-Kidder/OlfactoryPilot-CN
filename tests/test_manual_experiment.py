@@ -146,6 +146,27 @@ def _start_to_stimulating(worker, plan, lease, flows) -> None:
     assert worker.manual_snapshot.status is ManualExperimentStatus.STIMULATING
 
 
+def _finish_normal_completion(worker, flows) -> None:
+    zero = flows[-1]
+    assert zero.mode == "manual_post_close_a_zero"
+    worker.post_flow_result(
+        FlowCommandResult(
+            command=zero,
+            result=FlowApplyResult(True, "A=0", zero.a, zero.b, zero.c, zero.c),
+        )
+    )
+    restore = flows[-1]
+    assert restore.mode == "manual_restore_supply"
+    worker.post_flow_result(
+        FlowCommandResult(
+            command=restore,
+            result=FlowApplyResult(
+                True, "supply restored", restore.a, restore.b, restore.c, restore.a + restore.c
+            ),
+        )
+    )
+
+
 def test_manual_plan_requires_mode_scoped_verification() -> None:
     state = AppState.from_config(_config())
     identity = ManualExperimentIdentity("manual", 1, 1)
@@ -183,8 +204,12 @@ def test_manual_cohort_uses_latest_open_receipt_and_owner_deadline() -> None:
     assert worker.process_ready() == 0
     clock.value += 1
     worker.process_ready()
+    _finish_normal_completion(worker, flows)
 
     assert worker.manual_snapshot.status is ManualExperimentStatus.COMPLETED
+    assert worker.manual_snapshot.flow_zero_confirmed
+    assert worker.manual_snapshot.selector_compensation_confirmed
+    assert worker.manual_snapshot.supply_restored
     assert worker.manual_snapshot.close_confirmed == (2, 4)
     assert [command.action for command in written[-2:]] == [
         ActuationAction.CLOSE,
@@ -354,6 +379,25 @@ def test_manual_cannot_restart_directly_from_recovery_required() -> None:
     assert sum(command.source == "manual:experiment" for command in flows) == 1
 
 
+def test_owner_restart_after_explicit_shutdown_rebuilds_manual_admission() -> None:
+    worker, _, _, _, plan, lease, flows, _ = _fixture()
+    assert worker.post_manual_start(plan, lease_token=lease)
+    worker.process_ready()
+    command = flows[0]
+    worker.post_flow_result(
+        FlowCommandResult(
+            command=command,
+            result=FlowApplyResult(False, "flow fault", command.a, command.b, command.c, 0),
+        )
+    )
+    assert worker.manual_snapshot.status is ManualExperimentStatus.RECOVERY_REQUIRED
+
+    assert worker.shutdown(10)
+    assert worker.prepare_restart()
+
+    assert worker.manual_snapshot.status is ManualExperimentStatus.IDLE
+
+
 @pytest.mark.parametrize("failure", ["stale", "values", "identity"])
 def test_manual_invalid_flow_result_fails_closed(failure) -> None:
     worker, _, _, _, plan, lease, flows, _ = _fixture()
@@ -453,6 +497,7 @@ def test_conflicting_duplicate_after_completion_relocks_recovery() -> None:
     _start_to_stimulating(worker, plan, lease, flows)
     clock.value = worker.manual_snapshot.deadline_ns
     worker.process_ready()
+    _finish_normal_completion(worker, flows)
     assert worker.manual_snapshot.status is ManualExperimentStatus.COMPLETED
     close_command = next(command for command in written if command.step_id == "manual-close:2")
     prior = worker._seen_receipts[close_command.command_id]
@@ -481,4 +526,87 @@ def test_conflicting_duplicate_while_recovery_required_is_not_ignored() -> None:
 
     assert worker.manual_snapshot.status is ManualExperimentStatus.RECOVERY_REQUIRED
     assert "receipt 内容冲突" in worker.manual_snapshot.recovery_reason
+    assert worker._background_safe_stop_plan is not None
+
+
+@pytest.mark.parametrize("failure", ["stale", "failed"])
+def test_manual_post_close_a_zero_failure_never_authorizes_compensation(failure) -> None:
+    worker, _, _, clock, plan, lease, flows, written = _fixture()
+    _start_to_stimulating(worker, plan, lease, flows)
+    clock.value = worker.manual_snapshot.deadline_ns
+    worker.process_ready()
+    zero = flows[-1]
+    worker.post_flow_result(
+        FlowCommandResult(
+            command=zero,
+            result=FlowApplyResult(
+                failure != "failed", "zero fault", zero.a, zero.b, zero.c, zero.c
+            ),
+            stale=failure == "stale",
+        )
+    )
+
+    assert worker.manual_snapshot.status is ManualExperimentStatus.RECOVERY_REQUIRED
+    assert not worker.manual_snapshot.flow_zero_confirmed
+    assert all(command.step_id != "selector_compensation" for command in written)
+    assert worker._background_safe_stop_plan is not None
+
+
+def test_manual_compensation_failure_never_restores_nonzero_a() -> None:
+    def mutate(command, receipt):
+        if command.step_id == "selector_compensation":
+            return ActuationReceipt.from_write(
+                command=command,
+                started_ns=receipt.started_ns,
+                actual_ns=receipt.actual_ns,
+                wall_timestamp=10.0,
+                result=ActuationResult.FAILED,
+                message="compensation fault",
+            )
+        return receipt
+
+    worker, _, _, clock, plan, lease, flows, _ = _fixture(writer_mutator=mutate)
+    _start_to_stimulating(worker, plan, lease, flows)
+    clock.value = worker.manual_snapshot.deadline_ns
+    worker.process_ready()
+    zero = flows[-1]
+    worker.post_flow_result(
+        FlowCommandResult(
+            command=zero,
+            result=FlowApplyResult(True, "A=0", zero.a, zero.b, zero.c, zero.c),
+        )
+    )
+
+    assert worker.manual_snapshot.status is ManualExperimentStatus.RECOVERY_REQUIRED
+    assert worker.manual_snapshot.flow_zero_confirmed
+    assert not worker.manual_snapshot.selector_compensation_confirmed
+    assert all(command.mode != "manual_restore_supply" for command in flows)
+    assert worker._background_safe_stop_plan is not None
+
+
+def test_manual_restore_supply_failure_is_not_completed() -> None:
+    worker, _, _, clock, plan, lease, flows, _ = _fixture()
+    _start_to_stimulating(worker, plan, lease, flows)
+    clock.value = worker.manual_snapshot.deadline_ns
+    worker.process_ready()
+    zero = flows[-1]
+    worker.post_flow_result(
+        FlowCommandResult(
+            command=zero,
+            result=FlowApplyResult(True, "A=0", zero.a, zero.b, zero.c, zero.c),
+        )
+    )
+    restore = flows[-1]
+    worker.post_flow_result(
+        FlowCommandResult(
+            command=restore,
+            result=FlowApplyResult(
+                False, "restore fault", restore.a, restore.b, restore.c, restore.c
+            ),
+        )
+    )
+
+    assert worker.manual_snapshot.status is ManualExperimentStatus.RECOVERY_REQUIRED
+    assert worker.manual_snapshot.selector_compensation_confirmed
+    assert not worker.manual_snapshot.supply_restored
     assert worker._background_safe_stop_plan is not None

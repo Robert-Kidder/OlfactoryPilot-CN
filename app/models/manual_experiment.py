@@ -15,6 +15,9 @@ class ManualExperimentStatus(StrEnum):
     OPENING = "opening"
     STIMULATING = "stimulating"
     CLOSING = "closing"
+    ZEROING_A = "zeroing_a"
+    SELECTOR_COMPENSATION = "selector_compensation"
+    RESTORING_SUPPLY = "restoring_supply"
     COMPLETED = "completed"
     RECOVERY_REQUIRED = "recovery_required"
 
@@ -23,6 +26,47 @@ class ManualExperimentOutcome(StrEnum):
     COMPLETED = "completed"
     FAILED = "failed"
     ABORTED = "aborted"
+
+
+@dataclass(frozen=True, slots=True)
+class ManualExperimentIntent:
+    external_ports: tuple[int, ...]
+    total_sccm: float
+    sample_a_sccm: float
+    vacuum_c_sccm: float
+    duration_ns: int
+
+    def __post_init__(self) -> None:
+        ports = tuple(self.external_ports)
+        if not ports or len(set(ports)) != len(ports):
+            raise ValueError("请选择至少一个且不重复的机外气口。")
+        if any(type(port) is not int or port not in range(1, 21) for port in ports):
+            raise ValueError("机外气口必须位于 1–20。")
+        object.__setattr__(self, "external_ports", ports)
+        FlowSetpoints(
+            total_sccm=self.total_sccm,
+            sample_a_sccm=self.sample_a_sccm,
+            vacuum_c_sccm=self.vacuum_c_sccm,
+        )
+        if type(self.duration_ns) is not int or not 0 < self.duration_ns <= MAX_DURATION_NS:
+            raise ValueError("刺激时长必须是有效正整数纳秒。")
+
+
+@dataclass(frozen=True, slots=True)
+class ManualSupplyIntent:
+    enabled: bool
+    total_sccm: float
+    sample_a_sccm: float
+    vacuum_c_sccm: float
+
+    def __post_init__(self) -> None:
+        if type(self.enabled) is not bool:
+            raise ValueError("供气 intent.enabled 必须是 boolean。")
+        FlowSetpoints(
+            total_sccm=self.total_sccm,
+            sample_a_sccm=self.sample_a_sccm,
+            vacuum_c_sccm=self.vacuum_c_sccm,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,6 +110,7 @@ class ManualExperimentPlan:
     selector: SelectorConfig
     targets: tuple[ManualValveTarget, ...]
     duration_ns: int
+    supply_only: bool = False
 
     def __post_init__(self) -> None:
         if not isinstance(self.identity, ManualExperimentIdentity):
@@ -74,8 +119,12 @@ class ManualExperimentPlan:
             raise ValueError("manual flow_setpoints 类型无效。")
         if not isinstance(self.selector, SelectorConfig):
             raise ValueError("manual selector 类型无效。")
-        if not self.targets:
+        if type(self.supply_only) is not bool:
+            raise ValueError("manual supply_only 必须是 boolean。")
+        if not self.targets and not self.supply_only:
             raise ValueError("manual 刺激至少选择一个可用机外气口。")
+        if self.targets and self.supply_only:
+            raise ValueError("manual supply-only 计划不得包含气味阀目标。")
         if type(self.duration_ns) is not int or not 0 < self.duration_ns <= MAX_DURATION_NS:
             raise ValueError("manual duration_ns 必须是有效正整数。")
         ports = [target.external_port for target in self.targets]
@@ -130,6 +179,23 @@ class ManualExperimentPlan:
             duration_ns=duration_ns,
         )
 
+    @classmethod
+    def for_supply(
+        cls,
+        *,
+        identity: ManualExperimentIdentity,
+        flow_setpoints: FlowSetpoints,
+        selector: SelectorConfig,
+    ) -> ManualExperimentPlan:
+        return cls(
+            identity=identity,
+            flow_setpoints=flow_setpoints,
+            selector=selector,
+            targets=(),
+            duration_ns=1,
+            supply_only=True,
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class ManualExperimentSnapshot:
@@ -140,6 +206,9 @@ class ManualExperimentSnapshot:
     selector_odor_confirmed: bool = False
     open_confirmed: tuple[int, ...] = ()
     close_confirmed: tuple[int, ...] = ()
+    flow_zero_confirmed: bool = False
+    selector_compensation_confirmed: bool = False
+    supply_restored: bool = False
     ready_ns: int | None = None
     deadline_ns: int | None = None
     remaining_ns: int = 0
