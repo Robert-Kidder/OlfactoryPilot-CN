@@ -383,7 +383,7 @@ def _validate_data_frame_description(unit: str, lines: list[str]) -> None:
 
 def _parse_full_scale_nlpm(response: str, unit: str) -> float:
     match = re.fullmatch(
-        rf"\s*{re.escape(unit)}\s+5\s+([-+]?\d+(?:\.\d+)?)\s+\d+\s+NLPM\s*",
+        rf"\s*{re.escape(unit)}(?:\s+5)?\s+([-+]?\d+(?:\.\d+)?)\s+37\s+NLPM\s*",
         response,
         flags=re.IGNORECASE,
     )

@@ -242,8 +242,9 @@ def test_effective_config_drift_is_rejected(config):
 
 
 def test_full_scale_parser_does_not_confuse_statistic_id_with_value():
-    assert LIVE._parse_full_scale_nlpm("A 5 5.0000 71 NLPM", "a") == 5.0
-    assert LIVE._parse_full_scale_nlpm("A 5 1.0000 71 NLPM", "a") == 1.0
+    assert LIVE._parse_full_scale_nlpm("A +5.0000 37 NLPM", "a") == 5.0
+    assert LIVE._parse_full_scale_nlpm("A 5 5.0000 37 NLPM", "a") == 5.0
+    assert LIVE._parse_full_scale_nlpm("A 5 1.0000 37 NLPM", "a") == 1.0
 
 
 @pytest.mark.parametrize(
@@ -271,7 +272,7 @@ def test_read_only_preflight_uses_only_documented_query_frames(monkeypatch, conf
             b"MODEL MC-5NLPM-D\r\n",
             b"SERIAL 486285\r\n",
         ],
-        "aFPF 5\r": [b"A 5 5.0000 71 NLPM\r\n"],
+        "aFPF 5\r": [b"A +5.0000 37 NLPM\r\n"],
     }
 
     class FakePort:
