@@ -25,6 +25,11 @@ from app.models import (
     CleaningStatus,
     DeviceLeaseKind,
     DeviceLeaseToken,
+    ManualExperimentOutcome,
+    ManualExperimentPlan,
+    ManualExperimentResult,
+    ManualExperimentSnapshot,
+    ManualExperimentStatus,
     ProtocolExecutionState,
     ProtocolExecutionStatus,
     ProtocolGateEvent,
@@ -271,6 +276,8 @@ class ActuationWorker(QThread):
     ttl_disarm_requested = Signal()
     cleaning_snapshot_ready = Signal(object)
     cleaning_result_ready = Signal(object)
+    manual_snapshot_ready = Signal(object)
+    manual_result_ready = Signal(object)
     protocol_safe_stop_handoff_requested = Signal(object)
 
     def __init__(
@@ -290,6 +297,7 @@ class ActuationWorker(QThread):
         flow_submitter: Callable[[FlowCommand], bool] | None = None,
         cleaning_flow_ready_timeout_ms: int = 5000,
         safe_stop_receipt_timeout_ms: int = 2000,
+        manual_receipt_timeout_ms: int = 2000,
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
@@ -320,6 +328,9 @@ class ActuationWorker(QThread):
         )
         self._safe_stop_receipt_timeout_ns = (
             max(1, int(safe_stop_receipt_timeout_ms)) * 1_000_000
+        )
+        self._manual_receipt_timeout_ns = (
+            max(1, int(manual_receipt_timeout_ms)) * 1_000_000
         )
         self._condition = threading.Condition(threading.RLock())
         self._normal_heap: list[tuple[int, int, int, ActuationCommand]] = []
@@ -381,6 +392,15 @@ class ActuationWorker(QThread):
         self._cleaning_stop_outcome = CleaningOutcome.FAILED
         self._cleaning_terminal_status = CleaningStatus.FAILED
         self._cleaning_failure_reason = ""
+        self._manual_snapshot = ManualExperimentSnapshot()
+        self._manual_plan: ManualExperimentPlan | None = None
+        self._manual_lease_token: DeviceLeaseToken | None = None
+        self._manual_expected: dict[str, dict[str, Any]] = {}
+        self._manual_receipts: dict[str, ActuationReceipt] = {}
+        self._manual_possibly_open: set[int] = set()
+        self._manual_pending_flow_id: str | None = None
+        self._manual_pending_flow_command: FlowCommand | None = None
+        self._manual_flow_result: FlowCommandResult | None = None
 
     def set_session_recorder(self, recorder) -> bool:
         return self.bind_session_recorder(recorder, generation=0)
@@ -389,6 +409,44 @@ class ActuationWorker(QThread):
     def cleaning_snapshot(self) -> CleaningSnapshot:
         with self._condition:
             return self._cleaning_snapshot
+
+    @property
+    def manual_snapshot(self) -> ManualExperimentSnapshot:
+        with self._condition:
+            return self._manual_snapshot
+
+    def post_manual_start(
+        self,
+        plan: ManualExperimentPlan,
+        *,
+        lease_token: DeviceLeaseToken,
+    ) -> bool:
+        with self._condition:
+            if (
+                not self._accepting
+                or self._manual_snapshot.status
+                not in {
+                    ManualExperimentStatus.IDLE,
+                    ManualExperimentStatus.COMPLETED,
+                }
+            ):
+                return False
+            self._messages.append(
+                (
+                    "manual_start",
+                    {"plan": plan, "lease_token": lease_token},
+                )
+            )
+            self._condition.notify_all()
+            return True
+
+    def post_manual_stop(self, *, reason: str = "用户请求停止手动实验。") -> bool:
+        with self._condition:
+            if not self._manual_active():
+                return False
+            self._messages.appendleft(("manual_stop", {"reason": str(reason)}))
+            self._condition.notify_all()
+            return True
 
     @property
     def cleaning_owner_handoff_ready(self) -> bool:
@@ -831,6 +889,15 @@ class ActuationWorker(QThread):
                 or expected.get("command") != command
             ):
                 return False
+        elif command.category == ActuationCategory.MANUAL:
+            expected = self._manual_expected.get(command.command_id)
+            if expected is not None and (
+                expected.get("role") != "selector_odor"
+                or expected.get("command") != command
+            ):
+                return False
+            if expected is None and command.command_id not in self._plan_by_command:
+                return False
         elif command.command_id not in self._plan_by_command:
             return False
         try:
@@ -1205,6 +1272,12 @@ class ActuationWorker(QThread):
                 stale=True,
             )
         self._remember_receipt(receipt)
+
+        if self._is_manual_receipt(receipt):
+            self._consume_manual_receipt(receipt)
+            self._emit_receipt(receipt)
+            self._retire_command(receipt.command_id)
+            return
 
         if receipt.category == ActuationCategory.SAFETY:
             if self.valve_service is not None:
@@ -1907,6 +1980,7 @@ class ActuationWorker(QThread):
         result: dict[str, SafeStopIdentity | None],
     ) -> None:
         with self._condition:
+            self._fence_manual_for_global_safe_stop(reason)
             self._fence_cleaning_for_global_safe_stop(reason)
             self._accepting = False
             self.protocol_state.execution_epoch += 1
@@ -1929,6 +2003,27 @@ class ActuationWorker(QThread):
             self._condition.notify_all()
         self._settle_cancelled_receipts(cancelled)
         event.set()
+
+    def _fence_manual_for_global_safe_stop(self, reason: str) -> None:
+        plan = self._manual_plan
+        if plan is None or not self._manual_active():
+            return
+        self.protocol_state.possibly_open_valves.update(self._manual_possibly_open)
+        recovery_reason = f"RECOVERY_REQUIRED：全局安全停止已抢占 manual：{reason}"
+        self._publish_manual(
+            status=ManualExperimentStatus.RECOVERY_REQUIRED,
+            remaining_ns=0,
+            possibly_open=self._manual_possibly_open_ports(),
+            recovery_reason=recovery_reason,
+        )
+        self.manual_result_ready.emit(
+            ManualExperimentResult(
+                identity=plan.identity,
+                status=ManualExperimentStatus.RECOVERY_REQUIRED,
+                outcome=ManualExperimentOutcome.ABORTED,
+                reason=recovery_reason,
+            )
+        )
 
     def _fence_cleaning_for_global_safe_stop(self, reason: str) -> None:
         queued_starts = [
@@ -2335,6 +2430,7 @@ class ActuationWorker(QThread):
                 "emergency_close_all",
                 "input_error",
                 "interlock_changed",
+                "manual_stop",
                 "recorder_failed",
                 "safe_stop_close_odors",
                 "safe_stop_fence",
@@ -2392,6 +2488,8 @@ class ActuationWorker(QThread):
                 "input_error",
                 "interlock_changed",
                 "load",
+                "manual_start",
+                "manual_stop",
                 "manual_trigger",
                 "mode",
                 "pause",
@@ -2443,6 +2541,39 @@ class ActuationWorker(QThread):
             return None
 
     def _handle_message(self, kind: str, payload: dict[str, Any]) -> None:
+        if kind == "manual_start":
+            self._begin_manual(**payload)
+            return
+        if kind in {"manual_deadline", "manual_receipt_timeout"}:
+            if kind == "manual_deadline":
+                self._handle_manual_deadline(**payload)
+            else:
+                self._handle_manual_receipt_timeout(**payload)
+            return
+        if kind == "flow_result" and self._is_manual_flow_result(
+            payload["flow_result"]
+        ):
+            self.flow_result_ready.emit(payload["flow_result"])
+            self._consume_manual_flow_result(payload["flow_result"])
+            return
+        if self._manual_active():
+            if kind in {"manual_stop", "stop"}:
+                self._fail_manual(
+                    payload.get("reason") or payload.get("message") or "手动实验已停止。",
+                    outcome=ManualExperimentOutcome.ABORTED,
+                )
+                return
+            if kind == "start":
+                self._fail_manual("协议启动抢占手动实验，已执行安全收敛。")
+                return
+            if kind in {"input_error", "recorder_failed"}:
+                self._fail_manual(payload.get("message", "输入 owner 已失效。"))
+                return
+            if kind in {"interlock_changed", "readiness"}:
+                reason = self._manual_runtime_rejection_reason()
+                if reason:
+                    self._fail_manual(reason)
+                return
         if kind == "safe_stop_fence":
             self._begin_safe_stop_fence(**payload)
             return
@@ -4071,6 +4202,588 @@ class ActuationWorker(QThread):
             )
         )
 
+    def _manual_active(self) -> bool:
+        return self._manual_snapshot.status in {
+            ManualExperimentStatus.FLOW_PENDING,
+            ManualExperimentStatus.SELECTOR_PENDING,
+            ManualExperimentStatus.OPENING,
+            ManualExperimentStatus.STIMULATING,
+            ManualExperimentStatus.CLOSING,
+        }
+
+    def _manual_possibly_open_ports(self) -> tuple[int, ...]:
+        plan = self._manual_plan
+        if plan is None:
+            return ()
+        return tuple(
+            sorted(
+                target.external_port
+                for target in plan.targets
+                if target.internal_valve in self._manual_possibly_open
+            )
+        )
+
+    def _begin_manual(
+        self,
+        *,
+        plan: ManualExperimentPlan,
+        lease_token: DeviceLeaseToken,
+    ) -> None:
+        if self._manual_snapshot.status is ManualExperimentStatus.RECOVERY_REQUIRED:
+            return
+        reason = ""
+        interlock = self.interlock.read()[1]
+        if not isinstance(plan, ManualExperimentPlan):
+            reason = "手动实验计划类型无效。"
+        elif (
+            lease_token.kind is not DeviceLeaseKind.MANUAL
+            or lease_token.operation_id != plan.identity.operation_id
+            or lease_token.generation != plan.identity.generation
+            or not lease_token.token
+        ):
+            reason = "manual lease identity 不匹配。"
+        elif plan.identity.execution_epoch != self.protocol_state.execution_epoch:
+            reason = "手动实验 execution epoch 已失效。"
+        elif interlock.device_lease != DeviceLeaseKind.MANUAL.value:
+            reason = "manual lease 未发布到动作联锁。"
+        elif not interlock.connected or not interlock.hardware_ready:
+            reason = "硬件连接或自检状态无效，手动实验未启动。"
+        elif interlock.safety_state != "SAFE":
+            reason = f"安全状态为 {interlock.safety_state}，手动实验未启动。"
+        elif self._flow_submitter is None or self.valve_service is None:
+            reason = "手动实验硬件 owner 未完整连接。"
+        else:
+            try:
+                selector = self.valve_service.selector
+                if selector is None or normalize_digital_target(selector.target) != normalize_digital_target(
+                    plan.selector.target
+                ):
+                    raise ValueError("selector 与 HardwareProfile 不匹配。")
+                registry = self.valve_service.state.channel_registry
+                if registry is None:
+                    raise ValueError("ChannelRegistry 未加载。")
+                for target in plan.targets:
+                    descriptor = registry.by_internal_valve(target.internal_valve)
+                    if (
+                        descriptor.external_port != target.external_port
+                        or normalize_digital_target(descriptor.target)
+                        != normalize_digital_target(target.target)
+                        or descriptor.active_high != target.active_high
+                        or not descriptor.enabled
+                        or not descriptor.verification_valid_for(
+                            allow_mock=self.valve_service.state.simulation_mode
+                        )
+                    ):
+                        raise ValueError(
+                            f"机外气口 {target.external_port} 映射或验证已失效。"
+                        )
+            except (KeyError, ValueError) as exc:
+                reason = str(exc)
+        if reason:
+            self._manual_plan = plan if isinstance(plan, ManualExperimentPlan) else None
+            self._manual_snapshot = ManualExperimentSnapshot(
+                status=ManualExperimentStatus.RECOVERY_REQUIRED,
+                identity=(plan.identity if isinstance(plan, ManualExperimentPlan) else None),
+                recovery_reason=reason,
+            )
+            self.manual_snapshot_ready.emit(self._manual_snapshot)
+            if isinstance(plan, ManualExperimentPlan):
+                self.manual_result_ready.emit(
+                    ManualExperimentResult(
+                        identity=plan.identity,
+                        status=ManualExperimentStatus.RECOVERY_REQUIRED,
+                        outcome=ManualExperimentOutcome.FAILED,
+                        reason=reason,
+                    )
+                )
+            return
+
+        self._manual_plan = plan
+        self._manual_lease_token = lease_token
+        self._manual_expected.clear()
+        self._manual_receipts.clear()
+        self._manual_possibly_open.clear()
+        self._manual_pending_flow_id = None
+        self._manual_pending_flow_command = None
+        self._manual_flow_result = None
+        self._publish_manual(
+            status=ManualExperimentStatus.FLOW_PENDING,
+            identity=plan.identity,
+            selected_external_ports=tuple(
+                target.external_port for target in plan.targets
+            ),
+            flow_confirmed=False,
+            selector_odor_confirmed=False,
+            open_confirmed=(),
+            close_confirmed=(),
+            ready_ns=None,
+            deadline_ns=None,
+            remaining_ns=0,
+            possibly_open=(),
+            recovery_reason="",
+        )
+        self._sequence += 1
+        setpoints = plan.flow_setpoints
+        command = FlowCommand(
+            command_id=f"manual-flow-{plan.identity.generation}-{self._sequence}",
+            execution_epoch=plan.identity.execution_epoch,
+            sequence=self._sequence,
+            mode="manual_supply",
+            a=setpoints.sample_a_sccm,
+            b=float(setpoints.main_b_sccm),
+            c=setpoints.vacuum_c_sccm,
+            source="manual:experiment",
+            operation_id=plan.identity.operation_id,
+            generation=plan.identity.generation,
+            lease_token=lease_token.token,
+        )
+        self._manual_pending_flow_id = command.command_id
+        self._manual_pending_flow_command = command
+        if self._flow_submitter(command) is False:
+            self._fail_manual("手动实验流量命令未被 FlowWorker 接受。")
+            return
+        self._schedule_manual_receipt_timeout("flow", (command.command_id,))
+
+    def _is_manual_flow_result(self, wrapped: FlowCommandResult) -> bool:
+        plan = self._manual_plan
+        return bool(
+            plan is not None
+            and wrapped.command.source == "manual:experiment"
+        )
+
+    def _consume_manual_flow_result(self, wrapped: FlowCommandResult) -> None:
+        plan = self._manual_plan
+        command = self._manual_pending_flow_command
+        if plan is None:
+            return
+        if self._manual_flow_result is not None:
+            if wrapped != self._manual_flow_result:
+                self._fail_manual("手动实验 flow receipt 内容冲突或终态后迟到。")
+            return
+        if command is None or not self._manual_active():
+            self._fail_manual("终态后收到未知或迟到的 manual flow receipt。")
+            return
+        setpoints = plan.flow_setpoints
+        identity_valid = bool(
+            wrapped.command == command
+            and wrapped.command.command_id == self._manual_pending_flow_id
+            and wrapped.command.execution_epoch == self.protocol_state.execution_epoch
+            and not wrapped.stale
+        )
+        values_valid = bool(
+            math.isclose(wrapped.result.a, setpoints.sample_a_sccm, abs_tol=1e-9)
+            and math.isclose(wrapped.result.b, float(setpoints.main_b_sccm), abs_tol=1e-9)
+            and math.isclose(wrapped.result.c, setpoints.vacuum_c_sccm, abs_tol=1e-9)
+        )
+        self._manual_pending_flow_id = None
+        self._manual_pending_flow_command = None
+        if not identity_valid or not wrapped.result.success or not values_valid:
+            self._fail_manual(
+                wrapped.result.message
+                or "手动实验流量 receipt 身份、数值或成功证据无效。"
+            )
+            return
+        self._manual_flow_result = wrapped
+        self.interlock.update(flow_setpoints_ready=True)
+        if not self.interlock.clear_unsafe_latch():
+            self._fail_manual("手动流量确认后安全锁存无法清除。")
+            return
+        self._publish_manual(
+            status=ManualExperimentStatus.SELECTOR_PENDING,
+            flow_confirmed=True,
+        )
+        try:
+            step = self.valve_service.selector_route_step(SelectorRoute.ODOR)
+        except ValueError as exc:
+            self._fail_manual(str(exc))
+            return
+        self._sequence += 1
+        action = ActuationAction.OPEN if step.state else ActuationAction.CLOSE
+        selector_command = ActuationCommand(
+            command_id=f"manual-selector-{plan.identity.generation}-{self._sequence}",
+            execution_epoch=plan.identity.execution_epoch,
+            arm_epoch=self.protocol_state.arm_epoch,
+            sequence=self._sequence,
+            trial_id=None,
+            trial_index=None,
+            valve=0,
+            action=action,
+            category=ActuationCategory.MANUAL,
+            expected_ns=int(self._clock_ns()),
+            duration_ns=None,
+            wall_timestamp=float(self._wall_clock()),
+            safety_generation=self.interlock.read()[0],
+            target_device=step.device,
+            target_line=step.line,
+            operation_id=plan.identity.operation_id,
+            generation=plan.identity.generation,
+            step_id="selector_odor",
+            action_kind=action,
+        )
+        self._manual_expected[selector_command.command_id] = {
+            "role": "selector_odor",
+            "command": selector_command,
+        }
+        if not self.submit(selector_command):
+            self._fail_manual("selector odor 路线命令未被动作 owner 接受。")
+            return
+        self._schedule_manual_receipt_timeout(
+            "selector",
+            (selector_command.command_id,),
+        )
+
+    def _submit_manual_open_cohort(self) -> None:
+        plan = self._manual_plan
+        if plan is None:
+            return
+        self._publish_manual(status=ManualExperimentStatus.OPENING)
+        command_ids: list[str] = []
+        now_ns = int(self._clock_ns())
+        for target in plan.targets:
+            self._sequence += 1
+            device, line = self.valve_service._split_target(target.target)
+            command = ActuationCommand(
+                command_id=(
+                    f"manual-open-{plan.identity.generation}-"
+                    f"{target.external_port}-{self._sequence}"
+                ),
+                execution_epoch=plan.identity.execution_epoch,
+                arm_epoch=self.protocol_state.arm_epoch,
+                sequence=self._sequence,
+                trial_id=None,
+                trial_index=None,
+                valve=target.internal_valve,
+                action=ActuationAction.OPEN,
+                category=ActuationCategory.MANUAL,
+                expected_ns=now_ns,
+                duration_ns=None,
+                wall_timestamp=float(self._wall_clock()),
+                safety_generation=self.interlock.read()[0],
+                target_device=device,
+                target_line=line,
+                operation_id=plan.identity.operation_id,
+                generation=plan.identity.generation,
+                step_id=f"manual-open:{target.external_port}",
+                action_kind=ActuationAction.OPEN,
+            )
+            self._manual_expected[command.command_id] = {
+                "role": "open",
+                "command": command,
+                "target": target,
+            }
+            command_ids.append(command.command_id)
+            if not self.submit(command):
+                self._fail_manual("手动实验 open cohort 未能完整进入动作队列。")
+                return
+        self._schedule_manual_receipt_timeout("open", tuple(command_ids))
+
+    def _submit_manual_close_cohort(self) -> None:
+        plan = self._manual_plan
+        if plan is None:
+            return
+        self._publish_manual(status=ManualExperimentStatus.CLOSING, remaining_ns=0)
+        command_ids: list[str] = []
+        now_ns = int(self._clock_ns())
+        for target in plan.targets:
+            self._sequence += 1
+            device, line = self.valve_service._split_target(target.target)
+            command = ActuationCommand(
+                command_id=(
+                    f"manual-close-{plan.identity.generation}-"
+                    f"{target.external_port}-{self._sequence}"
+                ),
+                execution_epoch=plan.identity.execution_epoch,
+                arm_epoch=self.protocol_state.arm_epoch,
+                sequence=self._sequence,
+                trial_id=None,
+                trial_index=None,
+                valve=target.internal_valve,
+                action=ActuationAction.CLOSE,
+                category=ActuationCategory.MANUAL,
+                expected_ns=now_ns,
+                duration_ns=None,
+                wall_timestamp=float(self._wall_clock()),
+                safety_generation=self.interlock.read()[0],
+                target_device=device,
+                target_line=line,
+                operation_id=plan.identity.operation_id,
+                generation=plan.identity.generation,
+                step_id=f"manual-close:{target.external_port}",
+                action_kind=ActuationAction.CLOSE,
+            )
+            self._manual_expected[command.command_id] = {
+                "role": "close",
+                "command": command,
+                "target": target,
+            }
+            command_ids.append(command.command_id)
+            if not self.submit(command):
+                self._fail_manual("手动实验 close cohort 未能完整进入动作队列。")
+                return
+        self._schedule_manual_receipt_timeout("close", tuple(command_ids))
+
+    def _is_manual_receipt(self, receipt: ActuationReceipt) -> bool:
+        plan = self._manual_plan
+        return bool(
+            plan is not None
+            and receipt.category is ActuationCategory.MANUAL
+            and (
+                receipt.operation_id == plan.identity.operation_id
+                or receipt.command_id in self._manual_expected
+            )
+        )
+
+    def _consume_manual_receipt(self, receipt: ActuationReceipt) -> None:
+        plan = self._manual_plan
+        expected = self._manual_expected.get(receipt.command_id)
+        if plan is None or expected is None:
+            self._fail_manual("收到未知或迟到的 manual receipt。")
+            return
+        if not self._manual_active():
+            if receipt.action is ActuationAction.OPEN and receipt.result is ActuationResult.SUCCESS:
+                self._manual_possibly_open.add(receipt.valve)
+                self._fail_manual("终态后收到迟到成功 open receipt，已重新进入安全收敛。")
+            return
+        if plan.identity.execution_epoch != self.protocol_state.execution_epoch:
+            self._fail_manual("manual receipt 到达时 execution epoch 已被抢占。")
+            return
+        if receipt.stale or receipt.result is not ActuationResult.SUCCESS:
+            if expected["role"] == "open":
+                self._manual_possibly_open.add(receipt.valve)
+            self._fail_manual(receipt.message or "manual receipt 失败或已失效。")
+            return
+        if receipt.actual_ns is None:
+            self._manual_possibly_open.add(receipt.valve)
+            self._fail_manual("manual 成功 receipt 缺少 actual_ns。")
+            return
+        self._manual_receipts[receipt.command_id] = receipt
+        role = expected["role"]
+        if role == "selector_odor":
+            self.valve_service.commit_receipt(receipt)
+            if self.valve_service.selector_route is not SelectorRoute.ODOR:
+                self._fail_manual("selector odor 路线 receipt 未形成可信路线状态。")
+                return
+            self._publish_manual(selector_odor_confirmed=True)
+            self._submit_manual_open_cohort()
+            return
+        target = expected["target"]
+        if role == "open":
+            self._manual_possibly_open.add(target.internal_valve)
+            confirmed = tuple(
+                sorted(
+                    item["target"].external_port
+                    for command_id, item in self._manual_expected.items()
+                    if item["role"] == "open"
+                    and command_id in self._manual_receipts
+                )
+            )
+            self._publish_manual(
+                open_confirmed=confirmed,
+                possibly_open=self._manual_possibly_open_ports(),
+            )
+            open_receipts = [
+                self._manual_receipts[command_id]
+                for command_id, item in self._manual_expected.items()
+                if item["role"] == "open" and command_id in self._manual_receipts
+            ]
+            if len(open_receipts) != len(plan.targets):
+                return
+            ready_ns = max(int(item.actual_ns) for item in open_receipts if item.actual_ns is not None)
+            deadline_ns = ready_ns + plan.duration_ns
+            self._sequence += 1
+            heapq.heappush(
+                self._deadline_heap,
+                (
+                    deadline_ns,
+                    15,
+                    self._sequence,
+                    "manual_deadline",
+                    {
+                        "identity": plan.identity,
+                        "ready_ns": ready_ns,
+                        "deadline_ns": deadline_ns,
+                    },
+                ),
+            )
+            self._publish_manual(
+                status=ManualExperimentStatus.STIMULATING,
+                ready_ns=ready_ns,
+                deadline_ns=deadline_ns,
+                remaining_ns=max(0, deadline_ns - int(self._clock_ns())),
+            )
+            return
+        if role == "close":
+            self._manual_possibly_open.discard(target.internal_valve)
+            confirmed = tuple(
+                sorted(
+                    item["target"].external_port
+                    for command_id, item in self._manual_expected.items()
+                    if item["role"] == "close"
+                    and command_id in self._manual_receipts
+                )
+            )
+            self._publish_manual(
+                close_confirmed=confirmed,
+                possibly_open=self._manual_possibly_open_ports(),
+            )
+            if len(confirmed) == len(plan.targets):
+                self._complete_manual()
+
+    def _handle_manual_deadline(
+        self,
+        *,
+        identity,
+        ready_ns: int,
+        deadline_ns: int,
+    ) -> None:
+        del ready_ns
+        plan = self._manual_plan
+        if (
+            plan is None
+            or identity != plan.identity
+            or self._manual_snapshot.status is not ManualExperimentStatus.STIMULATING
+            or self._manual_snapshot.deadline_ns != deadline_ns
+        ):
+            return
+        if plan.identity.execution_epoch != self.protocol_state.execution_epoch:
+            self._fail_manual("manual deadline 到期前 execution epoch 已被抢占。")
+            return
+        if int(self._clock_ns()) < deadline_ns:
+            return
+        self._submit_manual_close_cohort()
+
+    def _schedule_manual_receipt_timeout(
+        self,
+        phase: str,
+        command_ids: tuple[str, ...],
+    ) -> None:
+        plan = self._manual_plan
+        if plan is None:
+            return
+        self._sequence += 1
+        heapq.heappush(
+            self._deadline_heap,
+            (
+                int(self._clock_ns()) + self._manual_receipt_timeout_ns,
+                5,
+                self._sequence,
+                "manual_receipt_timeout",
+                {
+                    "identity": plan.identity,
+                    "phase": str(phase),
+                    "command_ids": tuple(command_ids),
+                },
+            ),
+        )
+
+    def _handle_manual_receipt_timeout(
+        self,
+        *,
+        identity,
+        phase: str,
+        command_ids: tuple[str, ...],
+    ) -> None:
+        plan = self._manual_plan
+        if plan is None or identity != plan.identity or not self._manual_active():
+            return
+        if phase == "flow":
+            pending = self._manual_pending_flow_id in command_ids
+        else:
+            pending = any(command_id not in self._manual_receipts for command_id in command_ids)
+        if pending:
+            self._fail_manual(f"manual {phase} receipt 超时或 cohort 不完整。")
+
+    def _manual_runtime_rejection_reason(self) -> str:
+        plan = self._manual_plan
+        if plan is None:
+            return "manual plan 已丢失。"
+        snapshot = self.interlock.read()[1]
+        if plan.identity.execution_epoch != self.protocol_state.execution_epoch:
+            return "manual execution epoch 已被抢占。"
+        if snapshot.device_lease != DeviceLeaseKind.MANUAL.value:
+            return "manual lease 已被抢占或释放。"
+        if self._manual_snapshot.status is ManualExperimentStatus.FLOW_PENDING:
+            if not snapshot.connected:
+                return "硬件连接已断开，manual 已进入安全收敛。"
+            if not snapshot.hardware_ready:
+                return "硬件自检状态已失效，manual 已进入安全收敛。"
+            if snapshot.safety_state != "SAFE":
+                return f"安全状态为 {snapshot.safety_state}，manual 已进入安全收敛。"
+            return ""
+        unsafe = snapshot.unsafe_reason()
+        if unsafe:
+            return unsafe
+        return ""
+
+    def _complete_manual(self) -> None:
+        plan = self._manual_plan
+        if plan is None:
+            return
+        self._publish_manual(
+            status=ManualExperimentStatus.COMPLETED,
+            remaining_ns=0,
+            possibly_open=(),
+        )
+        self.manual_result_ready.emit(
+            ManualExperimentResult(
+                identity=plan.identity,
+                status=ManualExperimentStatus.COMPLETED,
+                outcome=ManualExperimentOutcome.COMPLETED,
+            )
+        )
+
+    def _fail_manual(
+        self,
+        reason: str,
+        *,
+        outcome: ManualExperimentOutcome = ManualExperimentOutcome.FAILED,
+    ) -> None:
+        plan = self._manual_plan
+        if plan is None:
+            return
+        already_recovery = (
+            self._manual_snapshot.status is ManualExperimentStatus.RECOVERY_REQUIRED
+        )
+        self._manual_pending_flow_id = None
+        self._manual_pending_flow_command = None
+        self._deadline_heap = [
+            item
+            for item in self._deadline_heap
+            if item[3] not in {"manual_deadline", "manual_receipt_timeout"}
+            or item[4].get("identity") != plan.identity
+        ]
+        heapq.heapify(self._deadline_heap)
+        self._normal_heap = [
+            item
+            for item in self._normal_heap
+            if item[3].operation_id != plan.identity.operation_id
+        ]
+        heapq.heapify(self._normal_heap)
+        self.protocol_state.possibly_open_valves.update(self._manual_possibly_open)
+        self._publish_manual(
+            status=ManualExperimentStatus.RECOVERY_REQUIRED,
+            remaining_ns=0,
+            possibly_open=self._manual_possibly_open_ports(),
+            recovery_reason=f"RECOVERY_REQUIRED：{reason}",
+        )
+        if not already_recovery:
+            self.manual_result_ready.emit(
+                ManualExperimentResult(
+                    identity=plan.identity,
+                    status=ManualExperimentStatus.RECOVERY_REQUIRED,
+                    outcome=outcome,
+                    reason=self._manual_snapshot.recovery_reason,
+                )
+            )
+            self.invalidate_execution(
+                reason=self._manual_snapshot.recovery_reason,
+                close_all_configured=True,
+            )
+
+    def _publish_manual(self, **changes: Any) -> None:
+        self._manual_snapshot = replace(self._manual_snapshot, **changes)
+        self.manual_snapshot_ready.emit(self._manual_snapshot)
+
     def _all_configured_close_steps(self):
         if self.valve_service is None:
             return ()
@@ -4435,7 +5148,10 @@ class ActuationWorker(QThread):
                 result=ActuationResult.CANCELLED,
                 message=message,
             )
-            if command.category == ActuationCategory.CLEANING:
+            if command.category in {
+                ActuationCategory.CLEANING,
+                ActuationCategory.MANUAL,
+            }:
                 self.consume_receipt(cancelled)
                 return
             self._handle_plan_receipt(cancelled)
@@ -4494,6 +5210,10 @@ class ActuationWorker(QThread):
                 message="开阀写入期间 safety/readiness 发生变化，结果按不确定处理并回滚。",
             )
             if command.category == ActuationCategory.CLEANING:
+                self.consume_receipt(uncertain)
+                self._retire_command(command.command_id)
+                return
+            if command.category == ActuationCategory.MANUAL:
                 self.consume_receipt(uncertain)
                 self._retire_command(command.command_id)
                 return
@@ -4765,6 +5485,10 @@ class ActuationWorker(QThread):
         )
         self._block(reason)
         self._mark_target_uncertain(receipt.valve)
+        if self._is_manual_receipt(receipt):
+            if receipt.valve != 0:
+                self._manual_possibly_open.add(receipt.valve)
+            self._fail_manual(reason)
         plans = (self._safe_stop_plan, self._background_safe_stop_plan)
         for plan in plans:
             if plan is not None and receipt.operation_id == plan.identity.operation_id:

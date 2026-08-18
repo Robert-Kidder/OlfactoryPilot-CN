@@ -243,6 +243,17 @@ class FlowWorker(QThread):
                 generation=generation,
             )
 
+    def acquire_manual_lease(
+        self,
+        operation_id: str,
+        generation: int,
+    ) -> DeviceLeaseToken | None:
+        return self.acquire_lease(
+            DeviceLeaseKind.MANUAL,
+            operation_id=operation_id,
+            generation=generation,
+        )
+
     def release_lease(self, token: DeviceLeaseToken) -> bool:
         with self._condition:
             if self._active_command is not None or self._queue:
@@ -584,6 +595,12 @@ class FlowWorker(QThread):
             generation=command.generation,
             token=command.lease_token,
         )
+        manual_match = self._lease.matches(
+            kind=DeviceLeaseKind.MANUAL,
+            operation_id=command.operation_id,
+            generation=command.generation,
+            token=command.lease_token,
+        )
         if (
             not maintenance_match
             and self._execution_epoch is not None
@@ -594,6 +611,10 @@ class FlowWorker(QThread):
             return "协议已持有设备租约，流量命令已取消。"
         if lease.kind == DeviceLeaseKind.MAINTENANCE and not maintenance_match:
             return "maintenance 已持有设备租约，流量命令身份不匹配。"
+        if command.source == "manual:experiment" and not manual_match:
+            return "manual 流量命令租约身份不匹配。"
+        if manual_match:
+            return "" if command.source == "manual:experiment" else "manual 租约拒绝非手动命令。"
         if lease.kind not in {DeviceLeaseKind.IDLE, DeviceLeaseKind.MAINTENANCE}:
             return f"{lease.kind.value} 已持有设备租约，流量命令已取消。"
         if lease.kind == DeviceLeaseKind.IDLE and command.lease_token:

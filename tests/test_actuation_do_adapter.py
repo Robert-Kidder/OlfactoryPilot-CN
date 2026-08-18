@@ -62,6 +62,28 @@ def test_adapter_preserves_hal_write_measurement_without_retimestamping() -> Non
     assert receipt.measurement_point == "daqmx_write_ack"
 
 
+def test_adapter_translates_active_low_odor_actions() -> None:
+    class HAL:
+        def __init__(self) -> None:
+            self.levels = []
+
+        def write_digital_ack(self, *, device, line, state, timeout_ms):
+            self.levels.append(state)
+            return DigitalWriteAck(True, 1_100, 1_200, 10.1)
+
+    hal = HAL()
+    adapter = ActuationDOAdapter(
+        hal=hal,
+        target_resolver=lambda _valve: ("Dev1", "P0.1"),
+        physical_level_resolver=lambda _valve, logical_open: not logical_open,
+    )
+
+    adapter.execute(_command(action=ActuationAction.OPEN))
+    adapter.execute(_command(action=ActuationAction.CLOSE))
+
+    assert hal.levels == [False, True]
+
+
 def test_safety_category_can_only_close_and_never_calls_hal_for_open() -> None:
     class HAL:
         def write_digital_ack(self, **kwargs):

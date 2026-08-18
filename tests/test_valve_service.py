@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 from app.models import (
     ActuationAction,
     ActuationCategory,
@@ -98,6 +101,29 @@ def test_valve_toggle_sets_master_valve():
     ok, _ = service.set_valve(1, False, safety_state=safety_state)
     assert ok
     assert service.worker.commands[-1][-1] is False
+
+
+def test_hardware_profile_active_low_controls_direct_levels():
+    config = json.loads(Path("config/default_config.json").read_text(encoding="utf-8"))
+    config["hardware_profile"]["channels"][1]["active_high"] = False
+    state = AppState.from_config(config)
+    state.flow_setpoints_ready = True
+    worker = DummyWorker()
+    service = ValveService(
+        state=state,
+        safety_manager=SafetyManager(low_flow_threshold=0.2),
+        worker=worker,
+        valve_variants=state.valve_variants,
+        hardware_variant=state.hardware_variant,
+        selector=state.selector,
+    )
+    safety_state = SafetyState("SAFE", 1.0, 0.2, 1.0, "")
+
+    assert service.set_valve(2, True, safety_state=safety_state)[0]
+    assert worker.commands[-1] == ("Dev1", "P0.1", False)
+    assert service.set_valve(2, False, safety_state=safety_state)[0]
+    assert worker.commands[-1] == ("Dev1", "P0.1", True)
+    assert service.physical_level(2, False) is True
 
 
 def test_master_state_reflects_commands():

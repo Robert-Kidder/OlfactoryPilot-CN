@@ -38,6 +38,15 @@ from .lease import (
     ExclusiveDeviceLease,
     MaintenanceLeaseReleaseEvidence,
 )
+from .manual_experiment import (
+    ManualExperimentIdentity,
+    ManualExperimentOutcome,
+    ManualExperimentPlan,
+    ManualExperimentResult,
+    ManualExperimentSnapshot,
+    ManualExperimentStatus,
+    ManualValveTarget,
+)
 from .protocol import ProtocolDocument, ProtocolMetadata, ProtocolTrial, TriggerMode
 from .protocol_execution import (
     ProtocolExecutionReadiness,
@@ -103,6 +112,13 @@ __all__ = [
     "HARDWARE_PROFILE_SCHEMA_VERSION",
     "HardwareProfile",
     "MaintenanceLeaseReleaseEvidence",
+    "ManualExperimentIdentity",
+    "ManualExperimentOutcome",
+    "ManualExperimentPlan",
+    "ManualExperimentResult",
+    "ManualExperimentSnapshot",
+    "ManualExperimentStatus",
+    "ManualValveTarget",
     "MaintenanceDescriptor",
     "MaintenancePaths",
     "MaintenanceProducerFence",

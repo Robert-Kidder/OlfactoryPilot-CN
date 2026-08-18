@@ -139,6 +139,20 @@ class ValveService:
             raise ValueError(f"阀门 {channel_id} 未配置映射")
         return self._split_target(target)
 
+    def physical_level(self, channel_id: int, logical_open: bool) -> bool:
+        """Translate an odor-valve logical state using HardwareProfile polarity."""
+
+        active_high = True
+        registry = self.state.channel_registry
+        if registry is not None:
+            try:
+                active_high = registry.by_internal_valve(int(channel_id)).active_high
+            except KeyError:
+                # Legacy variants may contain valves not yet represented by the
+                # V3 profile. Their historical behavior is active-high.
+                active_high = True
+        return bool(active_high if logical_open else not active_high)
+
     def emergency_close_steps(self) -> tuple[ValvePlanStep, ...]:
         """Return active odor-valve closes only; selector has no closed state."""
         steps: list[ValvePlanStep] = []
@@ -311,14 +325,23 @@ class ValveService:
             return False, "主阀切换失败，已阻断阀门写入"
 
         device, line = self._split_target(target)
-        if not self.worker.write_digital(device=device, line=line, state=state):
+        physical_level = self.physical_level(channel_id, state)
+        if not self.worker.write_digital(
+            device=device,
+            line=line,
+            state=physical_level,
+        ):
             return False, f"阀门 {channel_id} 写入失败"
 
         self._states[channel_id] = state
         master_success, master_opened = self._apply_master_valve(state)
         if not master_success:
             self._states[channel_id] = False
-            self.worker.write_digital(device=device, line=line, state=False)
+            self.worker.write_digital(
+                device=device,
+                line=line,
+                state=self.physical_level(channel_id, False),
+            )
             return False, f"阀门 {channel_id} 已写入，但主阀控制失败"
         self._log_event(channel_id, state, target, safety)
         suffix = "（主阀保持开启）" if master_opened else ""

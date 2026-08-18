@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+from dataclasses import replace
 
 import pytest
 
@@ -49,6 +50,33 @@ def test_flow_worker_preserves_command_identity() -> None:
     assert service.calls == ["rest"]
     assert received == [FlowCommandResult(command=command, result=received[0].result)]
     assert received[0].result.success
+
+
+def test_manual_flow_requires_exact_manual_lease_identity() -> None:
+    service = _FlowService()
+    worker = FlowWorker(service)
+    token = worker.acquire_manual_lease("manual-1", 3)
+    assert token is not None
+    command = FlowCommand(
+        "manual-flow",
+        7,
+        1,
+        "manual_supply",
+        100,
+        900,
+        50,
+        "manual:experiment",
+        operation_id="manual-1",
+        generation=3,
+        lease_token=token.token,
+    )
+
+    assert worker.submit(command)
+    assert worker.process_ready() == 1
+    assert service.calls == ["manual_supply"]
+
+    wrong = replace(command, command_id="wrong", sequence=2, lease_token="wrong")
+    assert worker.submit(wrong) is False
 
 
 def test_protocol_lease_rejects_while_queued_flow_still_owns_order() -> None:

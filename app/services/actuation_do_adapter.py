@@ -13,6 +13,7 @@ from app.models import (
 from app.services.hal import HalInterface
 
 TargetResolver = Callable[[int], tuple[str | None, str]]
+PhysicalLevelResolver = Callable[[int, bool], bool]
 
 
 class ActuationDOAdapter:
@@ -25,12 +26,18 @@ class ActuationDOAdapter:
         target_resolver: TargetResolver,
         selector_target: str | None = None,
         selector_odor_level: bool = True,
+        physical_level_resolver: PhysicalLevelResolver | None = None,
         write_timeout_ms: int = 100,
     ) -> None:
         self.hal = hal
         self.target_resolver = target_resolver
         self.selector_target = selector_target
         self.selector_odor_level = bool(selector_odor_level)
+        owner = getattr(target_resolver, "__self__", None)
+        inferred_resolver = getattr(owner, "physical_level", None)
+        self.physical_level_resolver = physical_level_resolver or (
+            inferred_resolver if callable(inferred_resolver) else None
+        )
         self.write_timeout_ms = max(1, int(write_timeout_ms))
 
     def execute(self, command: ActuationCommand) -> ActuationReceipt:
@@ -106,10 +113,16 @@ class ActuationDOAdapter:
                 device, line = command.target_device, command.target_line
             else:
                 device, line = self.target_resolver(command.valve)
+            logical_open = command.action == ActuationAction.OPEN
+            physical_level = logical_open
+            if command.valve != 0 and self.physical_level_resolver is not None:
+                physical_level = bool(
+                    self.physical_level_resolver(command.valve, logical_open)
+                )
             ack = self.hal.write_digital_ack(
                 device=device,
                 line=line,
-                state=command.action == ActuationAction.OPEN,
+                state=physical_level,
                 timeout_ms=self.write_timeout_ms,
             )
         except Exception as exc:
