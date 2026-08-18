@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 import threading
 import time
+from collections.abc import Callable
 
 from app.models import SelfCheckResult
 from app.services.hal import AnalogInputFrame, DigitalWriteAck, HalBase
@@ -17,10 +18,12 @@ class MockHAL(HalBase):
         base_flow_sccm: float = 1000.0,
         signal_amplitude: float = 0.5,
         signal_freq_hz: float = 0.2,
+        monotonic_ns_clock: Callable[[], int] | None = None,
     ) -> None:
         self.base_flow_sccm = base_flow_sccm
         self.signal_amplitude = signal_amplitude
         self.signal_freq_hz = signal_freq_hz
+        self._monotonic_ns_clock = monotonic_ns_clock or time.perf_counter_ns
         self._phase = 0.0
         self._digital_state: dict[str, bool] = {}
         self._flow = float(base_flow_sccm)
@@ -42,7 +45,7 @@ class MockHAL(HalBase):
             timestamp=ts,
             ai0=self.read_ai0(ts),
             ai6=float(self._ttl_level),
-            monotonic_ns=time.perf_counter_ns(),
+            monotonic_ns=int(self._monotonic_ns_clock()),
             ai_epoch=self._ai_epoch,
             sample_sequence=self._ai_sequence,
         )
@@ -108,9 +111,9 @@ class MockHAL(HalBase):
                 wall_timestamp=time.time(),
                 message="DO task 所有权不属于当前线程，已拒绝跨线程写入。",
             )
-        started_ns = time.perf_counter_ns()
+        started_ns = int(self._monotonic_ns_clock())
         success = self.write_digital(device=device, line=line, state=state)
-        actual_ns = time.perf_counter_ns()
+        actual_ns = int(self._monotonic_ns_clock())
         return DigitalWriteAck(
             success=success,
             started_ns=started_ns,

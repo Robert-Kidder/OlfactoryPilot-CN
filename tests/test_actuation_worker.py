@@ -165,6 +165,47 @@ def _worker(clock: FakeClock, writer, *, capacity: int = 256):
     return worker, state, ingress
 
 
+def test_selector_route_interlock_uses_semantic_route_not_logical_action() -> None:
+    snapshot = _safe_snapshot(
+        connected=False,
+        hardware_ready=False,
+        flow_setpoints_ready=False,
+        safety_state="UNKNOWN",
+        device_lease="idle",
+    )
+    dangerous_close = replace(
+        _command(
+            command_id="selector-odor-low",
+            sequence=1,
+            expected_ns=1,
+            action=ActuationAction.CLOSE,
+            category=ActuationCategory.MANUAL,
+        ),
+        valve=0,
+        step_id="selector_odor",
+        action_kind=ActuationAction.CLOSE,
+        operation_id="manual-1",
+        generation=1,
+        target_device="Dev2",
+        target_line="P1.0",
+    )
+    assert snapshot.command_rejection_reason(dangerous_close)
+
+    safe_high = replace(
+        dangerous_close,
+        command_id="selector-safe-high",
+        action=ActuationAction.OPEN,
+        action_kind=ActuationAction.OPEN,
+        category=ActuationCategory.SAFETY,
+        step_id="selector_safe",
+        operation_id="safe-stop-1",
+    )
+    assert snapshot.command_rejection_reason(safe_high) == ""
+    assert snapshot.command_rejection_reason(
+        replace(safe_high, command_id="unbound", operation_id=None)
+    )
+
+
 def test_owner_direct_recorder_ingress_precedes_qt_receipt_signal() -> None:
     clock = FakeClock()
     worker, _, _ = _worker(clock, lambda _command: None)

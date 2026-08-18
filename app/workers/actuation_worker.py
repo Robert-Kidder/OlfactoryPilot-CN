@@ -49,6 +49,30 @@ if False:  # pragma: no cover - typing-only without import cycles
     from app.services.protocol_executor import ProtocolExecutor
 
 
+def is_dangerous_selector_route(command: ActuationCommand) -> bool:
+    """Return whether a command semantically selects the hazardous odor route."""
+
+    return bool(
+        command.valve == 0
+        and command.category is not ActuationCategory.SAFETY
+        and command.step_id == "selector_odor"
+    )
+
+
+def is_identity_bound_selector_safe_route(command: ActuationCommand) -> bool:
+    """Recognize selector safety routing independently from physical polarity."""
+
+    return bool(
+        command.category is ActuationCategory.SAFETY
+        and command.valve == 0
+        and command.step_id == "selector_safe"
+        and command.operation_id
+        and type(command.generation) is int
+        and command.action_kind is command.action
+        and command.target_line is not None
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class InterlockSnapshot:
     connected: bool = False
@@ -88,7 +112,12 @@ class InterlockSnapshot:
 
     def command_rejection_reason(self, command: ActuationCommand) -> str:
         if command.category == ActuationCategory.SAFETY:
-            return "" if command.action == ActuationAction.CLOSE else "安全命令只能关闭输出。"
+            return (
+                ""
+                if command.action is ActuationAction.CLOSE
+                or is_identity_bound_selector_safe_route(command)
+                else "安全命令只能关闭输出，或执行身份绑定的 selector 安全路线。"
+            )
         if (
             (
                 command.category == ActuationCategory.NORMAL
@@ -108,11 +137,7 @@ class InterlockSnapshot:
             )
         if self.session_closing:
             return "会话正在关闭，已拒绝非安全动作。"
-        dangerous_selector_route = bool(
-            command.valve == 0
-            and command.step_id == "selector_odor"
-            and command.category != ActuationCategory.SAFETY
-        )
+        dangerous_selector_route = is_dangerous_selector_route(command)
         unsafe = self.unsafe_reason()
         if unsafe and (
             command.action == ActuationAction.OPEN or dangerous_selector_route
@@ -1145,6 +1170,7 @@ class ActuationWorker(QThread):
         reason: str,
         target_device: str | None,
         target_line: str | None,
+        physical_level: bool | None = None,
         prefix: str = "safety-close",
         trial_id: str | None = None,
         trial_index: int | None = None,
@@ -1183,6 +1209,7 @@ class ActuationWorker(QThread):
                 safety_generation=self.interlock.read()[0],
                 target_device=target_device,
                 target_line=target_line,
+                physical_level=physical_level,
             )
             self._commands_by_id[command.command_id] = command
             self._enqueue_emergency_locked(command)
@@ -1222,6 +1249,7 @@ class ActuationWorker(QThread):
                 reason=reason,
                 target_device=step.device,
                 target_line=step.line,
+                physical_level=step.physical_level,
                 prefix=prefix,
                 trial_id=trial_id,
                 trial_index=trial_index,
@@ -1658,8 +1686,17 @@ class ActuationWorker(QThread):
                 plan.require_recovery(
                     wrapped.result.message or "异常停止 A/B/C 终态清零未确认。"
                 )
-            elif self._manual_snapshot.status is ManualExperimentStatus.RECOVERY_REQUIRED:
-                self._publish_manual(supply_enabled=False, supply_restored=False)
+                self._publish_manual(
+                    supply_enabled=None,
+                    supply_transitioning=False,
+                    supply_restored=False,
+                )
+            else:
+                self._publish_manual(
+                    supply_enabled=False,
+                    supply_transitioning=False,
+                    supply_restored=False,
+                )
             if self._pending_safe_transition is not None and final_zero:
                 self.protocol_state.quality_block_reason = (
                     "气路已收敛，等待 controller 确认 protocol lease handoff。"
@@ -2312,6 +2349,7 @@ class ActuationWorker(QThread):
                     safety_generation=self.interlock.read()[0],
                     target_device=step.device,
                     target_line=step.line,
+                    physical_level=step.physical_level,
                     operation_id=identity.operation_id,
                     generation=identity.generation,
                     step_id=f"odor_close_{step.logical_valve}",
@@ -2367,6 +2405,7 @@ class ActuationWorker(QThread):
                     safety_generation=self.interlock.read()[0],
                     target_device=step.device,
                     target_line=step.line,
+                    physical_level=step.physical_level,
                 )
                 self._commands_by_id[command.command_id] = command
                 self._shutdown_close_pending.add(command.command_id)
@@ -2404,6 +2443,7 @@ class ActuationWorker(QThread):
                     safety_generation=self.interlock.read()[0],
                     target_device=step.device,
                     target_line=step.line,
+                    physical_level=step.physical_level,
                 )
                 receipt = self.writer(command)
                 success = success and receipt.result == ActuationResult.SUCCESS
@@ -2645,12 +2685,29 @@ class ActuationWorker(QThread):
             else:
                 self._handle_manual_receipt_timeout(**payload)
             return
-        if kind == "flow_result" and self._is_manual_flow_result(
-            payload["flow_result"]
-        ):
-            self.flow_result_ready.emit(payload["flow_result"])
-            self._consume_manual_flow_result(payload["flow_result"])
-            return
+        if kind == "flow_result":
+            wrapped = payload["flow_result"]
+            if self._is_manual_flow_result(wrapped):
+                self.flow_result_ready.emit(wrapped)
+                self._consume_manual_flow_result(wrapped)
+                return
+            if wrapped.command.source == "manual:experiment":
+                if (
+                    self._manual_plan is not None
+                    and wrapped.command.operation_id
+                    == self._manual_plan.identity.operation_id
+                ):
+                    # The result claims the current operation but does not
+                    # match its exact pending command/generation.  Treat that
+                    # as conflicting evidence, not as an innocuous old result.
+                    self.flow_result_ready.emit(wrapped)
+                    self._consume_manual_flow_result(wrapped)
+                    return
+                # A previous manual operation may finish after a new one has
+                # acquired the owner.  Preserve it as stale evidence without
+                # allowing it to fail or advance the current operation.
+                self.flow_result_ready.emit(replace(wrapped, stale=True))
+                return
         if self._manual_active():
             if kind in {"manual_stop", "stop"}:
                 self._fail_manual(
@@ -4328,6 +4385,7 @@ class ActuationWorker(QThread):
         lease_token: DeviceLeaseToken,
     ) -> None:
         self._manual_start_pending = False
+        previous_supply_enabled = self._manual_snapshot.supply_enabled
         if self._manual_snapshot.status is ManualExperimentStatus.RECOVERY_REQUIRED:
             return
         reason = ""
@@ -4421,6 +4479,8 @@ class ActuationWorker(QThread):
             remaining_ns=0,
             possibly_open=(),
             recovery_reason="",
+            supply_enabled=previous_supply_enabled,
+            supply_transitioning=False,
         )
         self.manual_snapshot_ready.emit(self._manual_snapshot)
         if plan.supply_only:
@@ -4453,9 +4513,15 @@ class ActuationWorker(QThread):
 
     def _is_manual_flow_result(self, wrapped: FlowCommandResult) -> bool:
         plan = self._manual_plan
+        pending = self._manual_pending_flow_command
         return bool(
             plan is not None
+            and pending is not None
             and wrapped.command.source == "manual:experiment"
+            and wrapped.command.command_id == self._manual_pending_flow_id
+            and wrapped.command.operation_id == plan.identity.operation_id
+            and wrapped.command.generation == plan.identity.generation
+            and wrapped.command == pending
         )
 
     def _consume_manual_flow_result(self, wrapped: FlowCommandResult) -> None:
@@ -4503,11 +4569,17 @@ class ActuationWorker(QThread):
             self._publish_manual(
                 status=ManualExperimentStatus.SELECTOR_COMPENSATION,
                 flow_zero_confirmed=True,
+                supply_enabled=False,
+                supply_transitioning=False,
             )
             self._submit_manual_selector_compensation()
             return
         if role == "restore_supply":
-            self._publish_manual(supply_restored=True, supply_enabled=True)
+            self._publish_manual(
+                supply_restored=True,
+                supply_enabled=True,
+                supply_transitioning=False,
+            )
             self._complete_manual()
             return
         self.interlock.update(flow_setpoints_ready=True)
@@ -4518,6 +4590,7 @@ class ActuationWorker(QThread):
             status=ManualExperimentStatus.SELECTOR_PENDING,
             flow_confirmed=True,
             supply_enabled=True,
+            supply_transitioning=False,
         )
         try:
             step = self.valve_service.selector_route_step(SelectorRoute.ODOR)
@@ -4677,14 +4750,23 @@ class ActuationWorker(QThread):
                 self._fail_manual("终态后收到迟到成功 open receipt，已重新进入安全收敛。")
             return
         receipt_deadline = expected.get("deadline_ns")
+        now_ns = int(self._clock_ns())
         if (
             receipt_deadline is None
-            or int(self._clock_ns()) > int(receipt_deadline)
+            or now_ns > int(receipt_deadline)
             or (receipt.actual_ns is not None and int(receipt.actual_ns) > int(receipt_deadline))
         ):
             if expected["role"] == "open":
                 self._manual_possibly_open.add(receipt.valve)
             self._fail_manual("manual receipt 超过单调 deadline，成功证据已拒绝。")
+            return
+        if receipt.actual_ns is not None and int(receipt.actual_ns) > now_ns:
+            if expected["role"] == "open":
+                self._manual_possibly_open.add(receipt.valve)
+            self._fail_manual(
+                "manual receipt 来自未来时钟；安全动作：拒绝 ready/deadline 证据并收敛；"
+                "下一步：检查 owner 与 writer 的单调时钟来源。"
+            )
             return
         if plan.identity.execution_epoch != self.protocol_state.execution_epoch:
             self._fail_manual("manual receipt 到达时 execution epoch 已被抢占。")
@@ -4786,7 +4868,7 @@ class ActuationWorker(QThread):
         setpoints = plan.flow_setpoints
         self._publish_manual(
             status=ManualExperimentStatus.ZEROING_A,
-            supply_enabled=False,
+            supply_transitioning=True,
         )
         self._sequence += 1
         command = FlowCommand(
@@ -4862,7 +4944,10 @@ class ActuationWorker(QThread):
         if plan is None:
             return
         setpoints = plan.flow_setpoints
-        self._publish_manual(status=ManualExperimentStatus.RESTORING_SUPPLY)
+        self._publish_manual(
+            status=ManualExperimentStatus.RESTORING_SUPPLY,
+            supply_transitioning=True,
+        )
         self._sequence += 1
         command = FlowCommand(
             command_id=f"manual-restore-supply-{plan.identity.generation}-{self._sequence}",
@@ -5027,6 +5112,8 @@ class ActuationWorker(QThread):
             status=ManualExperimentStatus.RECOVERY_REQUIRED,
             remaining_ns=0,
             possibly_open=self._manual_possibly_open_ports(),
+            supply_enabled=None,
+            supply_transitioning=False,
             recovery_reason=f"RECOVERY_REQUIRED：{reason}",
         )
         if not already_recovery:
@@ -5375,20 +5462,23 @@ class ActuationWorker(QThread):
 
         before_generation, snapshot, unsafe_latched = self.interlock.read()
         rejection = snapshot.command_rejection_reason(command)
-        selector_safe_route = bool(
-            command.category == ActuationCategory.SAFETY and command.valve == 0
+        selector_safe_route = is_identity_bound_selector_safe_route(command)
+        dangerous_selector_route = is_dangerous_selector_route(command)
+        dangerous_write = bool(
+            command.action is ActuationAction.OPEN or dangerous_selector_route
         )
         rejected_open = (
-            command.action == ActuationAction.OPEN
+            dangerous_write
             and not selector_safe_route
             and (
-            command.safety_generation != before_generation
-            or unsafe_latched
-            or rejection
+                command.safety_generation != before_generation
+                or unsafe_latched
+                or rejection
             )
         )
         rejected_close = (
-            command.action == ActuationAction.CLOSE
+            command.action is ActuationAction.CLOSE
+            and not dangerous_selector_route
             and (
                 not snapshot.recording_ready
                 or snapshot.recorder_failed
@@ -5456,7 +5546,7 @@ class ActuationWorker(QThread):
             )
 
         after_generation, _, after_unsafe = self.interlock.read()
-        if command.action == ActuationAction.OPEN and not selector_safe_route and (
+        if dangerous_write and not selector_safe_route and (
             after_generation != before_generation or after_unsafe
         ):
             if command.valve == 0:

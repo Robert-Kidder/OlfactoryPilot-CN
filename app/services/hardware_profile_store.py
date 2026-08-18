@@ -151,6 +151,85 @@ class HardwareProfileStore:
             )
             return validated
 
+    def prepare_save(
+        self,
+        candidate: HardwareProfile | Mapping[str, Any],
+        *,
+        expected_revision: int | None = None,
+    ) -> HardwareProfile:
+        """Validate a save without changing disk, revision, active, or LKG."""
+
+        with self._lock:
+            expected = self._expected_revision(expected_revision)
+            local = self._read_local()
+            self._require_disk_revision(local, expected)
+            return self._validate_candidate(candidate, local=local)
+
+    def commit_prepared_save(
+        self,
+        prepared: HardwareProfile,
+        *,
+        expected_revision: int,
+    ) -> HardwareProfile:
+        """Commit a previously prepared candidate under the same CAS guard."""
+
+        return self.save(prepared, expected_revision=expected_revision)
+
+    def preview_rollback(
+        self,
+        *,
+        expected_revision: int | None = None,
+    ) -> HardwareProfile:
+        """Return the LKG rollback candidate without flipping any state."""
+
+        with self._lock:
+            if self._last_known_good is None:
+                raise RuntimeError("没有可回滚的 HardwareProfile。")
+            expected = self._expected_revision(expected_revision)
+            local = self._read_local()
+            self._require_disk_revision(local, expected)
+            candidate = HardwareProfile.from_config(self._last_known_good.to_dict())
+            candidate_effective = _merge(
+                _merge(self._base_config, local),
+                {"hardware_profile": candidate.to_dict()},
+            )
+            self._validate_devices(candidate, candidate_effective)
+            return candidate
+
+    def commit_prepared_rollback(
+        self,
+        prepared: HardwareProfile,
+        *,
+        expected_revision: int,
+    ) -> HardwareProfile:
+        with self._lock:
+            expected = self._expected_revision(expected_revision)
+            local = self._read_local()
+            self._require_disk_revision(local, expected)
+            if self._last_known_good is None:
+                raise RuntimeError("没有可回滚的 HardwareProfile。")
+            rollback_profile = HardwareProfile.from_config(
+                self._last_known_good.to_dict()
+            )
+            if prepared != rollback_profile:
+                raise StaleHardwareProfileRevisionError(
+                    "rollback preview 已过期，未写入磁盘。"
+                )
+            next_local = copy.deepcopy(local)
+            next_local = _with_connection_aliases(next_local, rollback_profile)
+            next_local["hardware_profile"] = rollback_profile.to_dict()
+            next_local["hardware_profile_last_known_good"] = self._profile.to_dict()
+            next_local["hardware_profile_revision"] = expected + 1
+            self._atomic_write(next_local)
+            previous_active = self._profile
+            self._profile = rollback_profile
+            self._last_known_good = previous_active
+            self._revision = expected + 1
+            self._effective_config = _with_connection_aliases(
+                _merge(self._base_config, next_local), rollback_profile
+            )
+            return rollback_profile
+
     def rollback(self, *, expected_revision: int | None = None) -> HardwareProfile:
         with self._lock:
             if self._last_known_good is None:
@@ -288,11 +367,49 @@ def _prefer_local_profile_connections(
 
     merged = copy.deepcopy(dict(effective))
     local_profile = local.get("hardware_profile")
-    if not isinstance(local_profile, Mapping):
-        return merged
-    connections = local_profile.get("connections")
+    connections = (
+        local_profile.get("connections")
+        if isinstance(local_profile, Mapping)
+        else None
+    )
     if not isinstance(connections, Mapping):
+        # A legacy local file predating nested connections must still beat the
+        # nested defaults it was merged with.  Remove only the inherited block
+        # so HardwareProfile reads the explicit legacy aliases.
+        if any(key in local for key in ("serial_port", "ni_devices", "alicat_unit_ids")):
+            profile = merged.get("hardware_profile")
+            if isinstance(profile, Mapping):
+                profile = copy.deepcopy(dict(profile))
+                profile.pop("connections", None)
+                merged["hardware_profile"] = profile
         return merged
+    explicit_aliases = {
+        key: local[key]
+        for key in ("serial_port", "ni_devices", "alicat_unit_ids")
+        if key in local
+    }
+    if explicit_aliases:
+        if "hardware_profile_revision" not in local:
+            # Migration path for pre-revision local files: their top-level
+            # values were the only writable connection settings, even when a
+            # copied default profile happened to contain nested defaults.
+            profile = copy.deepcopy(dict(merged["hardware_profile"]))
+            canonical = copy.deepcopy(dict(profile.get("connections") or {}))
+            canonical.update(copy.deepcopy(explicit_aliases))
+            profile["connections"] = canonical
+            merged["hardware_profile"] = profile
+            connections = canonical
+        else:
+            conflicts = [
+                key
+                for key, value in explicit_aliases.items()
+                if key in connections and connections[key] != value
+            ]
+            if conflicts:
+                raise ValueError(
+                    "connections 与顶层兼容别名冲突："
+                    + "、".join(conflicts)
+                )
     for key in ("serial_port", "ni_devices", "alicat_unit_ids"):
         if key not in local and key in connections:
             merged[key] = copy.deepcopy(connections[key])

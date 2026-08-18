@@ -129,14 +129,38 @@ class ActuationDOAdapter:
                 result=ActuationResult.FAILED,
                 message="安全关闭命令不能用于打开，已拒绝且未写入硬件。",
             )
+        if (
+            command.physical_level is not None
+            and not (
+                command.category is ActuationCategory.SAFETY
+                and command.valve != 0
+                and command.action is ActuationAction.CLOSE
+            )
+        ):
+            return ActuationReceipt.from_write(
+                command=command,
+                started_ns=None,
+                actual_ns=None,
+                wall_timestamp=command.wall_timestamp,
+                result=ActuationResult.FAILED,
+                message="physical_level 仅允许由普通气味阀安全关闭步骤携带。",
+            )
         try:
             if command.target_line is not None:
                 device, line = command.target_device, command.target_line
             else:
                 device, line = self.target_resolver(command.valve)
             logical_open = command.action == ActuationAction.OPEN
-            physical_level = logical_open
-            if command.valve != 0 and self.physical_level_resolver is not None:
+            physical_level = (
+                command.physical_level
+                if command.physical_level is not None
+                else logical_open
+            )
+            if (
+                command.physical_level is None
+                and command.valve != 0
+                and self.physical_level_resolver is not None
+            ):
                 physical_level = bool(
                     self.physical_level_resolver(command.valve, logical_open)
                 )

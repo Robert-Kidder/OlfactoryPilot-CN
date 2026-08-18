@@ -84,6 +84,7 @@ def _fixture(*, writer_mutator=None, duration_ns: int = 50):
             actual = clock.value + 20
         elif command.step_id == "manual-open:4":
             actual = clock.value + 50
+        clock.value = max(clock.value, actual)
         receipt = ActuationReceipt.from_write(
             command=command,
             started_ns=actual,
@@ -190,6 +191,7 @@ def test_manual_plan_requires_mode_scoped_verification() -> None:
 
 def test_manual_cohort_uses_latest_open_receipt_and_owner_deadline() -> None:
     worker, _, _, clock, plan, lease, flows, written = _fixture()
+    initial_ns = clock.value
 
     _start_to_stimulating(worker, plan, lease, flows)
 
@@ -198,10 +200,10 @@ def test_manual_cohort_uses_latest_open_receipt_and_owner_deadline() -> None:
         "manual-open:2",
         "manual-open:4",
     ]
-    assert worker.manual_snapshot.ready_ns == clock.value + 50
-    assert worker.manual_snapshot.deadline_ns == clock.value + 100
+    assert worker.manual_snapshot.ready_ns == initial_ns + 70
+    assert worker.manual_snapshot.deadline_ns == initial_ns + 120
     assert worker.manual_snapshot.open_confirmed == (2, 4)
-    clock.value += 99
+    clock.value = worker.manual_snapshot.deadline_ns - 1
     assert worker.process_ready() == 0
     clock.value += 1
     worker.process_ready()
@@ -232,21 +234,23 @@ def test_manual_open_receipts_may_arrive_in_reverse_order() -> None:
     worker.process_ready(max_items=1)  # selector receipt creates the open cohort
     open_commands = [item[3] for item in worker._normal_heap]
     worker._normal_heap.clear()
+    cohort_started_ns = clock.value
 
     for offset, command in zip((80, 20), reversed(open_commands), strict=True):
+        clock.value = max(clock.value, clock.value + offset)
         worker.consume_receipt(
             ActuationReceipt.from_write(
                 command=command,
-                started_ns=clock.value + offset,
-                actual_ns=clock.value + offset,
+                started_ns=clock.value,
+                actual_ns=clock.value,
                 wall_timestamp=10.0,
                 result=ActuationResult.SUCCESS,
             )
         )
 
     assert worker.manual_snapshot.status is ManualExperimentStatus.STIMULATING
-    assert worker.manual_snapshot.ready_ns == clock.value + 80
-    assert worker.manual_snapshot.deadline_ns == clock.value + 130
+    assert worker.manual_snapshot.ready_ns == cohort_started_ns + 100
+    assert worker.manual_snapshot.deadline_ns == cohort_started_ns + 150
 
 
 def test_partial_open_cohort_timeout_fails_closed_without_sleep() -> None:
@@ -800,7 +804,8 @@ def test_manual_begin_resets_all_completion_evidence_and_double_post_is_guarded(
     assert not snapshot.flow_zero_confirmed
     assert not snapshot.selector_compensation_confirmed
     assert not snapshot.supply_restored
-    assert not snapshot.supply_enabled
+    assert snapshot.supply_enabled is True
+    assert not snapshot.supply_transitioning
 
 
 def test_pending_manual_start_is_cancelled_by_stop_before_owner_consumes_it() -> None:

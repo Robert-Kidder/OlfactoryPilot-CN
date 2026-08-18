@@ -369,7 +369,7 @@ def test_profile_registry_is_primary_close_target_and_legacy_is_only_union() -> 
     old_target = state.channel_registry.by_internal_valve(2).target
     channels = list(state.hardware_profile.channels)
     descriptor = channels[1]
-    channels[1] = replace(descriptor, target="Dev2/P0.0")
+    channels[1] = replace(descriptor, target="Dev2/P0.0", active_high=False)
     remapped = replace(state.hardware_profile, channels=tuple(channels))
     state.hardware_profile = remapped
     state.channel_registry = remapped.registry
@@ -387,3 +387,6 @@ def test_profile_registry_is_primary_close_target_and_legacy_is_only_union() -> 
     targets = [f"{step.device}/{step.line}" for step in closes if step.logical_valve == 2]
     assert targets[0] == "Dev2/P0.0"
     assert old_target in targets
+    levels = [step.physical_level for step in closes if step.logical_valve == 2]
+    assert levels[0] is True
+    assert levels[targets.index(old_target)] is False

@@ -35,6 +35,7 @@ from app.models import (
     MaintenanceLeaseReleaseEvidence,
     ManualExperimentIdentity,
     ManualExperimentIntent,
+    ManualExperimentOutcome,
     ManualExperimentPlan,
     ManualExperimentResult,
     ManualExperimentSnapshot,
@@ -380,6 +381,9 @@ class MainController(QObject):
         self._manual_lease_token = None
         self._manual_snapshot = self.actuation_worker.manual_snapshot
         self._manual_supply_identity: ManualExperimentIdentity | None = None
+        self._configuration_restart_required = False
+        self._configuration_diverged = False
+        self._configuration_block_message = ""
         self._hardware_profile_store: HardwareProfileStore | None = None
         local_profile_path = (
             self.config.get("_local_config_path")
@@ -392,6 +396,12 @@ class MainController(QObject):
                     local_config_path=Path(local_profile_path),
                     effective_config=self.config,
                 )
+                restored_profile = self._hardware_profile_store.profile
+                if restored_profile != self.state.hardware_profile:
+                    # New-process startup is the authorized point at which
+                    # persisted connection IDs and mappings become runtime
+                    # state.  No restart-required latch carries across runs.
+                    self._publish_hardware_profile(restored_profile)
             except Exception as exc:
                 LOG.error("HardwareProfile 配置事务初始化失败：%s", exc)
         self._breath_logger = logging.getLogger("breath_viz")
@@ -471,6 +481,10 @@ class MainController(QObject):
             )
 
     def start_worker(self) -> bool:
+        configuration_block = self._configuration_runtime_block_reason()
+        if configuration_block:
+            self._set_configuration_block_status(configuration_block)
+            return False
         if self._unsafe_shutdown_latched:
             self._block_for_unsafe_shutdown(
                 "检测到未经人工确认的关闭失败；请点击连接以明确重试。"
@@ -1194,6 +1208,10 @@ class MainController(QObject):
 
     def request_self_check(self) -> None:
         """Trigger self-check from UI, keep thread-safe."""
+        configuration_block = self._configuration_runtime_block_reason()
+        if configuration_block:
+            self._set_configuration_block_status(configuration_block)
+            return
         if self._unsafe_shutdown_latched:
             self._unsafe_shutdown_latched = False
         self.state.update_status("正在重新自检...")
@@ -1205,6 +1223,10 @@ class MainController(QObject):
         self.worker.request_self_check()
 
     def connect_hardware(self) -> None:
+        configuration_block = self._configuration_runtime_block_reason()
+        if configuration_block:
+            self._set_configuration_block_status(configuration_block)
+            return
         if self._connect_in_progress:
             return
 
@@ -1246,8 +1268,18 @@ class MainController(QObject):
         effective["cleaning"] = cleaning
         return CleaningConfigSnapshot.from_effective_config(
             effective,
-            available_channels=self.state.get_active_valve_map(),
+            available_channels=self._current_cleaning_targets(),
         )
+
+    def _current_cleaning_targets(self) -> dict[int, str]:
+        registry = self.state.channel_registry
+        if registry is None:
+            return self.state.get_active_valve_map()
+        return {
+            int(descriptor.internal_valve): descriptor.target
+            for descriptor in registry.channels
+            if descriptor.enabled and descriptor.internal_valve is not None
+        }
 
     @Slot(object, float, float, int)
     def handle_cleaning_candidate_changed(
@@ -1429,6 +1461,15 @@ class MainController(QObject):
             return False
         config = self._cleaning_published
         assert config is not None and self._cleaning_output_root is not None
+        current_targets = self._current_cleaning_targets()
+        missing_channels = sorted(set(config.selected_channels) - set(current_targets))
+        if missing_channels:
+            self._set_cleaning_status(
+                f"清洗未启动：当前 ChannelRegistry 已不包含通道 {missing_channels}；"
+                "安全动作：未写入任何旧 target；"
+                "下一步：在清洗页重新选择当前通道。"
+            )
+            return False
         self._cleaning_generation += 1
         identity = CleaningOperationIdentity(
             # 12 hex chars remain collision-resistant for local maintenance runs,
@@ -1436,7 +1477,12 @@ class MainController(QObject):
             operation_id=uuid.uuid4().hex[:12],
             generation=self._cleaning_generation,
         )
-        plan = config.build_plan(identity)
+        # Rebase only the new operation.  Any already-running/paused plan
+        # remains an immutable historical asset owned by ActuationWorker.
+        plan = replace(
+            config,
+            available_targets=tuple(sorted(current_targets.items())),
+        ).build_plan(identity)
         token = self.flow_worker.acquire_maintenance_lease(
             identity.operation_id,
             identity.generation,
@@ -3060,6 +3106,10 @@ class MainController(QObject):
         self._render_protocol_execution_state()
 
     def reset_hardware(self) -> None:
+        configuration_block = self._configuration_runtime_block_reason()
+        if configuration_block:
+            self._set_configuration_block_status(configuration_block)
+            return
         # 允许在未 ready 时执行 reset，用于恢复异常状态；仍需安全检查。
         if not self.ensure_safe_command("Reset", source="UI"):
             self._refresh_toolbar_state()
@@ -3103,6 +3153,11 @@ class MainController(QObject):
         self._refresh_toolbar_state()
 
     def _start_or_request_self_check(self) -> None:
+        configuration_block = self._configuration_runtime_block_reason()
+        if configuration_block:
+            self._set_configuration_block_status(configuration_block)
+            self._connect_in_progress = False
+            return
         was_running = self.worker.isRunning()
         if not self.start_worker():
             self._connect_in_progress = False
@@ -3113,6 +3168,10 @@ class MainController(QObject):
 
     @Slot(object)
     def handle_manual_release_requested(self, intent: ManualExperimentIntent) -> bool:
+        configuration_block = self._configuration_runtime_block_reason()
+        if configuration_block:
+            self._set_manual_status(configuration_block)
+            return False
         if not isinstance(intent, ManualExperimentIntent):
             self._set_manual_status("启动失败：请求类型无效；安全动作：未产生硬件 intent；下一步：重新填写参数。")
             return False
@@ -3186,6 +3245,10 @@ class MainController(QObject):
 
     @Slot(object)
     def handle_manual_supply_requested(self, intent: ManualSupplyIntent) -> bool:
+        configuration_block = self._configuration_runtime_block_reason()
+        if configuration_block:
+            self._set_manual_status(configuration_block)
+            return False
         if not isinstance(intent, ManualSupplyIntent):
             return False
         if not intent.enabled:
@@ -3250,6 +3313,10 @@ class MainController(QObject):
 
     @Slot()
     def handle_manual_stop_requested(self) -> bool:
+        configuration_block = self._configuration_runtime_block_reason()
+        if configuration_block:
+            self._set_manual_status(configuration_block)
+            return False
         accepted = self.actuation_worker.post_manual_stop(reason="用户请求停止手动实验。")
         if accepted:
             self._drain_actuation_if_not_running()
@@ -3265,14 +3332,23 @@ class MainController(QObject):
         if self._manual_snapshot.identity != result.identity:
             return
         token = self._manual_lease_token
-        if result.completed and token is not None:
+        releases_owner = bool(
+            result.completed
+            or result.outcome is ManualExperimentOutcome.ABORTED
+        )
+        token_matches = bool(
+            token is not None
+            and token.operation_id == result.identity.operation_id
+            and token.generation == result.identity.generation
+        )
+        if releases_owner and token_matches and token is not None:
             if self.flow_worker.release_lease(token):
                 self._manual_lease_token = None
                 self.actuation_interlock.update(device_lease=DeviceLeaseKind.IDLE.value)
             else:
                 self._set_manual_status("收尾失败：MANUAL lease 未完成 owner handoff；安全动作：继续保持独占；下一步：执行全局停止。")
                 return
-        if result.completed and result.identity == self._manual_supply_identity:
+        if releases_owner and result.identity == self._manual_supply_identity:
             self._manual_supply_identity = None
         elif result.identity == self._manual_supply_identity:
             self._manual_supply_identity = None
@@ -3293,7 +3369,10 @@ class MainController(QObject):
         }
         holder = self.device_lease.snapshot.kind
         readiness_reason = ""
-        if not self.simulation_mode:
+        configuration_block = self._configuration_runtime_block_reason()
+        if configuration_block:
+            readiness_reason = configuration_block
+        elif not self.simulation_mode:
             readiness_reason = "真实硬件尚未授权"
         elif not self.state.telemetry.connected:
             readiness_reason = "设备尚未连接"
@@ -3340,6 +3419,7 @@ class MainController(QObject):
                 ManualExperimentStatus.RESTORING_SUPPLY,
             },
             supply_enabled=self._manual_snapshot.supply_enabled,
+            supply_transitioning=self._manual_snapshot.supply_transitioning,
             detail_text=detail,
         )
         manual.render_snapshot(view_snapshot)
@@ -3350,6 +3430,8 @@ class MainController(QObject):
             self.view.update_status(message)
 
     def _configuration_gate_reason(self) -> str:
+        if self._configuration_diverged:
+            return self._configuration_runtime_block_reason()
         if self.state.telemetry.connected or self.state.hardware_ready:
             return "硬件仍处于连接或就绪状态"
         if self.state.telemetry.safety_state != "SAFE":
@@ -3378,6 +3460,37 @@ class MainController(QObject):
             return "Flow owner 仍有进行中命令"
         return ""
 
+    def _configuration_runtime_block_reason(self) -> str:
+        if self._configuration_diverged:
+            return (
+                self._configuration_block_message
+                or "配置分歧：磁盘与运行时状态无法证明一致；"
+                "安全动作：已阻断连接、自检、重置和手动动作；"
+                "下一步：关闭程序并重新启动。"
+            )
+        if self._configuration_restart_required:
+            return (
+                "连接参数已保存，本进程仍持有旧 HAL；"
+                "安全动作：已阻断连接、自检和重置，未访问旧硬件消费者；"
+                "下一步：重启程序后生效。"
+            )
+        return ""
+
+    def _set_configuration_block_status(self, reason: str) -> None:
+        self.state.update_status(reason)
+        if self.view is not None:
+            self.view.update_status(reason)
+        self._refresh_toolbar_state()
+
+    def _latch_configuration_divergence(self, reason: str) -> None:
+        self._configuration_diverged = True
+        self._configuration_restart_required = True
+        self._configuration_block_message = (
+            f"配置分歧：{reason}；"
+            "安全动作：已阻断连接、自检、重置和手动动作；"
+            "下一步：关闭程序并重新启动。"
+        )
+
     @Slot(object, int)
     def handle_hardware_profile_save_requested(self, candidate, expected_revision: int) -> bool:
         store = self._hardware_profile_store
@@ -3395,22 +3508,53 @@ class MainController(QObject):
         if token is None:
             self._render_hardware_profile("保存失败：CONFIG_CHANGE lease 获取失败；安全动作：旧配置保持发布；下一步：等待 owner 空闲。")
             return False
+        previous = self.state.hardware_profile
+        connections_changed = False
+        runtime_publish_started = False
         try:
-            saved = store.save(candidate, expected_revision=int(expected_revision))
+            prepared = store.prepare_save(
+                candidate, expected_revision=int(expected_revision)
+            )
+            connections_changed = bool(
+                previous is not None
+                and prepared.connections != previous.connections
+            )
+            runtime_publish_started = True
+            self._publish_hardware_profile(prepared)
             try:
-                self._publish_hardware_profile(saved)
-            except Exception as bind_error:
-                restored = store.rollback(expected_revision=int(expected_revision) + 1)
-                self._publish_hardware_profile(restored)
+                store.commit_prepared_save(
+                    prepared, expected_revision=int(expected_revision)
+                )
+            except Exception as disk_error:
+                if previous is not None:
+                    try:
+                        self._publish_hardware_profile(previous)
+                        runtime_publish_started = False
+                    except Exception as restore_error:
+                        self._latch_configuration_divergence(
+                            f"磁盘提交失败且运行时补偿失败：{restore_error}"
+                        )
                 raise RuntimeError(
-                    f"运行时消费者重绑失败，已显式回滚：{bind_error}"
-                ) from bind_error
+                    f"磁盘提交失败，运行时已尝试恢复：{disk_error}"
+                ) from disk_error
         except Exception as exc:
+            if previous is not None and runtime_publish_started:
+                try:
+                    self._publish_hardware_profile(previous)
+                except Exception as restore_error:
+                    self._latch_configuration_divergence(
+                        f"候选发布失败且运行时补偿失败：{restore_error}"
+                    )
             self._render_hardware_profile(f"保存失败：{exc}；安全动作：磁盘与运行时旧配置保持不变；下一步：修正候选或重新加载 revision。")
             return False
         finally:
             self.device_lease.release(token)
-        self._render_hardware_profile("保存成功：已原子发布 HardwareProfile；安全动作：保持断开；下一步：可在 Mock 下重新连接验证。")
+        if connections_changed:
+            self._configuration_restart_required = True
+            message = "已保存，重启程序后生效；安全动作：本进程不重建旧 HAL 消费者；下一步：关闭并重启程序。"
+        else:
+            message = "保存成功：已原子发布 HardwareProfile；安全动作：保持断开；下一步：可继续 Mock 验证。"
+        self._render_hardware_profile(message)
         return True
 
     @Slot(int)
@@ -3429,22 +3573,50 @@ class MainController(QObject):
         )
         if token is None:
             return False
+        previous = self.state.hardware_profile
+        connections_changed = False
+        runtime_publish_started = False
         try:
-            restored = store.rollback(expected_revision=int(expected_revision))
+            prepared = store.preview_rollback(
+                expected_revision=int(expected_revision)
+            )
+            connections_changed = bool(
+                previous is not None and prepared.connections != previous.connections
+            )
+            runtime_publish_started = True
+            self._publish_hardware_profile(prepared)
             try:
-                self._publish_hardware_profile(restored)
-            except Exception as bind_error:
-                previous = store.rollback(expected_revision=int(expected_revision) + 1)
-                self._publish_hardware_profile(previous)
-                raise RuntimeError(
-                    f"运行时消费者重绑失败，已恢复回滚前配置：{bind_error}"
-                ) from bind_error
+                store.commit_prepared_rollback(
+                    prepared, expected_revision=int(expected_revision)
+                )
+            except Exception as disk_error:
+                if previous is not None:
+                    try:
+                        self._publish_hardware_profile(previous)
+                        runtime_publish_started = False
+                    except Exception as restore_error:
+                        self._latch_configuration_divergence(
+                            f"回滚磁盘提交失败且运行时补偿失败：{restore_error}"
+                        )
+                raise RuntimeError(f"回滚磁盘提交失败：{disk_error}") from disk_error
         except Exception as exc:
+            if previous is not None and runtime_publish_started:
+                try:
+                    self._publish_hardware_profile(previous)
+                except Exception as restore_error:
+                    self._latch_configuration_divergence(
+                        f"回滚候选发布失败且补偿失败：{restore_error}"
+                    )
             self._render_hardware_profile(f"回滚失败：{exc}；安全动作：当前配置保持不变；下一步：检查 revision 与 last-known-good。")
             return False
         finally:
             self.device_lease.release(token)
-        self._render_hardware_profile("回滚成功：已恢复上一版 HardwareProfile；安全动作：保持断开；下一步：重新检查映射。")
+        if connections_changed:
+            self._configuration_restart_required = True
+            message = "回滚已保存，重启程序后生效；安全动作：本进程不重建旧 HAL；下一步：关闭并重启程序。"
+        else:
+            message = "回滚成功：已恢复上一版 HardwareProfile；安全动作：保持断开；下一步：重新检查映射。"
+        self._render_hardware_profile(message)
         return True
 
     @Slot(int, object)
@@ -3613,6 +3785,7 @@ class MainController(QObject):
         message: str = "",
         *,
         profile: HardwareProfile | None = None,
+        preserve_draft: bool = False,
     ) -> None:
         if self.view is None or not hasattr(self.view, "hardware_settings_view"):
             return
@@ -3621,13 +3794,22 @@ class MainController(QObject):
         if active is None:
             return
         revision = 0 if store is None else store.revision
-        self.view.hardware_settings_view.render_profile(
-            active,
-            revision=revision,
-            can_save=not bool(self._configuration_gate_reason()) and store is not None,
-            message=message,
-            rollback_available=False if store is None else store.rollback_available,
-        )
+        can_save = not bool(self._configuration_gate_reason()) and store is not None
+        settings_view = self.view.hardware_settings_view
+        if preserve_draft and getattr(settings_view, "draft", None) is not None:
+            settings_view.render_permissions(
+                can_save=can_save,
+                message=message,
+                rollback_available=False if store is None else store.rollback_available,
+            )
+        else:
+            settings_view.render_profile(
+                active,
+                revision=revision,
+                can_save=can_save,
+                message=message,
+                rollback_available=False if store is None else store.rollback_available,
+            )
 
     def stop_hardware(self) -> None:
         self._manual_supply_identity = None
@@ -4329,6 +4511,9 @@ class MainController(QObject):
         connected = self.state.telemetry.connected
         safety_state = self.state.telemetry.safety_state
         reset_blockers: list[str] = []
+        configuration_block = self._configuration_runtime_block_reason()
+        if configuration_block:
+            reset_blockers.append(configuration_block)
         if not connected:
             reset_blockers.append("未连接")
         if not self.state.hardware_ready:
@@ -4338,7 +4523,7 @@ class MainController(QObject):
 
         reset_enabled = not reset_blockers
         stop_enabled = connected
-        connect_enabled = not self._connect_in_progress
+        connect_enabled = not self._connect_in_progress and not configuration_block
 
         connect_tooltip = "运行自检并初始化硬件" if connect_enabled else "正在连接/自检中..."
         if connected and connect_enabled:
@@ -4366,6 +4551,7 @@ class MainController(QObject):
             stop_enabled=stop_enabled,
             tooltips=tooltips,
         )
+        self._render_hardware_profile(preserve_draft=True)
 
     def _handle_apply_result(
         self,

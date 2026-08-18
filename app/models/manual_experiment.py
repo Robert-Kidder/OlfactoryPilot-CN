@@ -209,7 +209,11 @@ class ManualExperimentSnapshot:
     flow_zero_confirmed: bool = False
     selector_compensation_confirmed: bool = False
     supply_restored: bool = False
-    supply_enabled: bool = False
+    # Receipt-owned supply evidence: None means that the current physical
+    # state cannot be proven.  A command being queued never changes this
+    # value; only its correlated successful receipt may do so.
+    supply_enabled: bool | None = None
+    supply_transitioning: bool = False
     ready_ns: int | None = None
     deadline_ns: int | None = None
     remaining_ns: int = 0

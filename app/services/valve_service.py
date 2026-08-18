@@ -29,6 +29,7 @@ class ValvePlanStep:
     line: str
     state: bool
     role: str
+    physical_level: bool | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -191,8 +192,24 @@ class ValveService:
             if identity in seen:
                 continue
             seen.add(identity)
+            physical_level = False
+            registry = self._registry
+            if registry is not None:
+                try:
+                    descriptor = registry.by_internal_valve(int(logical_valve))
+                    if normalize_digital_target(descriptor.target) == identity:
+                        physical_level = not descriptor.active_high
+                except KeyError:
+                    pass
             steps.append(
-                ValvePlanStep(int(logical_valve), device, line, False, "odor_safety_close")
+                ValvePlanStep(
+                    int(logical_valve),
+                    device,
+                    line,
+                    False,
+                    "odor_safety_close",
+                    physical_level,
+                )
             )
         return tuple(steps)
 
@@ -200,22 +217,39 @@ class ValveService:
         """Close current registry first, then legacy aliases as best-effort union."""
         steps: list[ValvePlanStep] = []
         seen: set[str] = set()
-        logical_targets: list[tuple[int, str]] = sorted(self.active_map().items())
+        targets_by_logical: dict[int, list[tuple[str, bool]]] = {}
+        registry = self._registry
+        if registry is not None:
+            for descriptor in registry.channels:
+                if descriptor.internal_valve is None or not descriptor.target:
+                    continue
+                targets_by_logical.setdefault(descriptor.internal_valve, []).append(
+                    (descriptor.target, not descriptor.active_high)
+                )
         for mapping in self.valve_variants.values():
-            logical_targets.extend(
-                (int(logical_valve), target)
-                for logical_valve, target in sorted(mapping.items(), key=lambda item: int(item[0]))
-                if 1 <= int(logical_valve) <= 20
-            )
-        for logical_valve, target in logical_targets:
-            device, line = self._split_target(target)
-            identity = normalize_digital_target(target)
-            if identity in seen:
-                continue
-            seen.add(identity)
-            steps.append(
-                ValvePlanStep(logical_valve, device, line, False, "odor_safety_close")
-            )
+            for logical_valve, target in sorted(
+                mapping.items(), key=lambda item: int(item[0])
+            ):
+                logical = int(logical_valve)
+                if 1 <= logical <= 20:
+                    targets_by_logical.setdefault(logical, []).append((target, False))
+        for logical_valve in sorted(targets_by_logical):
+            for target, physical_level in targets_by_logical[logical_valve]:
+                device, line = self._split_target(target)
+                identity = normalize_digital_target(target)
+                if identity in seen:
+                    continue
+                seen.add(identity)
+                steps.append(
+                    ValvePlanStep(
+                        logical_valve,
+                        device,
+                        line,
+                        False,
+                        "odor_safety_close",
+                        physical_level,
+                    )
+                )
         return tuple(steps)
 
     def selector_route_step(self, route: SelectorRoute) -> ValvePlanStep:

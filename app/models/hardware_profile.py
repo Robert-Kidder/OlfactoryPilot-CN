@@ -565,6 +565,7 @@ def _parse_connections(
     *,
     legacy_config: Mapping[str, Any],
 ) -> HardwareConnectionConfig:
+    has_nested = raw is not None
     if raw is None:
         raw = {}
     if not isinstance(raw, Mapping):
@@ -574,34 +575,30 @@ def _parse_connections(
         {"serial_port", "ni_devices", "alicat_unit_ids"},
         "hardware_profile.connections",
     )
-    legacy_overlay = legacy_config is not raw
-    serial_port = (
-        legacy_config.get("serial_port")
-        if legacy_overlay and "serial_port" in legacy_config
-        else raw.get("serial_port")
-    )
+    serial_port = raw.get("serial_port") if has_nested else legacy_config.get("serial_port")
     ni_devices = (
-        legacy_config.get("ni_devices")
-        if legacy_overlay and "ni_devices" in legacy_config
-        else raw.get("ni_devices", DEFAULT_NI_DEVICE_IDS)
+        raw.get("ni_devices", DEFAULT_NI_DEVICE_IDS)
+        if has_nested
+        else legacy_config.get("ni_devices", DEFAULT_NI_DEVICE_IDS)
     )
     units = (
-        legacy_config.get("alicat_unit_ids")
-        if legacy_overlay and "alicat_unit_ids" in legacy_config
-        else raw.get("alicat_unit_ids", {"A": "a", "B": "b", "C": "c"})
+        raw.get("alicat_unit_ids", {"A": "a", "B": "b", "C": "c"})
+        if has_nested
+        else legacy_config.get("alicat_unit_ids", {"A": "a", "B": "b", "C": "c"})
     )
     if not isinstance(units, Mapping):
         raise ValueError("connections.alicat_unit_ids 必须是 JSON 对象。")
     _reject_unknown_keys(units, {"A", "B", "C"}, "connections.alicat_unit_ids")
     if set(units) != {"A", "B", "C"}:
         raise ValueError("connections.alicat_unit_ids 必须完整包含 A、B、C。")
-    return HardwareConnectionConfig(
+    parsed = HardwareConnectionConfig(
         serial_port=serial_port,
         ni_device_ids=ni_devices,
         alicat_a_unit_id=units["A"],
         alicat_b_unit_id=units["B"],
         alicat_c_unit_id=units["C"],
     )
+    return parsed
 
 
 def _parse_channel(raw: Any) -> ChannelDescriptor:

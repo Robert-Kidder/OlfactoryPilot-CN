@@ -417,6 +417,66 @@ class HardwareSettingsView(QWidget):
             )
         )
 
+    def render_permissions(
+        self,
+        *,
+        can_save: bool,
+        message: str = "",
+        rollback_available: bool | None = None,
+    ) -> None:
+        """Refresh only gates/status while preserving the user's draft."""
+
+        if self._snapshot is None:
+            return
+        snapshot = replace(
+            self._snapshot,
+            can_edit=bool(can_save),
+            can_save=bool(can_save),
+            can_mock_verify=bool(can_save),
+            can_request_physical_verification=bool(can_save),
+            rollback_available=(
+                self._snapshot.rollback_available
+                if rollback_available is None
+                else bool(rollback_available)
+            ),
+            status_text=message or (
+                "可以编辑并保存候选方案。"
+                if can_save
+                else "硬件方案只读。"
+            ),
+        )
+        self._snapshot = snapshot
+        self.status_label.setText(snapshot.status_text)
+        self.detail_label.setText(snapshot.detail_text)
+        for control in (
+            self.serial_port_input,
+            self.ni_device_ids_input,
+            *self.alicat_unit_inputs.values(),
+        ):
+            control.setEnabled(snapshot.can_edit and not snapshot.save_in_progress)
+        for port in range(1, 21):
+            for control in (
+                self.name_inputs[port],
+                self.internal_inputs[port],
+                self.target_inputs[port],
+                self.polarity_inputs[port],
+                self.enabled_checks[port],
+            ):
+                control.setEnabled(snapshot.can_edit and not snapshot.save_in_progress)
+            self.mock_buttons[port].setEnabled(
+                snapshot.can_mock_verify and not snapshot.save_in_progress
+            )
+            self.physical_buttons[port].setEnabled(
+                snapshot.can_request_physical_verification
+                and not snapshot.save_in_progress
+            )
+        self.save_button.setEnabled(snapshot.can_save and not snapshot.save_in_progress)
+        self.rollback_button.setEnabled(
+            snapshot.can_save
+            and snapshot.rollback_available
+            and not snapshot.save_in_progress
+        )
+
     def _update_channel(self, external_port: int, **changes) -> None:
         if self._rendering or self._draft is None:
             return

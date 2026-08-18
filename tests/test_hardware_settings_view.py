@@ -250,6 +250,25 @@ def test_settings_edits_connections_in_same_frozen_candidate_without_probe(qtbot
     assert view.draft.revision == 6
 
 
+def test_permission_only_refresh_preserves_unsaved_draft(qtbot) -> None:
+    view = HardwareSettingsView()
+    qtbot.addWidget(view)
+    view.render_profile(_profile(), revision=9, can_save=True, rollback_available=True)
+    view.name_inputs[2].setText("未保存名称")
+    before = view.draft
+
+    view.render_permissions(
+        can_save=False,
+        message="已连接，暂停保存",
+        rollback_available=True,
+    )
+
+    assert view.draft == before
+    assert view.name_inputs[2].text() == "未保存名称"
+    assert not view.save_button.isEnabled()
+    assert not view.rollback_button.isEnabled()
+
+
 def test_settings_invalid_connection_stays_draft_and_blocks_save_intent(qtbot) -> None:
     view = HardwareSettingsView()
     qtbot.addWidget(view)

@@ -83,7 +83,8 @@ class ManualExperimentViewSnapshot:
     can_apply_flow: bool = False
     can_release: bool = False
     can_stop: bool = False
-    supply_enabled: bool = False
+    supply_enabled: bool | None = None
+    supply_transitioning: bool = False
     telemetry_a_sccm: float | None = None
     status_text: str = "手动实验空闲"
     detail_text: str = "请选择可用机外气口。"
@@ -292,6 +293,7 @@ class ManualExperimentView(QWidget):
                     ManualExperimentStatus.RECOVERY_REQUIRED,
                 },
                 supply_enabled=snapshot.supply_enabled,
+                supply_transitioning=snapshot.supply_transitioning,
                 status_text=self._status_text(snapshot),
                 detail_text=(snapshot.recovery_reason or self._snapshot.detail_text),
             )
@@ -324,8 +326,18 @@ class ManualExperimentView(QWidget):
         self.main_b_input.setEnabled(snapshot.controls_enabled)
         self.main_b_input.setReadOnly(True)
         self.apply_flow_button.setEnabled(snapshot.can_apply_flow)
-        self.apply_flow_button.setText(
-            "停止供气" if snapshot.supply_enabled else "开始供气"
+        if snapshot.supply_transitioning:
+            supply_text = "供气切换中"
+        elif snapshot.supply_enabled is True:
+            supply_text = "供气中（点击停止）"
+        elif snapshot.supply_enabled is False:
+            supply_text = "已停止供气（点击开始）"
+        else:
+            supply_text = "供气状态未知"
+        self.apply_flow_button.setText(supply_text)
+        self.apply_flow_button.setEnabled(
+            snapshot.can_apply_flow
+            and not snapshot.supply_transitioning
         )
         self.release_button.setEnabled(snapshot.can_release)
         self.stop_button.setEnabled(snapshot.can_stop)

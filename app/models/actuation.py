@@ -71,6 +71,7 @@ class ActuationCommand:
     generation: int | None = None
     step_id: str | None = None
     action_kind: ActuationAction | None = None
+    physical_level: bool | None = None
 
     def __post_init__(self) -> None:
         if not self.command_id:
@@ -96,6 +97,8 @@ class ActuationCommand:
             raise ValueError("generation 必须为非负整数。")
         if self.action_kind is not None and self.action_kind != self.action:
             raise ValueError("action_kind 必须与 action 一致。")
+        if self.physical_level is not None and type(self.physical_level) is not bool:
+            raise ValueError("physical_level 必须是 boolean 或 null。")
 
     @property
     def target(self) -> str | None:
