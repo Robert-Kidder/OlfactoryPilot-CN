@@ -10,8 +10,10 @@ from app.models import (
     AppState,
     ChannelRegistry,
     FlowSetpoints,
+    HardwareConnectionConfig,
     HardwareProfile,
     VerificationStatus,
+    normalize_digital_target,
 )
 
 
@@ -47,6 +49,72 @@ def test_default_profile_has_fixed_twenty_ports_and_expected_available_mapping()
     }
     assert profile.selector is not None
     assert profile.selector.target == "Dev2/P1.0"
+    assert profile.connections == HardwareConnectionConfig(
+        serial_port=None,
+        ni_device_ids=("Dev1", "Dev2"),
+        alicat_a_unit_id="a",
+        alicat_b_unit_id="b",
+        alicat_c_unit_id="c",
+    )
+
+
+def test_legacy_top_level_connections_are_loaded_and_round_trip_in_profile() -> None:
+    config = _default_profile().to_dict()
+    config.pop("connections")
+    wrapper = {
+        "hardware_profile": config,
+        "serial_port": "com9",
+        "ni_devices": ["LabDev1", "LabDev2"],
+        "alicat_unit_ids": {"A": "1", "B": "2", "C": "3"},
+    }
+
+    profile = HardwareProfile.from_config(wrapper)
+
+    assert profile.connections.serial_port == "COM9"
+    assert profile.connections.ni_device_ids == ("LabDev1", "LabDev2")
+    assert profile.connections.alicat_unit_ids == {"A": "1", "B": "2", "C": "3"}
+    assert HardwareProfile.from_config(profile.to_dict()).connections == profile.connections
+
+
+@pytest.mark.parametrize(
+    ("changes", "message"),
+    (
+        ({"serial_port": "ttyUSB0"}, "COM1–COM256"),
+        ({"serial_port": "COM0"}, "COM1–COM256"),
+        ({"ni_devices": []}, "非空数组"),
+        ({"ni_devices": ["Dev1", "dev1"]}, "不得重复"),
+        ({"ni_devices": ["Dev/1"]}, "仅允许"),
+        ({"alicat_unit_ids": {"A": "a", "B": "A", "C": "c"}}, "不得重复"),
+        ({"alicat_unit_ids": {"A": "aa", "B": "b", "C": "c"}}, "单个 ASCII"),
+    ),
+)
+def test_connection_config_strictly_rejects_invalid_identifiers(changes, message) -> None:
+    raw = _default_profile().to_dict()
+    raw["connections"].update(changes)
+
+    with pytest.raises(ValueError, match=message):
+        HardwareProfile.from_config(raw)
+
+
+@pytest.mark.parametrize(
+    "target",
+    (
+        "Dev1/ai0",
+        "Dev1/foo",
+        "Dev1/P0.8",
+        "Dev1/P1.4",
+        "Dev1/P2.0",
+        "Dev1/port0/line0:7",
+    ),
+)
+def test_ni_do_target_parser_rejects_non_do_and_out_of_range_targets(target) -> None:
+    with pytest.raises(ValueError):
+        normalize_digital_target(target)
+
+
+def test_ni_do_target_parser_accepts_alias_and_canonical_form() -> None:
+    assert normalize_digital_target("Dev1/P0.7") == "dev1/port0/line7"
+    assert normalize_digital_target("dev1/port1/line3") == "dev1/port1/line3"
 
 
 def test_registry_refuses_unverified_or_disabled_external_ports() -> None:

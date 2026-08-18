@@ -147,7 +147,13 @@ def test_app_state_rejects_selector_physical_alias_and_odor_ids_outside_1_20() -
 def test_valve_service_keeps_selector_out_of_odor_close_set() -> None:
     variants = {
         "20-channel": {
-            channel: f"Dev{1 if channel <= 12 else 2}/P0.{channel - 1}"
+            channel: (
+                f"Dev1/P0.{channel - 1}"
+                if channel <= 8
+                else f"Dev1/P1.{channel - 9}"
+                if channel <= 12
+                else f"Dev2/P0.{channel - 13}"
+            )
             for channel in range(1, 21)
         }
     }

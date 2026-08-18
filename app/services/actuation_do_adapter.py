@@ -40,6 +40,11 @@ class ActuationDOAdapter:
         )
         self.write_timeout_ms = max(1, int(write_timeout_ms))
 
+    def rebind_selector(self, *, target: str, odor_level: bool) -> None:
+        normalized = normalize_digital_target(target)
+        self.selector_target = normalized
+        self.selector_odor_level = bool(odor_level)
+
     def execute(self, command: ActuationCommand) -> ActuationReceipt:
         selector_safety_route = bool(
             command.category == ActuationCategory.SAFETY

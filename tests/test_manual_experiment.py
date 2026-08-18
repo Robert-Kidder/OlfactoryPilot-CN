@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from dataclasses import replace
 from pathlib import Path
 
@@ -610,3 +611,241 @@ def test_manual_restore_supply_failure_is_not_completed() -> None:
     assert worker.manual_snapshot.selector_compensation_confirmed
     assert not worker.manual_snapshot.supply_restored
     assert worker._background_safe_stop_plan is not None
+
+
+def test_manual_receipt_actual_time_after_phase_deadline_is_rejected() -> None:
+    def mutate(command, receipt):
+        if command.step_id == "selector_odor":
+            late = command.expected_ns + 2_000_000
+            return ActuationReceipt.from_write(
+                command=command,
+                started_ns=late,
+                actual_ns=late,
+                wall_timestamp=10.0,
+                result=ActuationResult.SUCCESS,
+            )
+        return receipt
+
+    worker, _, _, _, plan, lease, flows, _ = _fixture(writer_mutator=mutate)
+    assert worker.post_manual_start(plan, lease_token=lease)
+    worker.process_ready()
+    _accept_flow(worker, flows)
+
+    assert worker.manual_snapshot.status is ManualExperimentStatus.RECOVERY_REQUIRED
+    assert "deadline" in worker.manual_snapshot.recovery_reason
+    assert worker._background_safe_stop_plan is not None
+
+
+def test_successful_a_zero_makes_its_old_timeout_harmless() -> None:
+    worker, _, _, clock, plan, lease, flows, _ = _fixture()
+    _start_to_stimulating(worker, plan, lease, flows)
+    clock.value = worker.manual_snapshot.deadline_ns
+    worker.process_ready()
+    zero = flows[-1]
+    worker.post_flow_result(
+        FlowCommandResult(
+            command=zero,
+            result=FlowApplyResult(True, "A=0", zero.a, zero.b, zero.c, zero.c),
+        )
+    )
+    assert worker.manual_snapshot.status is ManualExperimentStatus.RESTORING_SUPPLY
+
+    worker._handle_manual_receipt_timeout(
+        identity=plan.identity,
+        phase="flow_zero",
+        command_ids=(zero.command_id,),
+    )
+
+    assert worker.manual_snapshot.status is ManualExperimentStatus.RESTORING_SUPPLY
+
+
+def test_restore_supply_timeout_fails_closed() -> None:
+    worker, _, _, clock, plan, lease, flows, _ = _fixture()
+    _start_to_stimulating(worker, plan, lease, flows)
+    clock.value = worker.manual_snapshot.deadline_ns
+    worker.process_ready()
+    zero = flows[-1]
+    worker.post_flow_result(
+        FlowCommandResult(
+            command=zero,
+            result=FlowApplyResult(True, "A=0", zero.a, zero.b, zero.c, zero.c),
+        )
+    )
+    restore = flows[-1]
+
+    worker._handle_manual_receipt_timeout(
+        identity=plan.identity,
+        phase="restore_supply",
+        command_ids=(restore.command_id,),
+    )
+
+    assert worker.manual_snapshot.status is ManualExperimentStatus.RECOVERY_REQUIRED
+    assert worker._background_safe_stop_plan is not None
+
+
+def test_successful_restore_supply_makes_queued_timeout_harmless() -> None:
+    worker, _, _, clock, plan, lease, flows, _ = _fixture()
+    _start_to_stimulating(worker, plan, lease, flows)
+    clock.value = worker.manual_snapshot.deadline_ns
+    worker.process_ready()
+    zero = flows[-1]
+    worker.post_flow_result(
+        FlowCommandResult(
+            command=zero,
+            result=FlowApplyResult(True, "A=0", zero.a, zero.b, zero.c, zero.c),
+        )
+    )
+    restore = flows[-1]
+    worker.post_flow_result(
+        FlowCommandResult(
+            command=restore,
+            result=FlowApplyResult(
+                True,
+                "restored",
+                restore.a,
+                restore.b,
+                restore.c,
+                restore.a,
+            ),
+        )
+    )
+    assert worker.manual_snapshot.status is ManualExperimentStatus.COMPLETED
+
+    worker._handle_manual_receipt_timeout(
+        identity=plan.identity,
+        phase="restore_supply",
+        command_ids=(restore.command_id,),
+    )
+
+    assert worker.manual_snapshot.status is ManualExperimentStatus.COMPLETED
+
+
+def test_blocked_writer_late_success_receipt_is_rejected_by_current_clock() -> None:
+    entered = threading.Event()
+    release = threading.Event()
+    terminal = threading.Event()
+
+    def block_selector(command, receipt):
+        if command.step_id == "selector_odor":
+            entered.set()
+            assert release.wait(1.0)
+            return replace(receipt, actual_ns=clock.value)
+        return receipt
+
+    worker, _, _, clock, plan, lease, flows, _ = _fixture(
+        writer_mutator=block_selector
+    )
+    fail_manual = worker._fail_manual
+
+    def observe_failure(*args, **kwargs):
+        fail_manual(*args, **kwargs)
+        terminal.set()
+
+    worker._fail_manual = observe_failure
+    assert worker.post_manual_start(plan, lease_token=lease)
+    worker.process_ready(max_items=1)
+    worker.start()
+    try:
+        command = flows[0]
+        worker.post_flow_result(
+            FlowCommandResult(
+                command=command,
+                result=FlowApplyResult(
+                    True,
+                    "ok",
+                    command.a,
+                    command.b,
+                    command.c,
+                    command.a,
+                ),
+            )
+        )
+        assert entered.wait(1.0)
+        deadline = next(iter(worker._manual_expected.values()))["deadline_ns"]
+        clock.value = deadline + 1
+        release.set()
+        assert terminal.wait(1.0)
+        assert worker.manual_snapshot.status is ManualExperimentStatus.RECOVERY_REQUIRED
+        assert worker.manual_snapshot.ready_ns is None
+    finally:
+        release.set()
+        worker.shutdown()
+
+
+def test_manual_begin_resets_all_completion_evidence_and_double_post_is_guarded() -> None:
+    worker, _, _, _, plan, lease, flows, _ = _fixture()
+    assert worker.post_manual_start(plan, lease_token=lease)
+    assert not worker.post_manual_start(plan, lease_token=lease)
+    worker.process_ready()
+    assert sum(command.source == "manual:experiment" for command in flows) == 1
+    worker._manual_snapshot = replace(
+        worker.manual_snapshot,
+        status=ManualExperimentStatus.COMPLETED,
+        flow_zero_confirmed=True,
+        selector_compensation_confirmed=True,
+        supply_restored=True,
+        supply_enabled=True,
+    )
+    next_plan = replace(
+        plan,
+        identity=replace(plan.identity, operation_id="manual-2", generation=2),
+    )
+    next_lease = replace(lease, operation_id="manual-2", generation=2)
+
+    assert worker.post_manual_start(next_plan, lease_token=next_lease)
+    worker.process_ready(max_items=1)
+
+    snapshot = worker.manual_snapshot
+    assert snapshot.status is ManualExperimentStatus.FLOW_PENDING
+    assert not snapshot.flow_zero_confirmed
+    assert not snapshot.selector_compensation_confirmed
+    assert not snapshot.supply_restored
+    assert not snapshot.supply_enabled
+
+
+def test_pending_manual_start_is_cancelled_by_stop_before_owner_consumes_it() -> None:
+    worker, _, _, _, plan, lease, flows, _ = _fixture()
+    results = []
+    worker.manual_result_ready.connect(results.append)
+
+    assert worker.post_manual_start(plan, lease_token=lease)
+    assert worker.post_manual_stop(reason="取消尚未开始的手动实验")
+    worker.process_ready()
+
+    assert worker.manual_snapshot.status is ManualExperimentStatus.IDLE
+    assert flows == []
+    assert not worker._manual_start_pending
+    assert results[-1].identity == plan.identity
+    assert results[-1].outcome.value == "aborted"
+    assert worker.post_manual_start(plan, lease_token=lease)
+
+
+def test_current_registry_close_failure_is_not_cleared_by_legacy_alias_success() -> None:
+    failed_target = "Dev2/P1.1"
+
+    def fail_current_target(command, receipt):
+        if command.valve == 2 and command.target == failed_target:
+            return replace(
+                receipt,
+                result=ActuationResult.FAILED,
+                actual_ns=None,
+                message="current target failed",
+            )
+        return receipt
+
+    worker, protocol_state, _, _, _, _, _, written = _fixture(
+        writer_mutator=fail_current_target
+    )
+    profile = worker.valve_service.state.hardware_profile
+    channels = list(profile.channels)
+    channels[1] = replace(channels[1], target=failed_target)
+    worker.valve_service.rebind_profile(replace(profile, channels=tuple(channels)))
+    protocol_state.possibly_open_valves.add(2)
+
+    worker._submit_all_configured_closes(reason="test remap safety close")
+    worker.process_ready()
+
+    valve_two_targets = [command.target for command in written if command.valve == 2]
+    assert valve_two_targets[:2] == [failed_target, "Dev1/P0.1"]
+    assert 2 in protocol_state.possibly_open_valves
+    assert "RECOVERY_REQUIRED" in protocol_state.quality_block_reason

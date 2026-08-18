@@ -13,7 +13,11 @@ FIXTURES = Path(__file__).parent / "fixtures" / "protocols"
 
 
 def _valve_map(size: int = 10) -> dict[int, str]:
-    return {channel: f"Dev1/P0.{channel}" for channel in range(1, size + 1)}
+    targets = [
+        *(f"Dev1/P0.{line}" for line in range(8)),
+        *(f"Dev1/P1.{line}" for line in range(4)),
+    ]
+    return {channel: targets[channel - 1] for channel in range(1, size + 1)}
 
 
 def _state() -> AppState:

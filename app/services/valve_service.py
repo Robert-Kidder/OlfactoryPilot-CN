@@ -10,6 +10,7 @@ from app.models import (
     ActuationReceipt,
     ActuationResult,
     AppState,
+    HardwareProfile,
     SafetyState,
     SelectorConfig,
     SelectorRoute,
@@ -57,6 +58,7 @@ class ValveService:
         self.worker = worker
         self.valve_variants = valve_variants or {}
         self.hardware_variant = hardware_variant
+        self._registry = state.channel_registry
         self._selector = selector or state.selector
         if self._selector is None and master_valve_line:
             self._selector = SelectorConfig(str(master_valve_line))
@@ -82,14 +84,40 @@ class ValveService:
             self._selector_route = SelectorRoute.UNKNOWN
 
     def active_map(self) -> dict[int, str]:
-        """当前硬件变体的通道 -> 线路映射。"""
-        return {
+        """Return legacy compatibility channels with registry mappings authoritative."""
+
+        mapping = {
             int(channel): target
             for channel, target in self.valve_variants.get(
                 self.hardware_variant, {}
             ).items()
             if 1 <= int(channel) <= 20
         }
+        registry = self._registry
+        if registry is not None:
+            # V3 owns every valve it explicitly maps.  Legacy-only valve IDs
+            # remain reachable for the hidden pre-V3 code path until its HIL
+            # removal, but can never override a profile remap.
+            mapping.update(registry.internal_valve_targets(available_only=False))
+        return mapping
+
+    def rebind_profile(self, profile: HardwareProfile) -> None:
+        """Atomically publish a validated frozen registry and selector."""
+
+        if not isinstance(profile, HardwareProfile) or profile.selector is None:
+            raise ValueError("运行时重绑需要有效 HardwareProfile 与 selector。")
+        registry = profile.registry
+        selector_identity = normalize_digital_target(profile.selector.target)
+        if any(
+            normalize_digital_target(target) == selector_identity
+            for target in registry.internal_valve_targets(available_only=False).values()
+        ):
+            raise ValueError("selector target 与气味阀映射冲突，拒绝运行时重绑。")
+        with self._state_lock:
+            self._registry = registry
+            self._selector = profile.selector
+            self._states.clear()
+            self._selector_route = SelectorRoute.UNKNOWN
 
     def is_open(self, channel_id: int) -> bool:
         with self._state_lock:
@@ -143,7 +171,7 @@ class ValveService:
         """Translate an odor-valve logical state using HardwareProfile polarity."""
 
         active_high = True
-        registry = self.state.channel_registry
+        registry = self._registry
         if registry is not None:
             try:
                 active_high = registry.by_internal_valve(int(channel_id)).active_high
@@ -169,17 +197,17 @@ class ValveService:
         return tuple(steps)
 
     def all_configured_close_steps(self) -> tuple[ValvePlanStep, ...]:
-        """Return the de-duplicated union of odor valves across every variant."""
+        """Close current registry first, then legacy aliases as best-effort union."""
         steps: list[ValvePlanStep] = []
         seen: set[str] = set()
-        logical_targets: list[tuple[int, str]] = []
+        logical_targets: list[tuple[int, str]] = sorted(self.active_map().items())
         for mapping in self.valve_variants.values():
             logical_targets.extend(
                 (int(logical_valve), target)
-                for logical_valve, target in mapping.items()
+                for logical_valve, target in sorted(mapping.items(), key=lambda item: int(item[0]))
                 if 1 <= int(logical_valve) <= 20
             )
-        for logical_valve, target in sorted(logical_targets):
+        for logical_valve, target in logical_targets:
             device, line = self._split_target(target)
             identity = normalize_digital_target(target)
             if identity in seen:

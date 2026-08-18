@@ -260,7 +260,10 @@ class ManualExperimentView(QWidget):
             ports = tuple(
                 replace(
                     port,
-                    actually_open=port.external_port in snapshot.open_confirmed,
+                    actually_open=(
+                        port.external_port in snapshot.open_confirmed
+                        and port.external_port not in snapshot.close_confirmed
+                    ),
                     fault=(
                         snapshot.recovery_reason
                         if port.external_port in snapshot.possibly_open
@@ -288,6 +291,7 @@ class ManualExperimentView(QWidget):
                     ManualExperimentStatus.COMPLETED,
                     ManualExperimentStatus.RECOVERY_REQUIRED,
                 },
+                supply_enabled=snapshot.supply_enabled,
                 status_text=self._status_text(snapshot),
                 detail_text=(snapshot.recovery_reason or self._snapshot.detail_text),
             )
@@ -384,7 +388,7 @@ class ManualExperimentView(QWidget):
             if is_selected:
                 states.append("已选择")
             if port.actually_open:
-                states.append("实际开启")
+                states.append("开启回执已确认（非机械确认）")
             if port.fault:
                 states.append(f"故障：{port.fault}")
             name = f"\n{port.display_name}" if port.display_name else ""

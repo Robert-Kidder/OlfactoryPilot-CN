@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import re
 from dataclasses import dataclass
 from enum import StrEnum
 
@@ -9,18 +10,22 @@ def normalize_digital_target(target: str) -> str:
     """Return one canonical device/port/line identity for config comparisons."""
 
     raw = str(target).strip().replace("\\", "/")
-    if "/" not in raw:
-        raise ValueError("数字输出目标必须包含 device/line。")
-    device, line = raw.split("/", 1)
-    device = device.strip().casefold()
-    line = line.strip().casefold()
-    if line.startswith("p") and "." in line:
-        port, bit = line[1:].split(".", 1)
-        if port.isdigit() and bit.isdigit():
-            line = f"port{int(port)}/line{int(bit)}"
-    if not device or not line:
-        raise ValueError("数字输出目标必须包含有效 device/line。")
-    return f"{device}/{line}"
+    match = re.fullmatch(
+        r"(?P<device>[A-Za-z][A-Za-z0-9_-]{0,31})/"
+        r"(?:[Pp](?P<alias_port>\d+)\.(?P<alias_line>\d+)"
+        r"|[Pp]ort(?P<long_port>\d+)/[Ll]ine(?P<long_line>\d+))",
+        raw,
+    )
+    if match is None:
+        raise ValueError(
+            "数字输出目标必须使用 device/P0.0 或 device/port0/line0 格式。"
+        )
+    port = int(match.group("alias_port") or match.group("long_port"))
+    line = int(match.group("alias_line") or match.group("long_line"))
+    line_limit = {0: 7, 1: 3}.get(port)
+    if line_limit is None or line > line_limit:
+        raise ValueError("数字输出目标超出 NI USB-6001 DO 范围（P0.0–P0.7、P1.0–P1.3）。")
+    return f"{match.group('device').casefold()}/port{port}/line{line}"
 
 
 class SelectorRoute(StrEnum):

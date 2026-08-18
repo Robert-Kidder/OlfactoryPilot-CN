@@ -209,6 +209,7 @@ class ManualExperimentSnapshot:
     flow_zero_confirmed: bool = False
     selector_compensation_confirmed: bool = False
     supply_restored: bool = False
+    supply_enabled: bool = False
     ready_ns: int | None = None
     deadline_ns: int | None = None
     remaining_ns: int = 0

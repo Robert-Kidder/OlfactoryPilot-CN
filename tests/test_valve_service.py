@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 from app.models import (
@@ -360,3 +361,29 @@ def test_async_cache_commits_only_successful_receipt():
     )
     service.commit_receipt(succeeded)
     assert service.is_open(1) is False
+
+
+def test_profile_registry_is_primary_close_target_and_legacy_is_only_union() -> None:
+    config = json.loads(Path("config/default_config.json").read_text(encoding="utf-8"))
+    state = AppState.from_config(config)
+    old_target = state.channel_registry.by_internal_valve(2).target
+    channels = list(state.hardware_profile.channels)
+    descriptor = channels[1]
+    channels[1] = replace(descriptor, target="Dev2/P0.0")
+    remapped = replace(state.hardware_profile, channels=tuple(channels))
+    state.hardware_profile = remapped
+    state.channel_registry = remapped.registry
+    service = ValveService(
+        state=state,
+        safety_manager=SafetyManager(),
+        worker=DummyWorker(),
+        valve_variants={"20-channel": {2: old_target}},
+        hardware_variant="20-channel",
+        selector=state.selector,
+    )
+
+    assert service.resolve_target(2) == ("Dev2", "P0.0")
+    closes = service.all_configured_close_steps()
+    targets = [f"{step.device}/{step.line}" for step in closes if step.logical_valve == 2]
+    assert targets[0] == "Dev2/P0.0"
+    assert old_target in targets

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, replace
 from enum import StrEnum
@@ -13,6 +14,7 @@ from .safe_stop import SelectorConfig, SelectorRoute, normalize_digital_target
 HARDWARE_PROFILE_SCHEMA_VERSION = 1
 EXTERNAL_PORTS = tuple(range(1, 21))
 DEFAULT_MAX_FLOW_SCCM = 5000.0
+DEFAULT_NI_DEVICE_IDS = ("Dev1", "Dev2")
 
 
 class VerificationStatus(StrEnum):
@@ -22,6 +24,77 @@ class VerificationStatus(StrEnum):
     MAPPING_CHANGED = "mapping_changed"
     INCOMPLETE = "incomplete"
     FAILED = "failed"
+
+
+@dataclass(frozen=True, slots=True)
+class HardwareConnectionConfig:
+    """Immutable local connection identifiers; construction never probes hardware."""
+
+    serial_port: str | None = None
+    ni_device_ids: tuple[str, ...] = DEFAULT_NI_DEVICE_IDS
+    alicat_a_unit_id: str = "a"
+    alicat_b_unit_id: str = "b"
+    alicat_c_unit_id: str = "c"
+
+    def __post_init__(self) -> None:
+        serial_port = self.serial_port
+        if serial_port is not None:
+            if not isinstance(serial_port, str):
+                raise ValueError("COM 端口必须是字符串或 null。")
+            serial_port = serial_port.strip().upper() or None
+        if serial_port is not None:
+            match = re.fullmatch(r"COM([1-9]\d{0,2})", serial_port)
+            if match is None or int(match.group(1)) > 256:
+                raise ValueError("COM 端口必须使用 COM1–COM256 格式，或留空。")
+        object.__setattr__(self, "serial_port", serial_port)
+
+        if not isinstance(self.ni_device_ids, tuple | list) or not self.ni_device_ids:
+            raise ValueError("NI device IDs 必须是非空数组。")
+        devices: list[str] = []
+        identities: set[str] = set()
+        for value in self.ni_device_ids:
+            if not isinstance(value, str):
+                raise ValueError("每个 NI device ID 必须是字符串。")
+            device = value.strip()
+            if re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]{0,31}", device) is None:
+                raise ValueError("NI device ID 仅允许字母开头及字母、数字、下划线、连字符。")
+            identity = device.casefold()
+            if identity in identities:
+                raise ValueError("NI device IDs 不得重复（忽略大小写）。")
+            identities.add(identity)
+            devices.append(device)
+        object.__setattr__(self, "ni_device_ids", tuple(devices))
+
+        units = (
+            self.alicat_a_unit_id,
+            self.alicat_b_unit_id,
+            self.alicat_c_unit_id,
+        )
+        normalized_units: list[str] = []
+        for channel, value in zip(("A", "B", "C"), units, strict=True):
+            if not isinstance(value, str) or re.fullmatch(r"[A-Za-z0-9]", value) is None:
+                raise ValueError(f"Alicat {channel} unit ID 必须是单个 ASCII 字母或数字。")
+            normalized_units.append(value)
+        if len({value.casefold() for value in normalized_units}) != 3:
+            raise ValueError("Alicat A/B/C unit IDs 不得重复（忽略大小写）。")
+        object.__setattr__(self, "alicat_a_unit_id", normalized_units[0])
+        object.__setattr__(self, "alicat_b_unit_id", normalized_units[1])
+        object.__setattr__(self, "alicat_c_unit_id", normalized_units[2])
+
+    @property
+    def alicat_unit_ids(self) -> dict[str, str]:
+        return {
+            "A": self.alicat_a_unit_id,
+            "B": self.alicat_b_unit_id,
+            "C": self.alicat_c_unit_id,
+        }
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "serial_port": self.serial_port,
+            "ni_devices": list(self.ni_device_ids),
+            "alicat_unit_ids": self.alicat_unit_ids,
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -312,6 +385,7 @@ class HardwareProfile:
     profile_name: str
     channels: tuple[ChannelDescriptor, ...]
     selector: SelectorConfig | None
+    connections: HardwareConnectionConfig = HardwareConnectionConfig()
     max_total_sccm: float = DEFAULT_MAX_FLOW_SCCM
     max_sample_a_sccm: float = DEFAULT_MAX_FLOW_SCCM
     max_vacuum_c_sccm: float = DEFAULT_MAX_FLOW_SCCM
@@ -327,6 +401,8 @@ class HardwareProfile:
         if not name or len(name) > 80:
             raise ValueError("HardwareProfile 名称必须为 1–80 个字符。")
         object.__setattr__(self, "profile_name", name)
+        if not isinstance(self.connections, HardwareConnectionConfig):
+            raise ValueError("connections 必须是 HardwareConnectionConfig。")
         normalized_channels = tuple(
             channel.invalidate_stale_verification() for channel in self.channels
         )
@@ -436,6 +512,7 @@ class HardwareProfile:
                 "vacuum_c": self.max_vacuum_c_sccm,
             },
             "selector": selector,
+            "connections": self.connections.to_dict(),
             "channels": [channel.to_dict() for channel in self.channels],
         }
 
@@ -451,7 +528,14 @@ class HardwareProfile:
             raise ValueError("hardware_profile 必须是 JSON 对象。")
         _reject_unknown_keys(
             raw,
-            {"schema_version", "profile_name", "flow_limits_sccm", "selector", "channels"},
+            {
+                "schema_version",
+                "profile_name",
+                "flow_limits_sccm",
+                "selector",
+                "connections",
+                "channels",
+            },
             "hardware_profile",
         )
         channels_raw = raw.get("channels")
@@ -463,15 +547,61 @@ class HardwareProfile:
         if not isinstance(limits, Mapping):
             raise ValueError("flow_limits_sccm 必须是 JSON 对象。")
         _reject_unknown_keys(limits, {"total", "sample_a", "vacuum_c"}, "flow_limits_sccm")
+        connections = _parse_connections(raw.get("connections"), legacy_config=config)
         return cls(
             schema_version=raw.get("schema_version"),
             profile_name=raw.get("profile_name", "默认硬件方案"),
             channels=channels,
             selector=selector,
+            connections=connections,
             max_total_sccm=limits.get("total", DEFAULT_MAX_FLOW_SCCM),
             max_sample_a_sccm=limits.get("sample_a", DEFAULT_MAX_FLOW_SCCM),
             max_vacuum_c_sccm=limits.get("vacuum_c", DEFAULT_MAX_FLOW_SCCM),
         )
+
+
+def _parse_connections(
+    raw: Any,
+    *,
+    legacy_config: Mapping[str, Any],
+) -> HardwareConnectionConfig:
+    if raw is None:
+        raw = {}
+    if not isinstance(raw, Mapping):
+        raise ValueError("hardware_profile.connections 必须是 JSON 对象。")
+    _reject_unknown_keys(
+        raw,
+        {"serial_port", "ni_devices", "alicat_unit_ids"},
+        "hardware_profile.connections",
+    )
+    legacy_overlay = legacy_config is not raw
+    serial_port = (
+        legacy_config.get("serial_port")
+        if legacy_overlay and "serial_port" in legacy_config
+        else raw.get("serial_port")
+    )
+    ni_devices = (
+        legacy_config.get("ni_devices")
+        if legacy_overlay and "ni_devices" in legacy_config
+        else raw.get("ni_devices", DEFAULT_NI_DEVICE_IDS)
+    )
+    units = (
+        legacy_config.get("alicat_unit_ids")
+        if legacy_overlay and "alicat_unit_ids" in legacy_config
+        else raw.get("alicat_unit_ids", {"A": "a", "B": "b", "C": "c"})
+    )
+    if not isinstance(units, Mapping):
+        raise ValueError("connections.alicat_unit_ids 必须是 JSON 对象。")
+    _reject_unknown_keys(units, {"A", "B", "C"}, "connections.alicat_unit_ids")
+    if set(units) != {"A", "B", "C"}:
+        raise ValueError("connections.alicat_unit_ids 必须完整包含 A、B、C。")
+    return HardwareConnectionConfig(
+        serial_port=serial_port,
+        ni_device_ids=ni_devices,
+        alicat_a_unit_id=units["A"],
+        alicat_b_unit_id=units["B"],
+        alicat_c_unit_id=units["C"],
+    )
 
 
 def _parse_channel(raw: Any) -> ChannelDescriptor:

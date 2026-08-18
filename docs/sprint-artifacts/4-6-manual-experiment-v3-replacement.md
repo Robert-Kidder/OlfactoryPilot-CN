@@ -1,8 +1,8 @@
 # Story 4.6：方案 B V3 手动实验替换
 
-Status: **in-progress：离线实现与自动化门禁已完成，等待独立复审和用户 Mock 手动验收**
+Status: **in-progress：首轮独立复审整改与离线门禁已完成，等待整改后复审和用户 Mock 手动验收**
 
-Implementation date: 2026-08-18  
+Implementation date: 2026-08-18
 Baseline commit: `5625aa55bea6b916823a1cb676a560b8d5429b61`
 
 ## 实施范围
@@ -31,22 +31,39 @@ Baseline commit: `5625aa55bea6b916823a1cb676a560b8d5429b61`
 | 手动实验 owner core | `4311b66` | 定向/相关 188 项、全仓 867 项 |
 | V3、设置页与 Controller 接线 | `cb4a0ab` | 定向 161 项、全仓 894 项 |
 
-## 最终离线门禁（复审前）
+## 首轮独立复审与整改（2026-08-19）
+
+Blind Hunter 与 Edge Case Hunter 从 baseline 独立审阅完整 diff，确认并整改以下 Story 内问题：
+
+- 当前 HardwareProfile 映射没有贯穿异常/安全关闭；现改为 registry target 优先并与 legacy target 作兼容并集，按物理 target 保留失败证据。
+- 保存/回滚后 selector、ValveService、DO adapter、shutdown 与 session receipt consumer 缓存不一致；现采用断开事务内统一重绑，失败显式回滚磁盘与运行时。
+- manual receipt 可在 deadline 后成功推进，且已完成的 `flow_zero` timeout 会污染后续阶段；现逐命令保存单调 deadline，并让相关成功回执终结 pending identity。
+- 第二次 operation 会继承前次 A=0/selector/supply 证据，且双 start 可同时排队；现每次建立全新 Snapshot，并增加原子 pending-start 门禁。
+- 反向 selector 极性下的 odor-route `CLOSE` 可被误当安全动作；现按 route 语义而非 OPEN/CLOSE 字面执行联锁。
+- UI 的“开启”状态未扣除 close receipt，供气和 readiness 又存在 Controller/View 第二份状态；现由 owner Snapshot 统一驱动并在页面内显示门禁原因。
+- Mock 验证原先只更新 fingerprint；现执行隔离 MockHAL + adapter 的相关 open/close/极性回路，只有匹配 receipt 才标记 `mock_verified`。
+- NI target 校验过宽；现只接受支持的 USB-6001 DO 语法与范围。
+- 初版规格漏接权威 FR7.1 的 COM、NI device ID 和 Alicat unit ID；现纳入同一 profile/revision/原子保存/回滚事务和设置页，仍不探测硬件。
+- rollback 控件、profile 保存后 V3 availability 与文档 whitespace 证据不一致问题一并修正。
+
+清洗页候选 finding 被驳回：权威 PRD FR6 与 UX 明确要求保留清洗页；Story 4.1 的代码资产暂停不等于隐藏产品入口。未发现需要真实硬件才能整改的项目。
+
+## 最终离线门禁（首轮整改后）
 
 | Gate | Result |
 |---|---|
-| Story 4.6 + owner/flow 定向测试 | `161 passed in 2.35s` |
-| 完整 pytest | `894 passed in 38.70s` |
+| Story 4.6 + owner/flow/配置定向测试 | `344 passed in 8.73s` |
+| 完整 pytest | `928 passed in 42.61s` |
 | Ruff | `All checks passed!` |
 | `compileall` | 通过 |
 | `git diff --check` | 通过；仅 LF→CRLF 工作副本提示 |
-| PyInstaller | `OlfactoryPilot.exe` 构建成功 |
+| PyInstaller `--noconfirm` | `OlfactoryPilot.exe` 构建成功 |
 
 PyInstaller 报告的 OpenGL、`pkg_resources`、macOS framework 提示来自既有可选依赖扫描，不影响 Windows 构建完成；产物位于忽略目录 `dist/`，未提交。
 
 ## 验收状态
 
 - 自动化与构建：已完成。
-- 独立代码复审：待执行；发现项整改后更新本文件。
+- 独立代码复审：首轮发现项已整改，等待整改后复审确认。
 - 用户 Mock 手动验收：待独立复审通过后，由 Codex 每次只提供一个启动或操作步骤并等待反馈。
 - 真实硬件/HIL：未授权、未执行，不作为当前离线完成证据。

@@ -29,6 +29,7 @@ from .hardware_profile import (
     ChannelRegistry,
     ChannelVerification,
     FlowSetpoints,
+    HardwareConnectionConfig,
     HardwareProfile,
     VerificationStatus,
 )
@@ -112,6 +113,7 @@ __all__ = [
     "ExclusiveDeviceLease",
     "FlowSetpoints",
     "HARDWARE_PROFILE_SCHEMA_VERSION",
+    "HardwareConnectionConfig",
     "HardwareProfile",
     "MaintenanceLeaseReleaseEvidence",
     "ManualExperimentIdentity",

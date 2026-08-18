@@ -7,6 +7,7 @@ import pytest
 from app.models import (
     ChannelDescriptor,
     ChannelVerification,
+    HardwareConnectionConfig,
     HardwareProfile,
     SelectorConfig,
     VerificationStatus,
@@ -52,6 +53,13 @@ def _profile(
             for port in range(1, 21)
         ),
         selector=SelectorConfig(target="Dev2/P1.0"),
+        connections=HardwareConnectionConfig(
+            serial_port="COM6",
+            ni_device_ids=("Dev1", "Dev2"),
+            alicat_a_unit_id="a",
+            alicat_b_unit_id="b",
+            alicat_c_unit_id="c",
+        ),
     )
 
 
@@ -68,6 +76,9 @@ def test_settings_renders_20_port_candidate_and_natural_verification_text(qtbot)
     assert view.enabled_checks[2].isChecked()
     assert view.verification_labels[2].text() == "Mock 验证通过 · 2026-08-18"
     assert view.verification_labels[1].text() == "待验证"
+    assert view.serial_port_input.text() == "COM6"
+    assert view.ni_device_ids_input.text() == "Dev1, Dev2"
+    assert view.alicat_unit_inputs["A"].text() == "a"
 
 
 @pytest.mark.parametrize(
@@ -184,13 +195,73 @@ def test_settings_readonly_state_blocks_all_verification_and_edits(qtbot) -> Non
     view.render_profile(_profile(), revision=5, can_save=False, message="设备已连接")
     candidates = []
     physical = []
+    rollbacks = []
     view.candidate_changed.connect(candidates.append)
     view.physical_verify_requested.connect(physical.append)
+    view.rollback_requested.connect(rollbacks.append)
+
+    view.render_snapshot(
+        HardwareSettingsSnapshot(
+            profile=_profile(),
+            revision=5,
+            can_edit=False,
+            can_save=False,
+            can_mock_verify=False,
+            can_request_physical_verification=False,
+            rollback_available=True,
+            status_text="设备已连接",
+        )
+    )
 
     assert not view.name_inputs[2].isEnabled()
+    assert not view.serial_port_input.isEnabled()
+    assert not view.ni_device_ids_input.isEnabled()
+    assert not view.alicat_unit_inputs["A"].isEnabled()
     assert not view.mock_buttons[2].isEnabled()
     assert not view.physical_buttons[2].isEnabled()
     assert not view.save_button.isEnabled()
+    assert not view.rollback_button.isEnabled()
     view.physical_buttons[2].click()
+    view.rollback_button.click()
     assert candidates == []
     assert physical == []
+    assert rollbacks == []
+
+
+def test_settings_edits_connections_in_same_frozen_candidate_without_probe(qtbot) -> None:
+    view = HardwareSettingsView()
+    qtbot.addWidget(view)
+    view.render_profile(_profile(), revision=6, can_save=True)
+    candidates = []
+    view.candidate_changed.connect(candidates.append)
+
+    view.serial_port_input.setText("com18")
+    view.ni_device_ids_input.setText("RackA, RackB")
+    view.alicat_unit_inputs["A"].setText("1")
+    view.alicat_unit_inputs["B"].setText("2")
+    view.alicat_unit_inputs["C"].setText("3")
+
+    candidate = candidates[-1]
+    assert isinstance(candidate, HardwareProfile)
+    assert candidate.connections.serial_port == "COM18"
+    assert candidate.connections.ni_device_ids == ("RackA", "RackB")
+    assert candidate.connections.alicat_unit_ids == {"A": "1", "B": "2", "C": "3"}
+    assert view.draft is not None
+    assert view.draft.revision == 6
+
+
+def test_settings_invalid_connection_stays_draft_and_blocks_save_intent(qtbot) -> None:
+    view = HardwareSettingsView()
+    qtbot.addWidget(view)
+    view.render_profile(_profile(), revision=9, can_save=True)
+    candidates = []
+    saves = []
+    view.candidate_changed.connect(candidates.append)
+    view.save_requested.connect(lambda *args: saves.append(args))
+
+    view.serial_port_input.setText("ttyUSB0")
+    view.save_button.click()
+
+    assert candidates == []
+    assert saves == []
+    assert "COM1–COM256" in view.status_label.text()

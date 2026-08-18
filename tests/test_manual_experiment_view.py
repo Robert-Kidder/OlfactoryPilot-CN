@@ -137,7 +137,10 @@ def test_manual_port_state_has_text_and_visual_distinction(qtbot) -> None:
     )
 
     text = view.port_buttons[2].text()
-    assert all(value in text for value in ("可用", "已选择", "实际开启", "故障"))
+    assert all(
+        value in text
+        for value in ("可用", "已选择", "开启回执已确认（非机械确认）", "故障")
+    )
     assert view.port_buttons[2].property("portState") == "fault"
     assert "故障" in view.port_buttons[2].accessibleDescription()
     assert "不可用" in view.port_buttons[1].text()

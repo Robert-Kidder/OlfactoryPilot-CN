@@ -204,3 +204,72 @@ def test_candidate_rejects_enabled_target_on_unregistered_ni_device(tmp_path) ->
 
     with pytest.raises(ValueError, match="未登记设备.*dev9"):
         store.save(candidate, expected_revision=0)
+
+
+def test_connections_share_profile_revision_atomic_save_restart_and_rollback(tmp_path) -> None:
+    local_path = tmp_path / "local_config.json"
+    store = HardwareProfileStore(
+        default_config=_default_config(),
+        local_config_path=local_path,
+    )
+    candidate = store.profile.to_dict()
+    candidate["connections"] = {
+        "serial_port": "COM18",
+        "ni_devices": ["RackA", "RackB"],
+        "alicat_unit_ids": {"A": "1", "B": "2", "C": "3"},
+    }
+    candidate["selector"]["target"] = "RackB/P1.0"
+    for channel in candidate["channels"]:
+        if channel["target"]:
+            channel["target"] = channel["target"].replace("Dev1", "RackA")
+
+    saved = store.save(candidate, expected_revision=0)
+
+    persisted = json.loads(local_path.read_text(encoding="utf-8"))
+    assert persisted["hardware_profile_revision"] == 1
+    assert persisted["hardware_profile"]["connections"]["serial_port"] == "COM18"
+    assert persisted["serial_port"] == "COM18"
+    assert persisted["ni_devices"] == ["RackA", "RackB"]
+    assert persisted["alicat_unit_ids"] == {"A": "1", "B": "2", "C": "3"}
+    assert saved.connections.serial_port == "COM18"
+
+    restarted = HardwareProfileStore(
+        default_config=_default_config(),
+        local_config_path=local_path,
+    )
+    assert restarted.revision == 1
+    assert restarted.profile.connections == saved.connections
+    assert restarted.effective_config["serial_port"] == "COM18"
+
+    rolled_back = restarted.rollback(expected_revision=1)
+    assert rolled_back.connections.serial_port is None
+    persisted = json.loads(local_path.read_text(encoding="utf-8"))
+    assert persisted["hardware_profile_revision"] == 2
+    assert persisted["serial_port"] is None
+    assert persisted["ni_devices"] == ["Dev1", "Dev2"]
+
+
+def test_restart_prefers_canonical_local_connections_over_inherited_legacy_defaults(
+    tmp_path,
+) -> None:
+    local_path = tmp_path / "local_config.json"
+    profile = HardwareProfile.from_config(_default_config()).to_dict()
+    profile["connections"] = {
+        "serial_port": "COM22",
+        "ni_devices": ["Dev1", "Dev2"],
+        "alicat_unit_ids": {"A": "1", "B": "2", "C": "3"},
+    }
+    local_path.write_text(
+        json.dumps({"hardware_profile": profile, "hardware_profile_revision": 4}),
+        encoding="utf-8",
+    )
+
+    restarted = HardwareProfileStore(
+        default_config=_default_config(),
+        local_config_path=local_path,
+    )
+
+    assert restarted.revision == 4
+    assert restarted.profile.connections.serial_port == "COM22"
+    assert restarted.profile.connections.alicat_unit_ids == {"A": "1", "B": "2", "C": "3"}
+    assert restarted.effective_config["serial_port"] == "COM22"

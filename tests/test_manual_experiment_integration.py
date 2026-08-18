@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import replace
 from pathlib import Path
 
@@ -12,8 +13,11 @@ from app.models import (
     ManualExperimentIntent,
     ManualExperimentStatus,
     ManualSupplyIntent,
+    VerificationStatus,
+    normalize_digital_target,
 )
 from app.services import MockHAL
+from app.views import MainWindow
 from app.workers import HardwareWorker
 
 
@@ -40,7 +44,7 @@ def _controller(tmp_path: Path) -> tuple[MainController, FakeClock]:
         config=config,
         allow_test_actuation_bridge=True,
     )
-    clock = FakeClock()
+    clock = FakeClock(time.perf_counter_ns())
     controller.actuation_worker._clock_ns = clock
     return controller, clock
 
@@ -55,7 +59,7 @@ def _intent(*, duration_ns: int = 100) -> ManualExperimentIntent:
     )
 
 
-def test_mock_controller_runs_manual_owner_and_releases_matching_lease(tmp_path) -> None:
+def test_mock_controller_runs_manual_owner_and_releases_matching_lease(tmp_path, qtbot) -> None:
     controller, clock = _controller(tmp_path)
 
     assert controller.handle_manual_release_requested(_intent())
@@ -67,10 +71,15 @@ def test_mock_controller_runs_manual_owner_and_releases_matching_lease(tmp_path)
     controller._drain_actuation_if_not_running()
 
     snapshot = controller.actuation_worker.manual_snapshot
+    window = MainWindow(controller, controller.state)
+    qtbot.addWidget(window)
+    controller.bind_view(window)
     assert snapshot.status is ManualExperimentStatus.COMPLETED
     assert snapshot.flow_zero_confirmed
     assert snapshot.selector_compensation_confirmed
     assert snapshot.supply_restored
+    assert snapshot.supply_enabled
+    assert window.manual_experiment_view.snapshot.supply_enabled
     assert controller.device_lease.snapshot.kind is DeviceLeaseKind.IDLE
 
 
@@ -103,10 +112,11 @@ def test_mock_supply_uses_a_zero_compensation_gate_before_restoring_setpoints(
     assert snapshot.flow_zero_confirmed
     assert snapshot.selector_compensation_confirmed
     assert snapshot.supply_restored
+    assert snapshot.supply_enabled
     assert controller.device_lease.snapshot.kind is DeviceLeaseKind.IDLE
 
 
-def test_controller_stop_manual_is_fail_closed(tmp_path) -> None:
+def test_controller_stop_manual_is_fail_closed(tmp_path, qtbot) -> None:
     controller, _ = _controller(tmp_path)
     assert controller.handle_manual_release_requested(_intent(duration_ns=10_000))
 
@@ -117,23 +127,124 @@ def test_controller_stop_manual_is_fail_closed(tmp_path) -> None:
         controller.actuation_worker.manual_snapshot.status
         is ManualExperimentStatus.RECOVERY_REQUIRED
     )
+    window = MainWindow(controller, controller.state)
+    qtbot.addWidget(window)
+    controller.bind_view(window)
     assert controller.actuation_worker._background_safe_stop_plan is not None
+    assert not controller.actuation_worker.manual_snapshot.supply_enabled
+    assert not window.manual_experiment_view.snapshot.supply_enabled
 
 
-def test_hardware_profile_controller_gate_revision_and_rollback(tmp_path) -> None:
+def test_controller_publishes_complete_manual_readiness_and_three_part_reason(
+    tmp_path,
+    qtbot,
+) -> None:
     controller, _ = _controller(tmp_path)
+    window = MainWindow(controller, controller.state)
+    qtbot.addWidget(window)
+    controller.bind_view(window)
+
+    controller.state.telemetry.connected = False
+    controller._render_manual_snapshot()
+    snapshot = window.manual_experiment_view.snapshot
+    assert not snapshot.controls_enabled
+    assert not snapshot.can_apply_flow
+    assert "当前不可操作" in snapshot.detail_text
+    assert "安全动作" in snapshot.detail_text
+    assert "下一步" in snapshot.detail_text
+
+    controller.state.telemetry.connected = True
+    controller.state.hardware_ready = True
+    controller.state.telemetry.safety_state = "SAFE"
+    controller._render_manual_snapshot()
+    assert window.manual_experiment_view.snapshot.controls_enabled
+    assert window.manual_experiment_view.snapshot.can_apply_flow
+
+    token = controller.device_lease.acquire(
+        DeviceLeaseKind.PROTOCOL,
+        operation_id="readiness-test",
+        generation=1,
+    )
+    assert token is not None
+    controller._render_manual_snapshot()
+    snapshot = window.manual_experiment_view.snapshot
+    assert not snapshot.controls_enabled
+    assert not snapshot.can_apply_flow
+    assert "lease" in snapshot.detail_text
+
+
+def test_hardware_profile_controller_gate_revision_and_rollback(tmp_path, qtbot) -> None:
+    controller, _ = _controller(tmp_path)
+    window = MainWindow(controller, controller.state)
+    qtbot.addWidget(window)
+    controller.bind_view(window)
     controller.state.telemetry.connected = False
     controller.state.hardware_ready = False
+    controller.state.telemetry.safety_state = "SAFE"
     profile = controller.state.hardware_profile
     assert profile is not None
-    candidate = replace(profile, profile_name="Mock 候选方案")
+    channels = list(profile.channels)
+    channels[1] = replace(channels[1], target="Dev2/P1.1")
+    selector = replace(profile.selector, target="Dev2/P1.2")
+    candidate = replace(
+        profile,
+        profile_name="Mock 候选方案",
+        channels=tuple(channels),
+        selector=selector,
+    )
 
     assert controller.handle_hardware_profile_save_requested(candidate, 0)
     assert controller.state.hardware_profile.profile_name == "Mock 候选方案"
+    assert controller.state.selector == selector
+    assert controller.valve_service.resolve_target(2) == ("Dev2", "P1.1")
+    assert controller.valve_service.selector == selector
+    assert normalize_digital_target(controller.actuation_adapter.selector_target) == normalize_digital_target("Dev2/P1.2")
+    assert controller.shutdown_service.selector == selector
+    assert controller.flow_service.master_target == "Dev2/P1.2"
+    assert controller.session_file_service.master_target == ("Dev2", "P1.2")
+    assert controller.config["valve_mapping"]["selector"]["target"] == "Dev2/P1.2"
+    assert not window.manual_experiment_view.snapshot.ports[1].available
     assert not controller.handle_hardware_profile_save_requested(profile, 0)
     assert controller.state.hardware_profile.profile_name == "Mock 候选方案"
     assert controller.handle_hardware_profile_rollback_requested(1)
     assert controller.state.hardware_profile.profile_name == profile.profile_name
+    assert controller.valve_service.resolve_target(2) == ("Dev1", "P0.1")
+
+
+def test_profile_runtime_bind_failure_rolls_disk_and_all_runtime_consumers_back(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    controller, _ = _controller(tmp_path)
+    controller.state.telemetry.connected = False
+    controller.state.hardware_ready = False
+    original = controller.state.hardware_profile
+    candidate = replace(original, selector=replace(original.selector, target="Dev2/P1.2"))
+    real_rebind = controller.session_file_service.rebind_master_target
+    calls = 0
+
+    def fail_first_rebind(target):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("injected runtime bind failure")
+        return real_rebind(target)
+
+    monkeypatch.setattr(
+        controller.session_file_service,
+        "rebind_master_target",
+        fail_first_rebind,
+    )
+
+    assert not controller.handle_hardware_profile_save_requested(candidate, 0)
+    assert controller.state.hardware_profile == original
+    assert controller.valve_service.selector == original.selector
+    assert normalize_digital_target(controller.actuation_adapter.selector_target) == normalize_digital_target(original.selector.target)
+    assert controller.shutdown_service.selector == original.selector
+    assert controller.flow_service.master_target == original.selector.target
+    assert controller.session_file_service.master_target == ("Dev2", "P1.0")
+    assert controller._hardware_profile_store.profile == original
+    assert controller._hardware_profile_store.revision == 2
 
 
 def test_hardware_profile_save_is_blocked_while_connected(tmp_path) -> None:
@@ -142,6 +253,69 @@ def test_hardware_profile_save_is_blocked_while_connected(tmp_path) -> None:
 
     assert not controller.handle_hardware_profile_save_requested(profile, 0)
     assert not (tmp_path / "local_config.json").exists()
+
+
+def test_hardware_profile_save_is_blocked_without_safe_confirmation(tmp_path) -> None:
+    controller, _ = _controller(tmp_path)
+    controller.state.telemetry.connected = False
+    controller.state.hardware_ready = False
+    controller.state.telemetry.safety_state = "UNKNOWN"
+
+    assert not controller.handle_hardware_profile_save_requested(
+        controller.state.hardware_profile,
+        0,
+    )
+    assert not (tmp_path / "local_config.json").exists()
+
+
+def test_mock_verification_requires_isolated_correlated_open_close_receipts(
+    tmp_path,
+    qtbot,
+) -> None:
+    controller, _ = _controller(tmp_path)
+    window = MainWindow(controller, controller.state)
+    qtbot.addWidget(window)
+    controller.bind_view(window)
+    controller.state.telemetry.connected = False
+    controller.state.hardware_ready = False
+    controller.state.telemetry.safety_state = "SAFE"
+    candidate = controller.state.hardware_profile
+    channels = list(candidate.channels)
+    channels[1] = replace(channels[1], active_high=False)
+    candidate = replace(candidate, channels=tuple(channels))
+
+    controller.handle_hardware_mock_verify_requested(2, candidate)
+
+    verified = window.hardware_settings_view.draft.to_profile().channels[1]
+    assert verified.verification.status is VerificationStatus.MOCK_VERIFIED
+    assert verified.verification.fingerprint == verified.mapping_fingerprint
+    assert controller.state.hardware_profile.channels[1] != verified
+
+
+def test_mock_verification_failure_does_not_publish_fingerprint(
+    tmp_path,
+    qtbot,
+    monkeypatch,
+) -> None:
+    controller, _ = _controller(tmp_path)
+    window = MainWindow(controller, controller.state)
+    qtbot.addWidget(window)
+    controller.bind_view(window)
+    controller.state.telemetry.connected = False
+    controller.state.hardware_ready = False
+    controller.state.telemetry.safety_state = "SAFE"
+    candidate = controller.state.hardware_profile
+    channels = list(candidate.channels)
+    channels[1] = replace(channels[1], active_high=False)
+    candidate = replace(candidate, channels=tuple(channels))
+    monkeypatch.setattr(MockHAL, "write_digital", lambda *_args, **_kwargs: False)
+
+    controller.handle_hardware_mock_verify_requested(2, candidate)
+
+    rendered = window.hardware_settings_view.draft.to_profile().channels[1]
+    assert rendered == controller.state.hardware_profile.channels[1]
+    assert rendered.mapping_fingerprint != candidate.channels[1].mapping_fingerprint
+    assert "Mock 验证失败" in window.hardware_settings_view.status_label.text()
 
 
 def test_product_navigation_exposes_v3_and_hides_legacy_entries(qt_app) -> None:

@@ -16,7 +16,10 @@ from typing import TYPE_CHECKING
 from PySide6.QtCore import QObject, Qt, QThread, QTimer, Signal, Slot
 
 from app.models import (
+    ActuationAction,
     ActuationCategory,
+    ActuationCommand,
+    ActuationResult,
     AppState,
     ChannelVerification,
     CleaningConfigSnapshot,
@@ -376,7 +379,6 @@ class MainController(QObject):
         self._manual_generation = 0
         self._manual_lease_token = None
         self._manual_snapshot = self.actuation_worker.manual_snapshot
-        self._manual_supply_intent: ManualSupplyIntent | None = None
         self._manual_supply_identity: ManualExperimentIdentity | None = None
         self._hardware_profile_store: HardwareProfileStore | None = None
         local_profile_path = (
@@ -742,6 +744,7 @@ class MainController(QObject):
                 )
         self._refresh_toolbar_state()
         self._render_cleaning_snapshot()
+        self._render_manual_snapshot()
 
     @Slot(str)
     def handle_status(self, message: str) -> None:
@@ -3186,7 +3189,6 @@ class MainController(QObject):
         if not isinstance(intent, ManualSupplyIntent):
             return False
         if not intent.enabled:
-            self._manual_supply_intent = None
             self.stop_hardware()
             return True
         if not self.simulation_mode:
@@ -3236,13 +3238,11 @@ class MainController(QObject):
             return False
         self._manual_lease_token = token
         self._manual_supply_identity = identity
-        self._manual_supply_intent = intent
         self.actuation_interlock.update(device_lease=DeviceLeaseKind.MANUAL.value)
         if not self.actuation_worker.post_manual_start(plan, lease_token=token):
             self.flow_worker.release_lease(token)
             self._manual_lease_token = None
             self._manual_supply_identity = None
-            self._manual_supply_intent = None
             self.actuation_interlock.update(device_lease=DeviceLeaseKind.IDLE.value)
             return False
         self._drain_actuation_if_not_running()
@@ -3274,13 +3274,8 @@ class MainController(QObject):
                 return
         if result.completed and result.identity == self._manual_supply_identity:
             self._manual_supply_identity = None
-            if self.view is not None and hasattr(self.view, "manual_experiment_view"):
-                renderer = getattr(self.view.manual_experiment_view, "render_supply_state", None)
-                if callable(renderer):
-                    renderer(True, "供气已确认：A 路经 compensation，T/A/B/C setpoints 已恢复。")
         elif result.identity == self._manual_supply_identity:
             self._manual_supply_identity = None
-            self._manual_supply_intent = None
         self._render_manual_snapshot()
 
     def _render_manual_snapshot(self) -> None:
@@ -3290,6 +3285,64 @@ class MainController(QObject):
         if hasattr(manual, "set_registry") and self.state.channel_registry is not None:
             manual.set_registry(self.state.channel_registry, allow_mock=self.simulation_mode)
         manual.render_snapshot(self._manual_snapshot)
+        base = manual.snapshot
+        status = self._manual_snapshot.status
+        idle = status in {
+            ManualExperimentStatus.IDLE,
+            ManualExperimentStatus.COMPLETED,
+        }
+        holder = self.device_lease.snapshot.kind
+        readiness_reason = ""
+        if not self.simulation_mode:
+            readiness_reason = "真实硬件尚未授权"
+        elif not self.state.telemetry.connected:
+            readiness_reason = "设备尚未连接"
+        elif not self.state.hardware_ready:
+            readiness_reason = "硬件自检尚未通过"
+        elif self.state.telemetry.safety_state != "SAFE":
+            readiness_reason = f"安全状态为 {self.state.telemetry.safety_state}"
+        elif holder not in {DeviceLeaseKind.IDLE, DeviceLeaseKind.MANUAL}:
+            readiness_reason = f"设备 lease 当前属于 {holder.value}"
+        ready = not readiness_reason
+        selected = set(base.draft.selected_external_ports)
+        available = {port.external_port for port in base.ports if port.available}
+        detail = base.detail_text
+        if readiness_reason:
+            detail = (
+                f"当前不可操作：{readiness_reason}；安全动作：未产生硬件 intent；"
+                "下一步：使用 Mock 并完成连接、自检与 SAFE 确认。"
+            )
+        elif status is ManualExperimentStatus.RECOVERY_REQUIRED:
+            detail = (
+                f"手动实验需要恢复：{self._manual_snapshot.recovery_reason}；"
+                "安全动作：owner 正在执行统一清零/关闭；下一步：完成全局停止后重新连接。"
+            )
+        view_snapshot = replace(
+            base,
+            controls_enabled=ready and idle,
+            can_apply_flow=ready and idle and holder is DeviceLeaseKind.IDLE,
+            can_release=(
+                ready
+                and idle
+                and holder is DeviceLeaseKind.IDLE
+                and bool(selected)
+                and selected <= available
+            ),
+            can_stop=status
+            in {
+                ManualExperimentStatus.FLOW_PENDING,
+                ManualExperimentStatus.SELECTOR_PENDING,
+                ManualExperimentStatus.OPENING,
+                ManualExperimentStatus.STIMULATING,
+                ManualExperimentStatus.CLOSING,
+                ManualExperimentStatus.ZEROING_A,
+                ManualExperimentStatus.SELECTOR_COMPENSATION,
+                ManualExperimentStatus.RESTORING_SUPPLY,
+            },
+            supply_enabled=self._manual_snapshot.supply_enabled,
+            detail_text=detail,
+        )
+        manual.render_snapshot(view_snapshot)
 
     def _set_manual_status(self, message: str) -> None:
         self.state.update_status(message)
@@ -3299,6 +3352,8 @@ class MainController(QObject):
     def _configuration_gate_reason(self) -> str:
         if self.state.telemetry.connected or self.state.hardware_ready:
             return "硬件仍处于连接或就绪状态"
+        if self.state.telemetry.safety_state != "SAFE":
+            return f"安全状态尚未确认 SAFE（当前为 {self.state.telemetry.safety_state}）"
         if self.device_lease.snapshot.kind is not DeviceLeaseKind.IDLE:
             return f"设备 lease 当前属于 {self.device_lease.snapshot.kind.value}"
         if self.session_state.status in {
@@ -3342,12 +3397,19 @@ class MainController(QObject):
             return False
         try:
             saved = store.save(candidate, expected_revision=int(expected_revision))
+            try:
+                self._publish_hardware_profile(saved)
+            except Exception as bind_error:
+                restored = store.rollback(expected_revision=int(expected_revision) + 1)
+                self._publish_hardware_profile(restored)
+                raise RuntimeError(
+                    f"运行时消费者重绑失败，已显式回滚：{bind_error}"
+                ) from bind_error
         except Exception as exc:
             self._render_hardware_profile(f"保存失败：{exc}；安全动作：磁盘与运行时旧配置保持不变；下一步：修正候选或重新加载 revision。")
             return False
         finally:
             self.device_lease.release(token)
-        self._publish_hardware_profile(saved)
         self._render_hardware_profile("保存成功：已原子发布 HardwareProfile；安全动作：保持断开；下一步：可在 Mock 下重新连接验证。")
         return True
 
@@ -3369,17 +3431,31 @@ class MainController(QObject):
             return False
         try:
             restored = store.rollback(expected_revision=int(expected_revision))
+            try:
+                self._publish_hardware_profile(restored)
+            except Exception as bind_error:
+                previous = store.rollback(expected_revision=int(expected_revision) + 1)
+                self._publish_hardware_profile(previous)
+                raise RuntimeError(
+                    f"运行时消费者重绑失败，已恢复回滚前配置：{bind_error}"
+                ) from bind_error
         except Exception as exc:
             self._render_hardware_profile(f"回滚失败：{exc}；安全动作：当前配置保持不变；下一步：检查 revision 与 last-known-good。")
             return False
         finally:
             self.device_lease.release(token)
-        self._publish_hardware_profile(restored)
         self._render_hardware_profile("回滚成功：已恢复上一版 HardwareProfile；安全动作：保持断开；下一步：重新检查映射。")
         return True
 
     @Slot(int, object)
     def handle_hardware_mock_verify_requested(self, external_port: int, candidate) -> None:
+        gate_reason = self._configuration_gate_reason()
+        if gate_reason:
+            self._render_hardware_profile(
+                f"Mock 验证失败：{gate_reason}；安全动作：未运行隔离 Mock 回路；"
+                "下一步：安全停止、断开并等待所有 owner handoff。"
+            )
+            return
         try:
             profile = candidate if isinstance(candidate, HardwareProfile) else HardwareProfile.from_config(candidate)
             channels = list(profile.channels)
@@ -3387,6 +3463,71 @@ class MainController(QObject):
             channel = channels[index]
             if not channel.enabled or not channel.mapping_fingerprint:
                 raise ValueError("气口尚未启用或映射不完整")
+            isolated_state = AppState.from_config(
+                {**self.config, "hardware_profile": profile.to_dict()}
+            )
+            isolated_state.hardware_profile = profile
+            isolated_state.channel_registry = profile.registry
+            isolated_hal = MockHAL()
+            isolated_service = ValveService(
+                state=isolated_state,
+                safety_manager=SafetyManager(),
+                worker=None,
+                valve_variants={},
+                hardware_variant=isolated_state.hardware_variant,
+                selector=profile.selector,
+            )
+            isolated_adapter = ActuationDOAdapter(
+                hal=isolated_hal,
+                target_resolver=isolated_service.resolve_target,
+                physical_level_resolver=isolated_service.physical_level,
+                selector_target=(None if profile.selector is None else profile.selector.target),
+            )
+            if not isolated_hal.prepare_do_output():
+                raise RuntimeError("隔离 Mock DO owner 获取失败")
+            try:
+                receipts = []
+                for sequence, action in enumerate(
+                    (ActuationAction.OPEN, ActuationAction.CLOSE), 1
+                ):
+                    now_ns = time.perf_counter_ns()
+                    command = ActuationCommand(
+                        command_id=f"mock-verify-{external_port}-{sequence}-{uuid.uuid4().hex}",
+                        execution_epoch=0,
+                        arm_epoch=0,
+                        sequence=sequence,
+                        trial_id=None,
+                        trial_index=None,
+                        valve=int(channel.internal_valve),
+                        action=action,
+                        category=ActuationCategory.MANUAL,
+                        expected_ns=now_ns,
+                        duration_ns=None,
+                        wall_timestamp=time.time(),
+                        safety_generation=0,
+                        operation_id=f"mock-profile-verify-{external_port}",
+                        generation=0,
+                        step_id=f"mock_{action.value}",
+                        action_kind=action,
+                    )
+                    receipt = isolated_adapter.execute(command)
+                    if (
+                        receipt.result is not ActuationResult.SUCCESS
+                        or receipt.command_id != command.command_id
+                        or receipt.action is not action
+                        or receipt.actual_ns is None
+                    ):
+                        raise RuntimeError(
+                            receipt.message or f"隔离 Mock {action.value} receipt 无效"
+                        )
+                    receipts.append(receipt)
+                device, line = isolated_service.resolve_target(int(channel.internal_valve))
+                target = f"{device}/{line}" if device else line
+                expected_closed = not channel.active_high
+                if isolated_hal.get_line_state(target) is not expected_closed:
+                    raise RuntimeError("隔离 Mock 极性 open/close 回路终态不匹配")
+            finally:
+                isolated_hal.release_do_output()
             channels[index] = replace(
                 channel,
                 verification=ChannelVerification(
@@ -3412,9 +3553,60 @@ class MainController(QObject):
         )
 
     def _publish_hardware_profile(self, profile: HardwareProfile) -> None:
-        self.state.hardware_profile = profile
-        self.state.channel_registry = profile.registry
+        if profile.selector is None:
+            raise ValueError("HardwareProfile 缺少 selector，拒绝运行时发布。")
+        previous = self.state.hardware_profile
+        try:
+            self.valve_service.rebind_profile(profile)
+            self.actuation_adapter.rebind_selector(
+                target=profile.selector.target,
+                odor_level=profile.selector.odor_level,
+            )
+            self.shutdown_service.selector = profile.selector
+            self.flow_service.master_target = profile.selector.target
+            self.session_file_service.rebind_master_target(profile.selector.target)
+            self.state.hardware_profile = profile
+            self.state.channel_registry = profile.registry
+            self.state.selector = profile.selector
+            self.state.master_valve_line = profile.selector.target
+            self._publish_profile_config_aliases(profile)
+        except Exception:
+            if previous is not None and previous.selector is not None:
+                self.valve_service.rebind_profile(previous)
+                self.actuation_adapter.rebind_selector(
+                    target=previous.selector.target,
+                    odor_level=previous.selector.odor_level,
+                )
+                self.shutdown_service.selector = previous.selector
+                self.flow_service.master_target = previous.selector.target
+                self.session_file_service.rebind_master_target(previous.selector.target)
+                self.state.hardware_profile = previous
+                self.state.channel_registry = previous.registry
+                self.state.selector = previous.selector
+                self.state.master_valve_line = previous.selector.target
+                self._publish_profile_config_aliases(previous)
+            raise
+        self._render_manual_snapshot()
+
+    def _publish_profile_config_aliases(self, profile: HardwareProfile) -> None:
+        """Keep canonical profile and pre-V3 runtime aliases on one publication."""
+
+        selector = profile.selector
+        if selector is None:
+            raise ValueError("HardwareProfile 缺少 selector。")
         self.config["hardware_profile"] = profile.to_dict()
+        self.config["serial_port"] = profile.connections.serial_port
+        self.config["ni_devices"] = list(profile.connections.ni_device_ids)
+        self.config["alicat_unit_ids"] = profile.connections.alicat_unit_ids
+        valve_mapping = dict(self.config.get("valve_mapping") or {})
+        valve_mapping["selector"] = {
+            "target": selector.target,
+            "safe_route": selector.safe_route.value,
+            "safe_level": selector.safe_level,
+            "odor_level": selector.odor_level,
+        }
+        valve_mapping["master_valve"] = selector.target
+        self.config["valve_mapping"] = valve_mapping
 
     def _render_hardware_profile(
         self,
@@ -3438,12 +3630,7 @@ class MainController(QObject):
         )
 
     def stop_hardware(self) -> None:
-        self._manual_supply_intent = None
         self._manual_supply_identity = None
-        if self.view is not None and hasattr(self.view, "manual_experiment_view"):
-            renderer = getattr(self.view.manual_experiment_view, "render_supply_state", None)
-            if callable(renderer):
-                renderer(False, "正在统一安全停止并释放供气 lease。")
         if self.actuation_worker.post_manual_stop(reason="全局停止抢占手动实验。"):
             self._drain_actuation_if_not_running()
         finalize_session = self._prepare_session_for_global_stop("global_stop")

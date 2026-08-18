@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
 from app.models import (
     ChannelDescriptor,
     ChannelVerification,
+    HardwareConnectionConfig,
     HardwareProfile,
     SelectorConfig,
     VerificationStatus,
@@ -59,6 +60,11 @@ class HardwareProfileDraft:
     max_total_sccm: float
     max_sample_a_sccm: float
     max_vacuum_c_sccm: float
+    serial_port: str = ""
+    ni_device_ids_text: str = "Dev1, Dev2"
+    alicat_a_unit_id: str = "a"
+    alicat_b_unit_id: str = "b"
+    alicat_c_unit_id: str = "c"
     revision: int = 0
 
     @classmethod
@@ -78,6 +84,11 @@ class HardwareProfileDraft:
             max_total_sccm=profile.max_total_sccm,
             max_sample_a_sccm=profile.max_sample_a_sccm,
             max_vacuum_c_sccm=profile.max_vacuum_c_sccm,
+            serial_port=profile.connections.serial_port or "",
+            ni_device_ids_text=", ".join(profile.connections.ni_device_ids),
+            alicat_a_unit_id=profile.connections.alicat_a_unit_id,
+            alicat_b_unit_id=profile.connections.alicat_b_unit_id,
+            alicat_c_unit_id=profile.connections.alicat_c_unit_id,
             revision=revision,
         )
 
@@ -98,6 +109,17 @@ class HardwareProfileDraft:
                 for channel in self.channels
             ),
             selector=self.selector,
+            connections=HardwareConnectionConfig(
+                serial_port=self.serial_port,
+                ni_device_ids=tuple(
+                    value.strip()
+                    for value in self.ni_device_ids_text.split(",")
+                    if value.strip()
+                ),
+                alicat_a_unit_id=self.alicat_a_unit_id,
+                alicat_b_unit_id=self.alicat_b_unit_id,
+                alicat_c_unit_id=self.alicat_c_unit_id,
+            ),
             max_total_sccm=self.max_total_sccm,
             max_sample_a_sccm=self.max_sample_a_sccm,
             max_vacuum_c_sccm=self.max_vacuum_c_sccm,
@@ -147,8 +169,42 @@ class HardwareSettingsView(QWidget):
         self.status_label.setWordWrap(True)
         self.detail_label.setWordWrap(True)
 
+        connection_group = QGroupBox("连接参数（仅保存配置，不探测硬件）")
+        connection_layout = QGridLayout()
+        self.serial_port_input = QLineEdit()
+        self.serial_port_input.setPlaceholderText("例如 COM6；Mock 可留空")
+        self.ni_device_ids_input = QLineEdit()
+        self.ni_device_ids_input.setPlaceholderText("例如 Dev1, Dev2")
+        self.alicat_unit_inputs: dict[str, QLineEdit] = {}
+        connection_layout.addWidget(QLabel("COM 端口"), 0, 0)
+        connection_layout.addWidget(self.serial_port_input, 0, 1)
+        connection_layout.addWidget(QLabel("NI device IDs（逗号分隔）"), 1, 0)
+        connection_layout.addWidget(self.ni_device_ids_input, 1, 1, 1, 3)
+        for column, channel in enumerate(("A", "B", "C"), start=1):
+            unit_input = QLineEdit()
+            unit_input.setMaxLength(1)
+            unit_input.setPlaceholderText(channel.lower())
+            self.alicat_unit_inputs[channel] = unit_input
+            connection_layout.addWidget(QLabel(f"Alicat {channel} unit ID"), 2, column - 1)
+            connection_layout.addWidget(unit_input, 3, column - 1)
+        connection_group.setLayout(connection_layout)
+
+        self.serial_port_input.textChanged.connect(
+            lambda value: self._update_connections(serial_port=value)
+        )
+        self.ni_device_ids_input.textChanged.connect(
+            lambda value: self._update_connections(ni_device_ids_text=value)
+        )
+        for channel, input_control in self.alicat_unit_inputs.items():
+            input_control.textChanged.connect(
+                lambda value, key=channel: self._update_connections(
+                    **{f"alicat_{key.lower()}_unit_id": value}
+                )
+            )
+
         content = QWidget()
         content_layout = QVBoxLayout(content)
+        content_layout.addWidget(connection_group)
         basic_group = QGroupBox("气口配置")
         basic_layout = QGridLayout()
         headers = (
@@ -281,6 +337,11 @@ class HardwareSettingsView(QWidget):
         )
         self._rendering = True
         try:
+            self.serial_port_input.setText(self._draft.serial_port)
+            self.ni_device_ids_input.setText(self._draft.ni_device_ids_text)
+            self.alicat_unit_inputs["A"].setText(self._draft.alicat_a_unit_id)
+            self.alicat_unit_inputs["B"].setText(self._draft.alicat_b_unit_id)
+            self.alicat_unit_inputs["C"].setText(self._draft.alicat_c_unit_id)
             for channel in self._draft.channels:
                 port = channel.external_port
                 self.name_inputs[port].setText(channel.display_name)
@@ -300,6 +361,12 @@ class HardwareSettingsView(QWidget):
         self.profile_name_label.setText(f"硬件方案：{snapshot.profile.profile_name}")
         self.status_label.setText(snapshot.status_text)
         self.detail_label.setText(snapshot.detail_text)
+        for control in (
+            self.serial_port_input,
+            self.ni_device_ids_input,
+            *self.alicat_unit_inputs.values(),
+        ):
+            control.setEnabled(snapshot.can_edit and not snapshot.save_in_progress)
         for port in range(1, 21):
             for control in (
                 self.name_inputs[port],
@@ -318,7 +385,9 @@ class HardwareSettingsView(QWidget):
             )
         self.save_button.setEnabled(snapshot.can_save and not snapshot.save_in_progress)
         self.rollback_button.setEnabled(
-            snapshot.rollback_available and not snapshot.save_in_progress
+            snapshot.can_save
+            and snapshot.rollback_available
+            and not snapshot.save_in_progress
         )
         self.save_button.setText(
             "正在校验并写入…" if snapshot.save_in_progress else "保存候选硬件方案"
@@ -362,6 +431,17 @@ class HardwareSettingsView(QWidget):
             candidate = self._draft.to_profile()
         except ValueError as exc:
             self.status_label.setText(f"候选配置尚未通过校验：{exc}")
+            return
+        self.candidate_changed.emit(candidate)
+
+    def _update_connections(self, **changes) -> None:
+        if self._rendering or self._draft is None:
+            return
+        self._draft = replace(self._draft, **changes)
+        try:
+            candidate = self._draft.to_profile()
+        except ValueError as exc:
+            self.status_label.setText(f"候选连接参数尚未通过校验：{exc}")
             return
         self.candidate_changed.emit(candidate)
 

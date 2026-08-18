@@ -465,6 +465,20 @@ class SessionFileService:
         self._active_staging: set[Path] = set()
         self._orphan_staging: set[Path] = set()
 
+    def rebind_master_target(self, target: str) -> None:
+        """Rebind the frozen selector identity while no session owns the service."""
+
+        parsed = self._split_configured_target(str(target))
+        with self._active_lock:
+            if self._active_staging:
+                raise RuntimeError("活动 session 未结束，拒绝重绑 selector target。")
+            self._master_target = parsed
+
+    @property
+    def master_target(self) -> tuple[str | None, str] | None:
+        with self._active_lock:
+            return self._master_target
+
     def mark_active(self, staging_dir: str | Path) -> None:
         with self._active_lock:
             self._active_staging.add(Path(staging_dir).resolve(strict=False))

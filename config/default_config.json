@@ -73,6 +73,18 @@
       "safe_level": false,
       "odor_level": true
     },
+    "connections": {
+      "serial_port": null,
+      "ni_devices": [
+        "Dev1",
+        "Dev2"
+      ],
+      "alicat_unit_ids": {
+        "A": "a",
+        "B": "b",
+        "C": "c"
+      }
+    },
     "channels": [
       {"external_port": 1, "internal_valve": null, "target": "", "active_high": true, "enabled": false, "display_name": "", "verification": {"status": "pending", "fingerprint": "", "verified_at": ""}},
       {"external_port": 2, "internal_valve": 2, "target": "Dev1/P0.1", "active_high": true, "enabled": true, "display_name": "气口 2", "verification": {"status": "mock_verified", "fingerprint": "ad53edc7ba8e1bf609d11f4b008899c48169b4689ad6aa0f7af8b05c6a94bfa7", "verified_at": "2026-08-18"}},

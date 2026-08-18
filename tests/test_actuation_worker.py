@@ -1296,7 +1296,7 @@ def test_manual_valve_plan_runs_master_then_odor_and_commits_only_receipts() -> 
         protocol_state=ProtocolExecutionState(execution_epoch=1),
         writer=writer,
         interlock=ActuationInterlockIngress(
-            _safe_snapshot(has_protocol=False, device_lease="idle")
+            _safe_snapshot(has_protocol=False, device_lease="manual")
         ),
         valve_service=valve_service,
         monotonic_ns_clock=clock,
@@ -2492,7 +2492,7 @@ def test_failed_multistep_plan_never_rolls_selector_without_a_zero_owner() -> No
         protocol_state=ProtocolExecutionState(execution_epoch=1),
         writer=writer,
         interlock=ActuationInterlockIngress(
-            _safe_snapshot(has_protocol=False, device_lease="idle")
+            _safe_snapshot(has_protocol=False, device_lease="manual")
         ),
         valve_service=valve_service,
         monotonic_ns_clock=clock,
@@ -2817,7 +2817,7 @@ def test_generation_change_never_rolls_selector_before_a_zero_evidence() -> None
         safety_state=SafetyState("SAFE", 1.0, 0.2, 1.0, ""),
     )[1]
     ingress = ActuationInterlockIngress(
-        _safe_snapshot(has_protocol=False, device_lease="idle")
+        _safe_snapshot(has_protocol=False, device_lease="manual")
     )
     calls = []
 
@@ -3386,3 +3386,38 @@ def test_quality_ack_events_use_quality_schema_and_preserve_event_time() -> None
         (14.5, 999),
     ]
     assert not [call for call in recorder.calls if call[0] == "protocol"]
+def test_reverse_polarity_selector_odor_close_cannot_bypass_interlock_or_lease() -> None:
+    command = ActuationCommand(
+        command_id="selector-odor-low",
+        execution_epoch=1,
+        arm_epoch=1,
+        sequence=1,
+        trial_id=None,
+        trial_index=None,
+        valve=0,
+        action=ActuationAction.CLOSE,
+        category=ActuationCategory.MANUAL,
+        expected_ns=1,
+        duration_ns=None,
+        wall_timestamp=1.0,
+        safety_generation=1,
+        target_device="Dev2",
+        target_line="P1.0",
+        operation_id="manual-low",
+        generation=1,
+        step_id="selector_odor",
+        action_kind=ActuationAction.CLOSE,
+    )
+
+    disconnected = InterlockSnapshot(
+        connected=False,
+        hardware_ready=True,
+        flow_setpoints_ready=True,
+        safety_state="SAFE",
+        device_lease="manual",
+    )
+    assert "连接" in disconnected.command_rejection_reason(command)
+    lease_missing = replace(disconnected, connected=True, device_lease="idle")
+    assert "租约" in lease_missing.command_rejection_reason(command)
+    allowed = replace(lease_missing, device_lease="manual")
+    assert allowed.command_rejection_reason(command) == ""

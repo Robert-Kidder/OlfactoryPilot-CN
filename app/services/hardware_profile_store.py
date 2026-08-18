@@ -55,9 +55,16 @@ class HardwareProfileStore:
         with self._lock:
             local = self._read_local()
             self._base_config = base
-            self._effective_config = _merge(base, local)
+            self._effective_config = _prefer_local_profile_connections(
+                _merge(base, local),
+                local,
+            )
             self._profile = HardwareProfile.from_config(self._effective_config)
             self._validate_devices(self._profile, self._effective_config)
+            self._effective_config = _with_connection_aliases(
+                self._effective_config,
+                self._profile,
+            )
             self._revision = _read_revision(local)
             last_good_raw = local.get("hardware_profile_last_known_good")
             self._last_known_good = (
@@ -131,13 +138,17 @@ class HardwareProfileStore:
             validated = self._validate_candidate(candidate, local=local)
             next_local = copy.deepcopy(local)
             next_local["hardware_profile_last_known_good"] = self._profile.to_dict()
+            next_local = _with_connection_aliases(next_local, validated)
             next_local["hardware_profile"] = validated.to_dict()
             next_local["hardware_profile_revision"] = expected + 1
             self._atomic_write(next_local)
             self._last_known_good = self._profile
             self._profile = validated
             self._revision = expected + 1
-            self._effective_config = _merge(self._base_config, next_local)
+            self._effective_config = _with_connection_aliases(
+                _merge(self._base_config, next_local),
+                validated,
+            )
             return validated
 
     def rollback(self, *, expected_revision: int | None = None) -> HardwareProfile:
@@ -154,6 +165,7 @@ class HardwareProfileStore:
             )
             self._validate_devices(rollback_profile, candidate_effective)
             next_local = copy.deepcopy(local)
+            next_local = _with_connection_aliases(next_local, rollback_profile)
             next_local["hardware_profile"] = rollback_profile.to_dict()
             next_local["hardware_profile_last_known_good"] = self._profile.to_dict()
             next_local["hardware_profile_revision"] = expected + 1
@@ -162,7 +174,10 @@ class HardwareProfileStore:
             self._profile = rollback_profile
             self._last_known_good = previous_active
             self._revision = expected + 1
-            self._effective_config = _merge(self._base_config, next_local)
+            self._effective_config = _with_connection_aliases(
+                _merge(self._base_config, next_local),
+                rollback_profile,
+            )
             return rollback_profile
 
     def _expected_revision(self, expected_revision: int | None) -> int:
@@ -180,14 +195,8 @@ class HardwareProfileStore:
         profile: HardwareProfile,
         effective_config: Mapping[str, Any],
     ) -> None:
-        devices_raw = effective_config.get("ni_devices")
-        if not isinstance(devices_raw, list) or not devices_raw:
-            raise ValueError("ni_devices 必须是非空字符串数组。")
-        devices: set[str] = set()
-        for device in devices_raw:
-            if not isinstance(device, str) or not device.strip() or "/" in device:
-                raise ValueError("ni_devices 必须是非空设备名字符串数组。")
-            devices.add(device.strip().casefold())
+        del effective_config
+        devices = {device.casefold() for device in profile.connections.ni_device_ids}
         targets = [channel.target for channel in profile.channels if channel.enabled]
         if profile.selector is not None:
             targets.append(profile.selector.target)
@@ -256,6 +265,37 @@ def _merge(base: Mapping[str, Any], override: Mapping[str, Any]) -> dict[str, An
             merged[key] = _merge(merged[key], value)
         else:
             merged[key] = copy.deepcopy(value)
+    return merged
+
+
+def _with_connection_aliases(
+    config: Mapping[str, Any],
+    profile: HardwareProfile,
+) -> dict[str, Any]:
+    merged = copy.deepcopy(dict(config))
+    connections = profile.connections
+    merged["serial_port"] = connections.serial_port
+    merged["ni_devices"] = list(connections.ni_device_ids)
+    merged["alicat_unit_ids"] = connections.alicat_unit_ids
+    return merged
+
+
+def _prefer_local_profile_connections(
+    effective: Mapping[str, Any],
+    local: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Let a canonical local profile beat legacy aliases inherited from defaults."""
+
+    merged = copy.deepcopy(dict(effective))
+    local_profile = local.get("hardware_profile")
+    if not isinstance(local_profile, Mapping):
+        return merged
+    connections = local_profile.get("connections")
+    if not isinstance(connections, Mapping):
+        return merged
+    for key in ("serial_port", "ni_devices", "alicat_unit_ids"):
+        if key not in local and key in connections:
+            merged[key] = copy.deepcopy(connections[key])
     return merged
 
 
