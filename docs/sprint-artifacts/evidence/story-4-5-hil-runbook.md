@@ -2,7 +2,7 @@
 
 ## 现在的状态
 
-设备已通电连接，只读检查曾确认 Dev1/Dev2、COM6，A/B/C setpoint 和质量流量均已清零。新的 live 入口仍在离线开发/复审阶段。**当前保持上游 Air 关闭，不运行任何 HIL live 命令；特别不得运行旧 benchmark。**
+Story 4.5 `normal` 动作偏序 HIL 已于 2026-08-18 通过，证据已归档到 [story-4-5-hil-normal-20260818](story-4-5-hil-normal-20260818/README.md)。停止前 `odor` 路线的阀 2 持续气流已被人工观察；停止后的 `compensation` 物理出口尚未机械确认。运行结束后操作者已关闭上游 Air。**当前不再运行 HIL live 命令；任何复跑都必须重新生成 manifest 并获得新的明确授权，旧 benchmark 始终不得运行。**
 
 离线演练入口只有 mock 模式，没有 `--live` 参数：
 
@@ -12,7 +12,7 @@ python scripts/hil_story45_safe_stop.py --scenario all --output-root <仓库外�
 
 这条命令只运行 fake owner 和生产 `ShutdownService`/`SafeStopPlan` 的软件逻辑。全部场景满足 oracle 才返回 `0`；任一安全断言不满足就返回非零。输出中的 mock receipt、selector 模拟观察均不是机械阀、DAQmx 或真实气路证据。
 
-## 候选现场参数（只核对，不执行）
+## 已执行 normal 参数与未来复跑核对
 
 | 项目 | 候选值 |
 |---|---|
@@ -26,14 +26,14 @@ python scripts/hil_story45_safe_stop.py --scenario all --output-root <仓库外�
 | 气味阀 | 1–20，关闭电平 LOW；不得把 selector 当第 21 阀 |
 | timeout | DO `100 ms`；selector/气味阀紧急动作 `500 ms`；A/全流量/owner shutdown `2000 ms` |
 
-这些只是候选值。开机前必须与候选配置、设备铭牌和现场连接重新核对；不一致就停止，不能临场猜值。
+以上是 2026-08-18 normal 场景实际使用的受控参数，不改变生产默认 `1500 sccm` 上限。任何未来复跑仍必须与当时的候选配置、设备铭牌和现场连接重新核对；不一致就停止，不能临场猜值。
 
-## 以后收到“可以开机”通知前
+## 任何未来复跑收到“可以开机”通知前
 
 - [ ] 候选 commit 已固定，工作树状态已记录。
 - [ ] 离线场景全部通过，证据目录和哈希完整。
 - [ ] 真实硬件专用入口已经另行审查；不得用本离线脚本代替。
-- [ ] 操作者能直接关闭上游气源，并能观察 A/B/C 与 selector 两个出口。
+- [ ] 操作者能直接关闭上游气源，并能观察本次场景的目标出口；若目标是验证 selector 物理映射，则必须为两个出口分别制定安全、独立授权的观察步骤。
 - [ ] 现场只有干净 Air，无气味材料、容器或受试者。
 - [ ] 每一个 NI/Alicat 写入都有独立编号，且自动收尾写入已逐项预授权。
 
@@ -44,7 +44,7 @@ python scripts/hil_story45_safe_stop.py --scenario all --output-root <仓库外�
 只有获得新的明确授权后才进入本节。执行者先生成固定候选、场景、全部逐项写入和自动收尾的 manifest；操作者一次确认其 SHA-256/token 后，broker 按顺序逐条核销。目标、值、顺序、次数任一不符即在到达 HAL 前拒绝。
 
 1. 只读 preflight：确认设备身份、串口地址、压力范围和现场 Air 条件；不写硬件。
-2. 现场没有独立阀位/压力指示，因此电子 ack 不能被写成 selector 机械证据。本次已批准的受限诊断只在洁净 Air、无材料/受试者、A=`2500 sccm`、连续范围 `2250..2750 sccm` 和自动清零条件下进行；20 秒后必须另行记录阀 2 的实际气流观察，记录前 normal 结果保持 pending。
+2. 现场没有独立阀位/压力指示，因此电子 ack 不能被写成 selector 机械证据。2026-08-18 历史 normal 运行曾获批在洁净 Air、无材料/受试者、A=`2500 sccm`、连续范围 `2250..2750 sccm` 和自动清零条件下进行；该历史批准已结束，不授权未来运行。未来若复跑，20 秒后仍须另行记录目标出口的实际气流观察，记录前结果保持 pending。
 3. 场景开始前逐项预授权自动收尾：A=0、B=0、C=0、selector 写入 compensation、气味阀 1–20 LOW。selector 写入仍受“A=0 匹配 receipt 先行”门禁；未授权完整收尾就不启动场景。
 4. 正常停止场景逐项授权：代表气味阀、selector 气味路线、A 非零流量；随后触发全局停止。
 5. 现场核对严格顺序：fence → A=0 匹配 receipt → selector 补偿路线 → 气味阀 1–20 关闭 → A/B/C=0 → owner handoff。
@@ -62,13 +62,13 @@ python scripts/hil_story45_safe_stop.py --scenario all --output-root <仓库外�
 
 每个场景使用独立目录，至少保存：候选 commit/tree 与工作树状态、有效参数、timeline、commands、receipts、shutdown event、A/B/C/气味阀/selector 终态、owner handoff、summary 和 SHA-256。所有证据必须明确区分“软件 receipt”“模拟观察”和“真实机械/气路观察”。
 
-## 新的真实 HIL 入口（开发完成并复审前禁止运行）
+## 真实 HIL 入口（normal 已完成；复跑仍须重新授权）
 
 入口为 `scripts/hil_story45_live.py`，不得用旧 `hil_actuation_benchmark.py` 替代。三个命令互相分离：
 
 1. `plan` 只读取 Git/JSON 并把 manifest 写到仓库外，不导入 `nidaqmx` 或 `serial`。
-2. `preflight` 只枚举 NI 并发送 Alicat 查询帧，不含 setpoint 或 DO 写入。A 型号/序列号使用官方只读 `??M*`，满量程使用 `FPF 5`（mass-flow statistic 5）核对；参见 [Alicat Serial Communications Primer](https://documents.alicat.com/Alicat-Serial-Primer.pdf)。
-3. `run` 必须同时匹配干净候选 commit/tree、有效硬件配置快照及其 SHA-256、场景、manifest SHA-256 和完整 token；每进程只允许一个场景，不支持 live `--all`。任何 `RECOVERY_REQUIRED`（即使是预期 fault 注入）都返回非零。
+2. `preflight` 会枚举真实 NI 并向 Alicat 发送只读查询帧，因此即使不写 setpoint/DO，也必须先获得一次新的明确只读授权。A 型号/序列号使用官方只读 `??M*`，满量程使用 `FPF 5`（mass-flow statistic 5）核对；参见 [Alicat Serial Communications Primer](https://documents.alicat.com/Alicat-Serial-Primer.pdf)。
+3. `run` 必须同时匹配干净候选 commit/tree、有效硬件配置快照及其 SHA-256、场景、授权 payload digest 和完整 token；每进程只允许一个场景，不支持 live `--all`。任何 `RECOVERY_REQUIRED`（即使是预期 fault 注入）都返回非零。
 
 候选提交完成后才可生成 manifest：
 

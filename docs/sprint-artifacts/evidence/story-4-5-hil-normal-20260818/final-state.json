@@ -1,0 +1,66 @@
+{
+  "alicat_readback": {
+    "A": {
+      "gas": "Air",
+      "mass_flow_sccm": 0.0,
+      "raw": "A +014.58 +030.86 +0.0000 +0.0000 +0.0000    Air",
+      "setpoint_sccm": 0.0,
+      "status_codes": []
+    },
+    "B": {
+      "gas": "Air",
+      "mass_flow_sccm": 0.0,
+      "raw": "B +014.58 +031.09 +0.0000 +0.0000 +0.0000    Air",
+      "setpoint_sccm": 0.0,
+      "status_codes": []
+    },
+    "C": {
+      "gas": "Air",
+      "mass_flow_sccm": 0.0,
+      "raw": "C +002.88 +030.75 +0.0000 +0.0000 +0.0000    Air",
+      "setpoint_sccm": 0.0,
+      "status_codes": []
+    }
+  },
+  "alicat_readback_error": "",
+  "all_odors_requested_low": true,
+  "electronic_ack_is_not_mechanical_evidence": true,
+  "flows_sccm_from_confirmed_writes": {
+    "A": 0.0,
+    "B": 0.0,
+    "C": 0.0
+  },
+  "odor_valves_last_successful_requested_level": {
+    "1": false,
+    "10": false,
+    "11": false,
+    "12": false,
+    "13": false,
+    "14": false,
+    "15": false,
+    "16": false,
+    "17": false,
+    "18": false,
+    "19": false,
+    "2": false,
+    "20": false,
+    "3": false,
+    "4": false,
+    "5": false,
+    "6": false,
+    "7": false,
+    "8": false,
+    "9": false
+  },
+  "selector": {
+    "delegate_success": true,
+    "exposed_success": true,
+    "last_requested_level": false,
+    "last_successful_requested_level": false,
+    "mechanical_observation": "持续气流",
+    "requested_route": "compensation",
+    "software_evidence": "compensation",
+    "target": "Dev2/P1.0",
+    "uncertain": false
+  }
+}

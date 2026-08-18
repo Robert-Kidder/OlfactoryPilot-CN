@@ -1,0 +1,11 @@
+{
+  "ai_released": true,
+  "complete": true,
+  "do_handed_off": true,
+  "flow_accepting": false,
+  "lease_kind": "idle",
+  "lease_released": true,
+  "maintenance_actual": true,
+  "maintenance_reported": true,
+  "serial_resources_in_use": false
+}

@@ -1,0 +1,20 @@
+{
+  "ts": 1787058648.7943268,
+  "timestamp": 1787058648.7943268,
+  "source": "story-4.5-live-hil",
+  "reason": "scenario:normal",
+  "state": "SAFE",
+  "airflow": 2499.8,
+  "threshold": 0.2,
+  "valves_closed": true,
+  "heaters_off": true,
+  "retries": 0,
+  "result": "success",
+  "error": "",
+  "safe_stop_status": "completed",
+  "a_zero_confirmed": true,
+  "selector_safe_confirmed": true,
+  "recovery_required": false,
+  "guard_allowed": true,
+  "guard_reason": "允许执行"
+}

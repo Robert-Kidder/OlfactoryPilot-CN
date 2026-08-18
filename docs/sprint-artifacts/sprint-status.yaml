@@ -1,7 +1,7 @@
 # Sprint 状态文件
 # 生成时间: 2026-07-09 16:54
 generated: 2026-07-09 16:54
-last_updated: 2026-08-17
+last_updated: 2026-08-18
 project: OlfactoryPilot-CN
 project_key: OLFACTORY
 tracking_system: file-system
@@ -79,9 +79,14 @@ action_items:
     action: "实施 Story 4.5：确认 A 清零成功 receipt 后才切换三通阀安全路线。"
     owner: "Developer + Jing"
     status: done
-    completed: 2026-08-17
-    completion_note: "独立复审 R-01–R-10 已全部整改；415 项定向测试、762 项全量测试、Ruff 与 diff check 通过。真实 HIL 仍须另行授权。"
-    evidence: "docs/sprint-artifacts/4-5-safe-stop-selector-order.md"
+    completed: 2026-08-18
+    completion_note: "独立复审 R-01–R-10 已全部整改；最终全仓 820 项测试通过。2026-08-18 normal 动作偏序 HIL 通过：A=2500 sccm 稳定 20 秒、停止前 odor 路线阀 2 持续气流、safe-stop completed、终态 A/B/C=0、selector 软件/电子终态=compensation、气味阀 1–20 LOW、owner handoff 完整；compensation 物理出口未作机械确认。"
+    evidence: "docs/sprint-artifacts/evidence/story-4-5-hil-normal-20260818/README.md"
+  - epic: 4
+    action: "Story 4.6 接入真实硬件前，独立验证 selector compensation 物理出口映射；不得以 DAQ ack 或 normal 终态软件状态代替机械/气路观察。"
+    owner: "Jing + Developer"
+    status: backlog
+    evidence: "docs/sprint-artifacts/evidence/story-4-5-hil-normal-20260818/README.md#证据边界与字段解释"
   - epic: 3
     action: "对齐 BMM artifact 配置与项目权威 docs/sprint-artifacts 状态源。"
     owner: "Jing + Amelia"

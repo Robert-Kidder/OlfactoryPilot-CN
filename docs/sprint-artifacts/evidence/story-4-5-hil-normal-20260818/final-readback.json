@@ -1,0 +1,58 @@
+{
+  "error": "",
+  "result": {
+    "a_full_scale": [
+      "A +5.0000 37 NLPM"
+    ],
+    "a_manufacturing": [
+      "A  M00 ALICAT SCIENTIFIC\rA  M01 www.alicat.com\rA  M02 Ph   520-290-6060\rA  M03 info@alicat.com\rA  M04 Model Number MC-5NLPM-D\rA  M05 Serial Number 486285\rA  M06 Date Manufactured 04/23/2024\rA  M07 Date Calibrated   04/23/2024\rA  M08 Calibrated By     CS\rA  M09 Software Revision 10v14.0-R24"
+    ],
+    "alicat": {
+      "A": {
+        "gas": "Air",
+        "mass_flow_sccm": 0.0,
+        "raw": "A +014.58 +030.86 +0.0000 +0.0000 +0.0000    Air",
+        "setpoint_sccm": 0.0,
+        "status_codes": []
+      },
+      "B": {
+        "gas": "Air",
+        "mass_flow_sccm": 0.0,
+        "raw": "B +014.58 +031.09 +0.0000 +0.0000 +0.0000    Air",
+        "setpoint_sccm": 0.0,
+        "status_codes": []
+      },
+      "C": {
+        "gas": "Air",
+        "mass_flow_sccm": 0.0,
+        "raw": "C +002.88 +030.75 +0.0000 +0.0000 +0.0000    Air",
+        "setpoint_sccm": 0.0,
+        "status_codes": []
+      }
+    },
+    "alicat_data_frames": {
+      "A": [
+        "A D00 ID_ NAME______________________ TYPE_______ WIDTH NOTES___________________\rA D01 700 Unit ID                    string          1                         \rA D02 002 Abs Press                  s decimal     7/2 010 02 PSIA             \rA D03 003 Flow Temp                  s decimal     7/2 002 02 `C               \rA D04 004 Volu Flow                  s decimal     7/4 007 02 LPM              \rA D05 005 Mass Flow                  s decimal     7/4 037 02 NLPM             \rA D06 037 Mass Flow Setpt            s decimal     7/4 037 02 NLPM             \rA D07 703 Gas                        string          6                         \rA D08 701 *Error                     string          3 ADC                     \rA D09 702 *Status                    string          3 OPL                     \rA D10 702 *Status                    string          3 POV                     \rA D11 702 *Status                    string          3 P2O                     \rA D12 702 *Status                    string          3 TOV                     \rA D13 702 *Status                    string          3 VOV                     \rA D14 702 *Status                    string          3 MOV                     \rA D15 702 *Status                    string          3 TMF                     \rA D16 702 *Status                    string          3 OVR                     \rA D17 702 *Status                    string          3 COM                     \rA D18 702 *Status                    string          3 HLD                     \rA D19 702 *Status                    string          3 EXH                     \rA D20 702 *Status                    string          3 GTA                     \rA D21 702 *Status                    string          3 LCK"
+      ],
+      "B": [
+        "B D00 ID_ NAME______________________ TYPE_______ WIDTH NOTES___________________\rB D01 700 Unit ID                    string          1                         \rB D02 002 Abs Press                  s decimal     7/2 010 02 PSIA             \rB D03 003 Flow Temp                  s decimal     7/2 002 02 `C               \rB D04 004 Volu Flow                  s decimal     7/4 007 02 LPM              \rB D05 005 Mass Flow                  s decimal     7/4 037 02 NLPM             \rB D06 037 Mass Flow Setpt            s decimal     7/4 037 02 NLPM             \rB D07 703 Gas                        string          6                         \rB D08 701 *Error                     string          3 ADC                     \rB D09 702 *Status                    string          3 OPL                     \rB D10 702 *Status                    string          3 POV                     \rB D11 702 *Status                    string          3 P2O                     \rB D12 702 *Status                    string          3 TOV                     \rB D13 702 *Status                    string          3 VOV                     \rB D14 702 *Status                    string          3 MOV                     \rB D15 702 *Status                    string          3 TMF                     \rB D16 702 *Status                    string          3 OVR                     \rB D17 702 *Status                    string          3 COM                     \rB D18 702 *Status                    string          3 HLD                     \rB D19 702 *Status                    string          3 EXH                     \rB D20 702 *Status                    string          3 GTA                     \rB D21 702 *Status                    string          3 LCK"
+      ],
+      "C": [
+        "C D00 ID_ NAME______________________ TYPE_______ WIDTH NOTES___________________\rC D01 700 Unit ID                    string          1                         \rC D02 002 Abs Press                  s decimal     7/2 010 02 PSIA             \rC D03 003 Flow Temp                  s decimal     7/2 002 02 `C               \rC D04 004 Volu Flow                  s decimal     7/4 007 02 LPM              \rC D05 005 Mass Flow                  s decimal     7/4 037 02 NLPM             \rC D06 037 Mass Flow Setpt            s decimal     7/4 037 02 NLPM             \rC D07 703 Gas                        string          6                         \rC D08 701 *Error                     string          3 ADC                     \rC D09 702 *Status                    string          3 OPL                     \rC D10 702 *Status                    string          3 POV                     \rC D11 702 *Status                    string          3 P2O                     \rC D12 702 *Status                    string          3 TOV                     \rC D13 702 *Status                    string          3 VOV                     \rC D14 702 *Status                    string          3 MOV                     \rC D15 702 *Status                    string          3 TMF                     \rC D16 702 *Status                    string          3 OVR                     \rC D17 702 *Status                    string          3 COM                     \rC D18 702 *Status                    string          3 HLD                     \rC D19 702 *Status                    string          3 EXH                     \rC D20 702 *Status                    string          3 GTA                     \rC D21 702 *Status                    string          3 LCK"
+      ]
+    },
+    "baud_rate": 19200,
+    "hardware_access": "read_only_queries",
+    "ni": {
+      "Dev1": {
+        "product_type": "USB-6001",
+        "serial_num": 34887710
+      },
+      "Dev2": {
+        "product_type": "USB-6001",
+        "serial_num": 34887797
+      }
+    },
+    "serial_port": "COM6"
+  }
+}

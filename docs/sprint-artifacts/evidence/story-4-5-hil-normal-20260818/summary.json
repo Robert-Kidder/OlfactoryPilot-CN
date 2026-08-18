@@ -1,0 +1,127 @@
+{
+  "actual_result": "success",
+  "assertions": {
+    "a_fault_never_writes_selector": true,
+    "expected_shutdown_result": true,
+    "odor_close_precedes_terminal_zero_all": true,
+    "selector_write_at_most_once": true,
+    "valid_a_receipt_precedes_selector": true,
+    "valid_a_write_precedes_selector": true
+  },
+  "audit_errors": [],
+  "authorization_cursor": 49,
+  "authorization_total": 69,
+  "authorization_violations": [],
+  "automated_verification_passed": true,
+  "expected_result": "success",
+  "fault_oracle_passed": true,
+  "final_readback": {
+    "A": {
+      "gas": "Air",
+      "mass_flow_sccm": 0.0,
+      "raw": "A +014.58 +030.86 +0.0000 +0.0000 +0.0000    Air",
+      "setpoint_sccm": 0.0,
+      "status_codes": []
+    },
+    "B": {
+      "gas": "Air",
+      "mass_flow_sccm": 0.0,
+      "raw": "B +014.58 +031.09 +0.0000 +0.0000 +0.0000    Air",
+      "setpoint_sccm": 0.0,
+      "status_codes": []
+    },
+    "C": {
+      "gas": "Air",
+      "mass_flow_sccm": 0.0,
+      "raw": "C +002.88 +030.75 +0.0000 +0.0000 +0.0000    Air",
+      "setpoint_sccm": 0.0,
+      "status_codes": []
+    }
+  },
+  "final_readback_error": "",
+  "final_state": {
+    "alicat_readback": {
+      "A": {
+        "gas": "Air",
+        "mass_flow_sccm": 0.0,
+        "raw": "A +014.58 +030.86 +0.0000 +0.0000 +0.0000    Air",
+        "setpoint_sccm": 0.0,
+        "status_codes": []
+      },
+      "B": {
+        "gas": "Air",
+        "mass_flow_sccm": 0.0,
+        "raw": "B +014.58 +031.09 +0.0000 +0.0000 +0.0000    Air",
+        "setpoint_sccm": 0.0,
+        "status_codes": []
+      },
+      "C": {
+        "gas": "Air",
+        "mass_flow_sccm": 0.0,
+        "raw": "C +002.88 +030.75 +0.0000 +0.0000 +0.0000    Air",
+        "setpoint_sccm": 0.0,
+        "status_codes": []
+      }
+    },
+    "alicat_readback_error": "",
+    "all_odors_requested_low": true,
+    "electronic_ack_is_not_mechanical_evidence": true,
+    "flows_sccm_from_confirmed_writes": {
+      "A": 0.0,
+      "B": 0.0,
+      "C": 0.0
+    },
+    "odor_valves_last_successful_requested_level": {
+      "1": false,
+      "10": false,
+      "11": false,
+      "12": false,
+      "13": false,
+      "14": false,
+      "15": false,
+      "16": false,
+      "17": false,
+      "18": false,
+      "19": false,
+      "2": false,
+      "20": false,
+      "3": false,
+      "4": false,
+      "5": false,
+      "6": false,
+      "7": false,
+      "8": false,
+      "9": false
+    },
+    "selector": {
+      "delegate_success": true,
+      "exposed_success": true,
+      "last_requested_level": false,
+      "last_successful_requested_level": false,
+      "mechanical_observation": "持续气流",
+      "requested_route": "compensation",
+      "software_evidence": "compensation",
+      "target": "Dev2/P1.0",
+      "uncertain": false
+    }
+  },
+  "operator_observation": "持续气流",
+  "operator_observation_passed": true,
+  "operator_observation_required": true,
+  "overall_result": "success",
+  "owner_handoff": {
+    "ai_released": true,
+    "complete": true,
+    "do_handed_off": true,
+    "flow_accepting": false,
+    "lease_kind": "idle",
+    "lease_released": true,
+    "maintenance_actual": true,
+    "maintenance_reported": true,
+    "serial_resources_in_use": false
+  },
+  "safe_stop_status": "completed",
+  "scenario": "normal",
+  "setup_error": "",
+  "verification_passed": true
+}

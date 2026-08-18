@@ -1,0 +1,750 @@
+{
+  "authorization_token": "STORY45:normal:154e379da400b326162f84097b79270a5f455e0c:2b2013664f802d4fbda9351e6a902e5ee788c046fe59e0beafd94dcdc793af92",
+  "candidate": {
+    "clean": true,
+    "commit": "154e379da400b326162f84097b79270a5f455e0c",
+    "status_porcelain": [],
+    "tree": "5096759d93f64542a6fa72c7a6d7ced3743d3440"
+  },
+  "effective_config": {
+    "alicat_unit_ids": {
+      "A": "a",
+      "B": "b",
+      "C": "c"
+    },
+    "expected_ni": {
+      "Dev1": {
+        "product_type": "USB-6001",
+        "serial_num": 34887710
+      },
+      "Dev2": {
+        "product_type": "USB-6001",
+        "serial_num": 34887797
+      }
+    },
+    "odor_targets": [
+      "Dev1/P0.0",
+      "Dev1/P0.1",
+      "Dev1/P0.2",
+      "Dev1/P0.3",
+      "Dev1/P0.4",
+      "Dev1/P0.5",
+      "Dev1/P0.6",
+      "Dev1/P0.7",
+      "Dev1/P1.0",
+      "Dev1/P1.1",
+      "Dev1/P1.2",
+      "Dev1/P1.3",
+      "Dev2/P0.0",
+      "Dev2/P0.1",
+      "Dev2/P0.2",
+      "Dev2/P0.3",
+      "Dev2/P0.4",
+      "Dev2/P0.5",
+      "Dev2/P0.6",
+      "Dev2/P0.7"
+    ],
+    "selector": "Dev2/P1.0",
+    "values": {
+      "actuation_emergency_close_timeout_ms": 500,
+      "actuation_shutdown_timeout_ms": 2000,
+      "actuation_write_timeout_ms": 100,
+      "alicat_flow_field": "mass_flow",
+      "alicat_flow_unit": "A",
+      "alicat_readback_scale": 1000.0,
+      "alicat_setpoint_scale": 0.001,
+      "alicat_setpoint_tolerance": 0.05,
+      "alicat_setpoint_verify_delay_s": 0.1,
+      "alicat_setpoint_verify_retries": 3,
+      "alicat_timeout_s": 0.2,
+      "baud_rate": 19200,
+      "hardware_variant": "20-channel",
+      "serial_port": "COM6"
+    }
+  },
+  "effective_config_sha256": "cc85198cb7a1d4d5a4e8c14a0a174be0832b4e1e9b8cf831fd7f193f2577621f",
+  "expected_a": {
+    "full_scale_sccm": 5000.0,
+    "model": "MC-5NLPM-D",
+    "serial": "486285"
+  },
+  "expected_ni": {
+    "Dev1": {
+      "product_type": "USB-6001",
+      "serial_num": 34887710
+    },
+    "Dev2": {
+      "product_type": "USB-6001",
+      "serial_num": 34887797
+    }
+  },
+  "gas": "Air",
+  "manifest_sha256": "2b2013664f802d4fbda9351e6a902e5ee788c046fe59e0beafd94dcdc793af92",
+  "no_odor_material": true,
+  "no_subject": true,
+  "normal_parameters": {
+    "confirmed_full_scale_sccm": 5000.0,
+    "flow_channel": "A",
+    "flow_sccm": 2500.0,
+    "must_not_block_outlet": true,
+    "observation_seconds": 20.0,
+    "operator_distance_cm": [
+      2,
+      5
+    ],
+    "representative_valve": 2,
+    "stable_fraction": 0.9
+  },
+  "odor_targets": [
+    "Dev1/P0.0",
+    "Dev1/P0.1",
+    "Dev1/P0.2",
+    "Dev1/P0.3",
+    "Dev1/P0.4",
+    "Dev1/P0.5",
+    "Dev1/P0.6",
+    "Dev1/P0.7",
+    "Dev1/P1.0",
+    "Dev1/P1.1",
+    "Dev1/P1.2",
+    "Dev1/P1.3",
+    "Dev2/P0.0",
+    "Dev2/P0.1",
+    "Dev2/P0.2",
+    "Dev2/P0.3",
+    "Dev2/P0.4",
+    "Dev2/P0.5",
+    "Dev2/P0.6",
+    "Dev2/P0.7"
+  ],
+  "scenario": "normal",
+  "schema": "story-4.5-live-manifest-v2",
+  "selector": {
+    "odor_level": true,
+    "safe_level": false,
+    "target": "Dev2/P1.0"
+  },
+  "writes": [
+    {
+      "comp": false,
+      "kind": "digital",
+      "optional": true,
+      "phase": "setup",
+      "sequence": 1,
+      "target": "Dev1/P0.0",
+      "value": false
+    },
+    {
+      "comp": false,
+      "kind": "digital",
+      "optional": true,
+      "phase": "setup",
+      "sequence": 2,
+      "target": "Dev1/P0.1",
+      "value": false
+    },
+    {
+      "comp": false,
+      "kind": "digital",
+      "optional": true,
+      "phase": "setup",
+      "sequence": 3,
+      "target": "Dev1/P0.2",
+      "value": false
+    },
+    {
+      "comp": false,
+      "kind": "digital",
+      "optional": true,
+      "phase": "setup",
+      "sequence": 4,
+      "target": "Dev1/P0.3",
+      "value": false
+    },
+    {
+      "comp": false,
+      "kind": "digital",
+      "optional": true,
+      "phase": "setup",
+      "sequence": 5,
+      "target": "Dev1/P0.4",
+      "value": false
+    },
+    {
+      "comp": false,
+      "kind": "digital",
+      "optional": true,
+      "phase": "setup",
+      "sequence": 6,
+      "target": "Dev1/P0.5",
+      "value": false
+    },
+    {
+      "comp": false,
+      "kind": "digital",
+      "optional": true,
+      "phase": "setup",
+      "sequence": 7,
+      "target": "Dev1/P0.6",
+      "value": false
+    },
+    {
+      "comp": false,
+      "kind": "digital",
+      "optional": true,
+      "phase": "setup",
+      "sequence": 8,
+      "target": "Dev1/P0.7",
+      "value": false
+    },
+    {
+      "comp": false,
+      "kind": "digital",
+      "optional": true,
+      "phase": "setup",
+      "sequence": 9,
+      "target": "Dev1/P1.0",
+      "value": false
+    },
+    {
+      "comp": false,
+      "kind": "digital",
+      "optional": true,
+      "phase": "setup",
+      "sequence": 10,
+      "target": "Dev1/P1.1",
+      "value": false
+    },
+    {
+      "comp": false,
+      "kind": "digital",
+      "optional": true,
+      "phase": "setup",
+      "sequence": 11,
+      "target": "Dev1/P1.2",
+      "value": false
+    },
+    {
+      "comp": false,
+      "kind": "digital",
+      "optional": true,
+      "phase": "setup",
+      "sequence": 12,
+      "target": "Dev1/P1.3",
+      "value": false
+    },
+    {
+      "comp": false,
+      "kind": "digital",
+      "optional": true,
+      "phase": "setup",
+      "sequence": 13,
+      "target": "Dev2/P0.0",
+      "value": false
+    },
+    {
+      "comp": false,
+      "kind": "digital",
+      "optional": true,
+      "phase": "setup",
+      "sequence": 14,
+      "target": "Dev2/P0.1",
+      "value": false
+    },
+    {
+      "comp": false,
+      "kind": "digital",
+      "optional": true,
+      "phase": "setup",
+      "sequence": 15,
+      "target": "Dev2/P0.2",
+      "value": false
+    },
+    {
+      "comp": false,
+      "kind": "digital",
+      "optional": true,
+      "phase": "setup",
+      "sequence": 16,
+      "target": "Dev2/P0.3",
+      "value": false
+    },
+    {
+      "comp": false,
+      "kind": "digital",
+      "optional": true,
+      "phase": "setup",
+      "sequence": 17,
+      "target": "Dev2/P0.4",
+      "value": false
+    },
+    {
+      "comp": false,
+      "kind": "digital",
+      "optional": true,
+      "phase": "setup",
+      "sequence": 18,
+      "target": "Dev2/P0.5",
+      "value": false
+    },
+    {
+      "comp": false,
+      "kind": "digital",
+      "optional": true,
+      "phase": "setup",
+      "sequence": 19,
+      "target": "Dev2/P0.6",
+      "value": false
+    },
+    {
+      "comp": false,
+      "kind": "digital",
+      "optional": true,
+      "phase": "setup",
+      "sequence": 20,
+      "target": "Dev2/P0.7",
+      "value": false
+    },
+    {
+      "comp": false,
+      "kind": "digital",
+      "optional": true,
+      "phase": "setup",
+      "sequence": 21,
+      "target": "Dev2/P1.0",
+      "value": false
+    },
+    {
+      "comp": false,
+      "kind": "digital",
+      "optional": true,
+      "phase": "setup",
+      "sequence": 22,
+      "target": "Dev2/P1.0",
+      "value": true
+    },
+    {
+      "comp": false,
+      "kind": "digital",
+      "optional": true,
+      "phase": "setup",
+      "sequence": 23,
+      "target": "Dev1/P0.1",
+      "value": true
+    },
+    {
+      "comp": false,
+      "kind": "flow",
+      "optional": true,
+      "phase": "setup",
+      "sequence": 24,
+      "target": "A",
+      "value": 2500.0
+    },
+    {
+      "comp": false,
+      "kind": "flow",
+      "optional": false,
+      "phase": "shutdown",
+      "sequence": 25,
+      "target": "A",
+      "value": 0.0
+    },
+    {
+      "comp": false,
+      "kind": "digital",
+      "optional": true,
+      "phase": "shutdown",
+      "sequence": 26,
+      "target": "Dev2/P1.0",
+      "value": false
+    },
+    {
+      "comp": false,
+      "kind": "digital",
+      "optional": false,
+      "phase": "shutdown",
+      "sequence": 27,
+      "target": "Dev1/P0.0",
+      "value": false
+    },
+    {
+      "comp": false,
+      "kind": "digital",
+      "optional": false,
+      "phase": "shutdown",
+      "sequence": 28,
+      "target": "Dev1/P0.1",
+      "value": false
+    },
+    {
+      "comp": false,
+      "kind": "digital",
+      "optional": false,
+      "phase": "shutdown",
+      "sequence": 29,
+      "target": "Dev1/P0.2",
+      "value": false
+    },
+    {
+      "comp": false,
+      "kind": "digital",
+      "optional": false,
+      "phase": "shutdown",
+      "sequence": 30,
+      "target": "Dev1/P0.3",
+      "value": false
+    },
+    {
+      "comp": false,
+      "kind": "digital",
+      "optional": false,
+      "phase": "shutdown",
+      "sequence": 31,
+      "target": "Dev1/P0.4",
+      "value": false
+    },
+    {
+      "comp": false,
+      "kind": "digital",
+      "optional": false,
+      "phase": "shutdown",
+      "sequence": 32,
+      "target": "Dev1/P0.5",
+      "value": false
+    },
+    {
+      "comp": false,
+      "kind": "digital",
+      "optional": false,
+      "phase": "shutdown",
+      "sequence": 33,
+      "target": "Dev1/P0.6",
+      "value": false
+    },
+    {
+      "comp": false,
+      "kind": "digital",
+      "optional": false,
+      "phase": "shutdown",
+      "sequence": 34,
+      "target": "Dev1/P0.7",
+      "value": false
+    },
+    {
+      "comp": false,
+      "kind": "digital",
+      "optional": false,
+      "phase": "shutdown",
+      "sequence": 35,
+      "target": "Dev1/P1.0",
+      "value": false
+    },
+    {
+      "comp": false,
+      "kind": "digital",
+      "optional": false,
+      "phase": "shutdown",
+      "sequence": 36,
+      "target": "Dev1/P1.1",
+      "value": false
+    },
+    {
+      "comp": false,
+      "kind": "digital",
+      "optional": false,
+      "phase": "shutdown",
+      "sequence": 37,
+      "target": "Dev1/P1.2",
+      "value": false
+    },
+    {
+      "comp": false,
+      "kind": "digital",
+      "optional": false,
+      "phase": "shutdown",
+      "sequence": 38,
+      "target": "Dev1/P1.3",
+      "value": false
+    },
+    {
+      "comp": false,
+      "kind": "digital",
+      "optional": false,
+      "phase": "shutdown",
+      "sequence": 39,
+      "target": "Dev2/P0.0",
+      "value": false
+    },
+    {
+      "comp": false,
+      "kind": "digital",
+      "optional": false,
+      "phase": "shutdown",
+      "sequence": 40,
+      "target": "Dev2/P0.1",
+      "value": false
+    },
+    {
+      "comp": false,
+      "kind": "digital",
+      "optional": false,
+      "phase": "shutdown",
+      "sequence": 41,
+      "target": "Dev2/P0.2",
+      "value": false
+    },
+    {
+      "comp": false,
+      "kind": "digital",
+      "optional": false,
+      "phase": "shutdown",
+      "sequence": 42,
+      "target": "Dev2/P0.3",
+      "value": false
+    },
+    {
+      "comp": false,
+      "kind": "digital",
+      "optional": false,
+      "phase": "shutdown",
+      "sequence": 43,
+      "target": "Dev2/P0.4",
+      "value": false
+    },
+    {
+      "comp": false,
+      "kind": "digital",
+      "optional": false,
+      "phase": "shutdown",
+      "sequence": 44,
+      "target": "Dev2/P0.5",
+      "value": false
+    },
+    {
+      "comp": false,
+      "kind": "digital",
+      "optional": false,
+      "phase": "shutdown",
+      "sequence": 45,
+      "target": "Dev2/P0.6",
+      "value": false
+    },
+    {
+      "comp": false,
+      "kind": "digital",
+      "optional": false,
+      "phase": "shutdown",
+      "sequence": 46,
+      "target": "Dev2/P0.7",
+      "value": false
+    },
+    {
+      "comp": false,
+      "kind": "flow",
+      "optional": false,
+      "phase": "shutdown",
+      "sequence": 47,
+      "target": "B",
+      "value": 0.0
+    },
+    {
+      "comp": false,
+      "kind": "flow",
+      "optional": false,
+      "phase": "shutdown",
+      "sequence": 48,
+      "target": "C",
+      "value": 0.0
+    },
+    {
+      "comp": false,
+      "kind": "flow",
+      "optional": false,
+      "phase": "shutdown",
+      "sequence": 49,
+      "target": "A",
+      "value": 0.0
+    },
+    {
+      "comp": false,
+      "kind": "digital",
+      "optional": true,
+      "phase": "fallback",
+      "sequence": 50,
+      "target": "Dev1/P0.0",
+      "value": false
+    },
+    {
+      "comp": false,
+      "kind": "digital",
+      "optional": true,
+      "phase": "fallback",
+      "sequence": 51,
+      "target": "Dev1/P0.1",
+      "value": false
+    },
+    {
+      "comp": false,
+      "kind": "digital",
+      "optional": true,
+      "phase": "fallback",
+      "sequence": 52,
+      "target": "Dev1/P0.2",
+      "value": false
+    },
+    {
+      "comp": false,
+      "kind": "digital",
+      "optional": true,
+      "phase": "fallback",
+      "sequence": 53,
+      "target": "Dev1/P0.3",
+      "value": false
+    },
+    {
+      "comp": false,
+      "kind": "digital",
+      "optional": true,
+      "phase": "fallback",
+      "sequence": 54,
+      "target": "Dev1/P0.4",
+      "value": false
+    },
+    {
+      "comp": false,
+      "kind": "digital",
+      "optional": true,
+      "phase": "fallback",
+      "sequence": 55,
+      "target": "Dev1/P0.5",
+      "value": false
+    },
+    {
+      "comp": false,
+      "kind": "digital",
+      "optional": true,
+      "phase": "fallback",
+      "sequence": 56,
+      "target": "Dev1/P0.6",
+      "value": false
+    },
+    {
+      "comp": false,
+      "kind": "digital",
+      "optional": true,
+      "phase": "fallback",
+      "sequence": 57,
+      "target": "Dev1/P0.7",
+      "value": false
+    },
+    {
+      "comp": false,
+      "kind": "digital",
+      "optional": true,
+      "phase": "fallback",
+      "sequence": 58,
+      "target": "Dev1/P1.0",
+      "value": false
+    },
+    {
+      "comp": false,
+      "kind": "digital",
+      "optional": true,
+      "phase": "fallback",
+      "sequence": 59,
+      "target": "Dev1/P1.1",
+      "value": false
+    },
+    {
+      "comp": false,
+      "kind": "digital",
+      "optional": true,
+      "phase": "fallback",
+      "sequence": 60,
+      "target": "Dev1/P1.2",
+      "value": false
+    },
+    {
+      "comp": false,
+      "kind": "digital",
+      "optional": true,
+      "phase": "fallback",
+      "sequence": 61,
+      "target": "Dev1/P1.3",
+      "value": false
+    },
+    {
+      "comp": false,
+      "kind": "digital",
+      "optional": true,
+      "phase": "fallback",
+      "sequence": 62,
+      "target": "Dev2/P0.0",
+      "value": false
+    },
+    {
+      "comp": false,
+      "kind": "digital",
+      "optional": true,
+      "phase": "fallback",
+      "sequence": 63,
+      "target": "Dev2/P0.1",
+      "value": false
+    },
+    {
+      "comp": false,
+      "kind": "digital",
+      "optional": true,
+      "phase": "fallback",
+      "sequence": 64,
+      "target": "Dev2/P0.2",
+      "value": false
+    },
+    {
+      "comp": false,
+      "kind": "digital",
+      "optional": true,
+      "phase": "fallback",
+      "sequence": 65,
+      "target": "Dev2/P0.3",
+      "value": false
+    },
+    {
+      "comp": false,
+      "kind": "digital",
+      "optional": true,
+      "phase": "fallback",
+      "sequence": 66,
+      "target": "Dev2/P0.4",
+      "value": false
+    },
+    {
+      "comp": false,
+      "kind": "digital",
+      "optional": true,
+      "phase": "fallback",
+      "sequence": 67,
+      "target": "Dev2/P0.5",
+      "value": false
+    },
+    {
+      "comp": false,
+      "kind": "digital",
+      "optional": true,
+      "phase": "fallback",
+      "sequence": 68,
+      "target": "Dev2/P0.6",
+      "value": false
+    },
+    {
+      "comp": false,
+      "kind": "digital",
+      "optional": true,
+      "phase": "fallback",
+      "sequence": 69,
+      "target": "Dev2/P0.7",
+      "value": false
+    }
+  ]
+}

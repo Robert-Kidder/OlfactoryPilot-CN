@@ -1,0 +1,28 @@
+{
+  "archive_date": "2026-08-18",
+  "archive_id": "story45-normal-20260818-211027-13556",
+  "archive_anchor_policy": "the user-authorized local Git commit containing this file anchors the envelope; no anchor exists while these files remain untracked",
+  "authorization_payload_digest": "2b2013664f802d4fbda9351e6a902e5ee788c046fe59e0beafd94dcdc793af92",
+  "candidate_commit": "154e379da400b326162f84097b79270a5f455e0c",
+  "candidate_tree": "5096759d93f64542a6fa72c7a6d7ced3743d3440",
+  "original_source": "%LOCALAPPDATA%\\Temp\\OlfactoryPilot-HIL\\runs\\story45-normal-20260818-211027-13556",
+  "raw_payload_hashes": {
+    "commands.jsonl": "857e8301bdab8cfc82242c0526a2f89f28076d47965d2025357be1defeab432f",
+    "final-readback.json": "fd4ae20615c3d2da5dd8abd48b139e964c9d03de9da0fdf9f032046b0e6c4254",
+    "final-state.json": "a166aeb8ada49df6265acadd84ed69e34868e44b43284f7659adaaa4887b9449",
+    "operator-observation.json": "ef84353a257a0840d25edb9d54619f1dc760c6ded0e7b4fc428c189689faad59",
+    "owner-handoff.json": "a32a8d9cda1b201e286457333bae506320e7d6355d6da5a6e9d62ddad977478a",
+    "preflight.json": "26539276bee2e73df556b3aca4158de17375f0b876659f369a17a4ba53b11d10",
+    "receipts.jsonl": "609cec629c45d10015281dfb6f0f7dae1474c4de12a3d7061942c503aa8821a7",
+    "run-manifest.json": "ed4fbd51daee35a6e2630bfa0a0712564bdd49980895bef478c40317f22b4795",
+    "shutdown-event.json": "4c96b871d81af80307472b7295e5739d5601fa4c6c41fa4da477b77354ab20b3",
+    "summary.json": "134617ceec2242d95b3e12c0002cefc6c659ef255bd063c7df8f2461ba879cdc",
+    "timeline.jsonl": "b7ec2049891efa51039c828fcf16e17f99cdac5543f6f301d0346e438dd21462"
+  },
+  "scenario": "normal",
+  "supplemental_record_hashes": {
+    "hashes.sha256": "daf6475a85be930488d8b1a756b105c5e35802664c77356b679155cb9452e959",
+    "operator-authorization.md": "46411bed6380f11a62aa04b1845034024c2933e784cdb834a4e00c1e79e43ec9",
+    "site-closure.md": "3fbb966e1267f721e26ec46ba3b4f627a7cdaac46e5fc96f701000f0b1cbe84c"
+  }
+}
