@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
 
 from app.models import AppState, Telemetry
 from app.views.calibration_view import CalibrationView
+from app.views.cleaning_view import CleaningView
 from app.views.pretest_view import PreTestView
 from app.views.protocol_view import ProtocolView
 from app.views.session_view import SessionView
@@ -72,6 +73,7 @@ class MainWindow(QMainWindow):
         )
         self.protocol_view = ProtocolView()
         self.session_view = SessionView()
+        self.cleaning_view = CleaningView()
         self.pretest_view.toggle_requested.connect(self.controller.handle_valve_toggle_request)
         self.pretest_view.apply_requested.connect(self.controller.handle_apply_request)
         self.pretest_view.valve_sequence_requested.connect(self.controller.handle_valve_sequence_request)
@@ -107,11 +109,33 @@ class MainWindow(QMainWindow):
         self.session_view.recovery_requested.connect(
             self.controller.handle_session_recovery_requested
         )
+        self.cleaning_view.candidate_changed.connect(
+            self.controller.handle_cleaning_candidate_changed
+        )
+        self.cleaning_view.save_requested.connect(
+            self.controller.handle_cleaning_save_requested
+        )
+        self.cleaning_view.revert_requested.connect(
+            self.controller.handle_cleaning_revert_requested
+        )
+        self.cleaning_view.start_requested.connect(
+            self.controller.handle_cleaning_start_requested
+        )
+        self.cleaning_view.stop_requested.connect(
+            self.controller.handle_cleaning_stop_requested
+        )
+        self.cleaning_view.recover_requested.connect(
+            self.controller.handle_cleaning_recover_requested
+        )
+        self.cleaning_view.output_requested.connect(
+            lambda: self.tabs.setCurrentWidget(self.session_view)
+        )
         self.tabs.addTab(self._build_tab("概览", "硬件连接、安全状态概览"), "概览")
         self.tabs.addTab(self.session_view, "文件")
         self.tabs.addTab(self.calibration_view, "校准")
         self.tabs.addTab(self.pretest_view, "预检")
         self.tabs.addTab(self.protocol_view, "协议")
+        self.tabs.addTab(self.cleaning_view, "清洗")
 
         container = QWidget()
         layout = QVBoxLayout()

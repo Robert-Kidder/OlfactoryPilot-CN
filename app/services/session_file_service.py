@@ -15,7 +15,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from app.models.session import SessionDescriptor, SessionPaths
+from app.models import CleaningOperationIdentity
+from app.models.session import (
+    MaintenanceDescriptor,
+    MaintenancePaths,
+    SessionDescriptor,
+    SessionPaths,
+)
 
 WINDOWS_PATH_BUDGET = 240
 MAX_COMPONENT_CHARS = 64
@@ -199,6 +205,12 @@ def _receipt_contract_reason(
     ):
         if not _is_strict_int(record.get(field), minimum=minimum):
             return f"receipt {field} 无效。"
+    safety_generation = record.get("safety_generation")
+    if safety_generation is not None and not _is_strict_int(
+        safety_generation,
+        minimum=0,
+    ):
+        return "receipt safety_generation 无效。"
     valve = record.get("valve")
     if not _is_strict_int(valve):
         return "receipt valve 无效。"
@@ -209,11 +221,23 @@ def _receipt_contract_reason(
         )
         action = record.get("action")
         category = record.get("category")
+        selector_safety_action = bool(
+            category == "safety"
+            and action in {"open", "close"}
+            and record.get("step_id") == "selector_safe"
+            and record.get("action_kind") == action
+            and isinstance(record.get("operation_id"), str)
+            and bool(record.get("operation_id"))
+            and _is_strict_int(record.get("generation"), minimum=0)
+        )
         legal_master_action = bool(
-            (category == "safety" and action == "close")
+            selector_safety_action
+            # Read-only compatibility for pre-Story-4.5 bundles. Runtime
+            # submission no longer permits generic valve=0 safety closes.
+            or (category == "safety" and action == "close")
             or (
                 category in {"warmup", "manual", "pretest"}
-                and action == "open"
+                and action in {"open", "close"}
             )
             or (
                 category == "master"
@@ -667,6 +691,128 @@ class SessionFileService:
             )
         raise SessionFileError(
             "会话文件名碰撞已达到 __999，请更换输出目录或稍后重试。",
+            stage="collision",
+            path=last_collision,
+        )
+
+    def reserve_maintenance(
+        self,
+        *,
+        output_dir: str | Path,
+        identity: CleaningOperationIdentity,
+        plan_snapshot: dict[str, Any],
+        step_count: int,
+    ) -> MaintenanceDescriptor:
+        experiment_root = self._normalize_output(output_dir, require_exists=True)
+        root = experiment_root / "maintenance"
+        try:
+            root.mkdir(exist_ok=True)
+        except Exception as exc:
+            raise SessionFileError(
+                f"无法创建 maintenance 根目录：{exc}。请检查输出目录权限。",
+                stage="create_maintenance_root",
+                path=root,
+            ) from exc
+        started = self._clock()
+        if started.tzinfo is None or started.utcoffset() is None:
+            started = started.astimezone()
+        timestamp_text = started.strftime("%Y%m%d-%H%M%S-%f")[:-3]
+        operation_component = sanitize_windows_component(identity.operation_id)
+        base_stem = f"{timestamp_text}_cleaning_{operation_component}"
+        last_collision: Path | None = None
+        for collision in range(1000):
+            suffix = "" if collision == 0 else f"__{collision:03d}"
+            stem = base_stem + suffix
+            staging = root / f".{stem}.maintenance.part"
+            final = root / stem
+            log_path = staging / f"{stem}.log"
+            manifest_path = staging / "manifest.json"
+            if max(
+                len(str(log_path)),
+                len(str(final / log_path.name)),
+                len(str(manifest_path)),
+            ) > WINDOWS_PATH_BUDGET:
+                raise SessionFileError(
+                    "maintenance bundle 路径超过 Windows 安全预算，请缩短输出目录。",
+                    stage="path_budget",
+                    path=staging,
+                )
+            with self._active_lock:
+                try:
+                    self._fault("create_staging", staging)
+                    staging.mkdir()
+                except FileExistsError:
+                    last_collision = staging
+                    continue
+                except Exception as exc:
+                    raise SessionFileError(
+                        f"无法创建 maintenance 工作目录：{exc}。",
+                        stage="create_staging",
+                        path=staging,
+                    ) from exc
+                if final.exists():
+                    try:
+                        staging.rmdir()
+                    except OSError as cleanup_exc:
+                        self._orphan_staging.add(staging.resolve(strict=False))
+                        raise SessionFileError(
+                            "maintenance 碰撞目录无法安全清理，已保留供恢复。",
+                            stage="collision_cleanup",
+                            path=staging,
+                        ) from cleanup_exc
+                    last_collision = final
+                    continue
+                self._active_staging.add(staging.resolve(strict=False))
+            try:
+                self._create_owner_marker(
+                    staging / OWNER_MARKER_NAME,
+                    {
+                        "schema": "olfactorypilot.maintenance-owner",
+                        "schema_version": 1,
+                        "operation_id": identity.operation_id,
+                        "operation_generation": identity.generation,
+                        "stem": stem,
+                    },
+                )
+                self._create_exclusive(log_path, "create_log", "maintenance 日志文件")
+                self._create_manifest(
+                    manifest_path,
+                    {
+                        "schema": "maintenance-v1",
+                        "status": "recording",
+                        "operation_id": identity.operation_id,
+                        "operation_generation": identity.generation,
+                        "stem": stem,
+                        "log_file": log_path.name,
+                        "started_at": started.isoformat(timespec="milliseconds"),
+                    },
+                )
+            except SessionFileError:
+                self.mark_inactive(staging)
+                self._orphan_staging.add(staging.resolve(strict=False))
+                raise
+            paths = MaintenancePaths(
+                output_dir=root,
+                staging_dir=staging,
+                final_dir=final,
+                log_path=log_path,
+                manifest_path=manifest_path,
+                final_log_path=final / log_path.name,
+                final_manifest_path=final / manifest_path.name,
+            )
+            return MaintenanceDescriptor(
+                operation_id=identity.operation_id,
+                generation=identity.generation,
+                timestamp_text=timestamp_text,
+                started_at=started.timestamp(),
+                started_at_iso=started.isoformat(timespec="milliseconds"),
+                stem=stem,
+                paths=paths,
+                plan_snapshot=plan_snapshot,
+                step_count=int(step_count),
+            )
+        raise SessionFileError(
+            "maintenance 文件名碰撞已达到 __999，请更换输出目录或稍后重试。",
             stage="collision",
             path=last_collision,
         )
@@ -1292,7 +1438,7 @@ class SessionFileService:
         root = self._normalize_output(output_dir, require_exists=True)
         if cancel_event is not None and cancel_event.is_set():
             return ()
-        candidates: list[tuple[Path, BundleValidation]] = []
+        candidates: list[tuple[Path, BundleValidation, Path]] = []
         findings: list[RecoveryFinding] = []
         for path in root.iterdir():
             if cancel_event is not None and cancel_event.is_set():
@@ -1356,15 +1502,59 @@ class SessionFileService:
                 if cancel_event is not None and cancel_event.is_set():
                     return ()
             if not validation.complete:
-                candidates.append((path, validation))
+                candidates.append((path, validation, root))
 
-        for path, validation in candidates:
+        maintenance_root = root / "maintenance"
+        if maintenance_root.is_dir():
+            for path in maintenance_root.iterdir():
+                if path.name == "recovery" or not path.is_dir():
+                    continue
+                resolved = path.resolve(strict=False)
+                with self._active_lock:
+                    if resolved in self._active_staging:
+                        continue
+                is_staging = path.name.startswith(".") and path.name.endswith(
+                    ".maintenance.part"
+                )
+                stem = (
+                    path.name[1 : -len(".maintenance.part")]
+                    if is_staging
+                    else path.name
+                )
+                manifest = self._maintenance_manifest_identity(
+                    path / "manifest.json",
+                    expected_stem=stem,
+                    cancel_event=cancel_event,
+                )
+                owner = self._maintenance_owner_identity(
+                    path / OWNER_MARKER_NAME,
+                    expected_stem=stem,
+                    cancel_event=cancel_event,
+                )
+                with self._active_lock:
+                    known_orphan = resolved in self._orphan_staging
+                if manifest is None and owner is None and not known_orphan:
+                    continue
+                validation = (
+                    BundleValidation(
+                        path,
+                        False,
+                        "发现本程序创建但未完成的 .maintenance.part 工作目录。",
+                        self._last_sequence(manifest or {}),
+                    )
+                    if is_staging
+                    else self.validate_maintenance_bundle(path)
+                )
+                if not validation.complete:
+                    candidates.append((path, validation, maintenance_root))
+
+        for path, validation, quarantine_root in candidates:
             if cancel_event is not None and cancel_event.is_set():
                 return tuple(findings)
             with self._active_lock:
                 if path.resolve(strict=False) in self._active_staging:
                     continue
-            quarantined = self._quarantine(root, path)
+            quarantined = self._quarantine(quarantine_root, path)
             if quarantined is not None:
                 with self._active_lock:
                     self._orphan_staging.discard(
@@ -1379,6 +1569,98 @@ class SessionFileService:
                 )
             )
         return tuple(findings)
+
+    def validate_maintenance_bundle(
+        self,
+        path: str | Path,
+    ) -> BundleValidation:
+        bundle = Path(path)
+        manifest_path = bundle / "manifest.json"
+        try:
+            manifest = _read_json_limited(manifest_path)
+        except Exception as exc:
+            return BundleValidation(bundle, False, f"maintenance manifest 无法读取：{exc}")
+        if not isinstance(manifest, dict):
+            return BundleValidation(bundle, False, "maintenance manifest 根必须是对象。")
+        if (
+            manifest.get("schema") != "maintenance-v1"
+            or manifest.get("status") != "complete"
+            or manifest.get("stem") != bundle.name
+            or not isinstance(manifest.get("operation_id"), str)
+            or not manifest.get("operation_id")
+            or not _is_strict_int(manifest.get("operation_generation"), minimum=1)
+            or manifest.get("operation_status") != "completed"
+            or manifest.get("outcome") not in {"completed", "aborted"}
+        ):
+            return BundleValidation(bundle, False, "maintenance manifest identity/status 无效。")
+        log_name = manifest.get("log_file")
+        if log_name != f"{bundle.name}.log":
+            return BundleValidation(bundle, False, "maintenance log_file 无效。")
+        if any(bundle.glob("*.raw")):
+            return BundleValidation(bundle, False, "maintenance bundle 不得包含 raw 文件。")
+        for field in (
+            "step_count",
+            "receipt_count",
+            "log_bytes",
+            "log_event_count",
+            "last_sequence",
+            "queue_high_water",
+            "dropped_count",
+        ):
+            if not _is_strict_int(manifest.get(field)):
+                return BundleValidation(bundle, False, f"maintenance {field} 无效。")
+        fences = manifest.get("producer_fences")
+        if (
+            not isinstance(fences, dict)
+            or set(fences) != {"actuation", "controller", "flow"}
+            or any(not _is_strict_int(value) for value in fences.values())
+        ):
+            return BundleValidation(bundle, False, "maintenance producer_fences 无效。")
+        log_path = bundle / log_name
+        digest = hashlib.sha256()
+        byte_count = 0
+        event_count = 0
+        receipt_count = 0
+        first_event = ""
+        last_event = ""
+        try:
+            with log_path.open("rb") as handle:
+                for raw_line in handle:
+                    byte_count += len(raw_line)
+                    digest.update(raw_line)
+                    if len(raw_line) > MAX_STREAM_LINE_BYTES:
+                        return BundleValidation(bundle, False, "maintenance log 单行过大。")
+                    record = _strict_json_loads(raw_line)
+                    if (
+                        not isinstance(record, dict)
+                        or record.get("schema") != "maintenance-v1.event"
+                        or record.get("operation_id") != manifest["operation_id"]
+                        or record.get("operation_generation")
+                        != manifest["operation_generation"]
+                    ):
+                        return BundleValidation(bundle, False, "maintenance log identity 无效。")
+                    event_count += 1
+                    if record.get("operation_sequence") != event_count:
+                        return BundleValidation(bundle, False, "maintenance log sequence 不连续。")
+                    if event_count == 1:
+                        first_event = str(record.get("event", ""))
+                    last_event = str(record.get("event", ""))
+                    if record.get("record_type") == "receipt":
+                        receipt_count += 1
+        except Exception as exc:
+            return BundleValidation(bundle, False, f"maintenance log 无法验证：{exc}")
+        if first_event != "maintenance_started" or last_event != "maintenance_closed":
+            return BundleValidation(bundle, False, "maintenance 生命周期事件不完整。")
+        if (
+            digest.hexdigest() != manifest.get("log_sha256")
+            or byte_count != manifest["log_bytes"]
+            or event_count != manifest["log_event_count"]
+            or event_count != manifest["last_sequence"]
+            or receipt_count != manifest["receipt_count"]
+            or manifest["dropped_count"] != 0
+        ):
+            return BundleValidation(bundle, False, "maintenance hash/count/sequence 不一致。")
+        return BundleValidation(bundle, True, last_sequence=event_count)
 
     @staticmethod
     def _session_manifest_identity(
@@ -1419,6 +1701,54 @@ class SessionFileService:
         ):
             return None
         return manifest
+
+    @staticmethod
+    def _maintenance_manifest_identity(
+        path: Path,
+        *,
+        expected_stem: str,
+        cancel_event: threading.Event | None = None,
+    ) -> dict[str, Any] | None:
+        try:
+            manifest = _read_json_limited(path, cancel_event=cancel_event)
+        except Exception:
+            return None
+        if not isinstance(manifest, dict):
+            return None
+        if (
+            manifest.get("schema") != "maintenance-v1"
+            or manifest.get("stem") != expected_stem
+            or not isinstance(manifest.get("operation_id"), str)
+            or not manifest.get("operation_id")
+            or not _is_strict_int(manifest.get("operation_generation"), minimum=1)
+            or manifest.get("log_file") != f"{expected_stem}.log"
+        ):
+            return None
+        return manifest
+
+    @staticmethod
+    def _maintenance_owner_identity(
+        path: Path,
+        *,
+        expected_stem: str,
+        cancel_event: threading.Event | None = None,
+    ) -> dict[str, Any] | None:
+        try:
+            owner = _read_json_limited(path, cancel_event=cancel_event)
+        except Exception:
+            return None
+        if not isinstance(owner, dict):
+            return None
+        if (
+            owner.get("schema") != "olfactorypilot.maintenance-owner"
+            or owner.get("schema_version") != 1
+            or owner.get("stem") != expected_stem
+            or not isinstance(owner.get("operation_id"), str)
+            or not owner.get("operation_id")
+            or not _is_strict_int(owner.get("operation_generation"), minimum=1)
+        ):
+            return None
+        return owner
 
     @staticmethod
     def _session_owner_identity(

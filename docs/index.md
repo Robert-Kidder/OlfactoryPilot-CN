@@ -16,6 +16,8 @@
 
 - [`ALICAT-MANUAL.md`](ALICAT-MANUAL.md)：由既有资料整理的 Alicat 串口命令参考，真实操作仍须按现场授权。
 - [`ManuelUtilisation_ProgOlfacto.pdf`](ManuelUtilisation_ProgOlfacto.pdf)：原法国 ProgOlfacto 软件说明书。
+- [`assets/diagrams/olfactometer-gas-path-original-2026-08-01.jpg`](assets/diagrams/olfactometer-gas-path-original-2026-08-01.jpg)：现场提供的原始气路示意图；A 后方不是独立两通总开关，而是把 A 切向气味总入口或补偿出口的三通选择阀。
+- [`assets/diagrams/gas-path-topology-2026-08-01.excalidraw`](assets/diagrams/gas-path-topology-2026-08-01.excalidraw)：可维护气路拓扑矢量转录；三通选择阀实物校正待同步后再作为当前图示依据。
 - [`implementation-readiness-report-2025-12-08.md`](implementation-readiness-report-2025-12-08.md)：2025-12-08 实施就绪规划门禁记录。
 
 ## Sprint 状态与跨 Story 记录
@@ -27,6 +29,8 @@
 - [`sprint-artifacts/epic-1-retrospective.md`](sprint-artifacts/epic-1-retrospective.md)：Epic 1 安全硬件基础复盘。
 - [`sprint-artifacts/epic-2-retro-2025-12-14.md`](sprint-artifacts/epic-2-retro-2025-12-14.md)：Epic 2 校准与手动控制复盘。
 - [`sprint-artifacts/epic-3-retro-2026-07-30.md`](sprint-artifacts/epic-3-retro-2026-07-30.md)：Epic 3 协议执行、低抖动动作与 session 记录复盘，以及 Epic 4 技术约束。
+- [`sprint-artifacts/sprint-change-proposal-2026-07-31.md`](sprint-artifacts/sprint-change-proposal-2026-07-31.md)：依据 Epic 3 复盘批准的 Epic 4 技术边界变更提案。
+- [`sprint-artifacts/epic-4-technical-boundary-2026-07-31.md`](sprint-artifacts/epic-4-technical-boundary-2026-07-31.md)：Epic 4 owner、lease、recording、配置事务、补偿状态机、并发测试与 HIL 冻结边界。
 
 ## Epic 1 Stories
 
@@ -57,6 +61,7 @@
 
 ## 可审计证据
 
+- [`sprint-artifacts/evidence/gas-path-requirements-2026-08-01.md`](sprint-artifacts/evidence/gas-path-requirements-2026-08-01.md)：A/B/C、气味通道 1–20、A 路三通样品/补偿选择阀、外置混合头及现场 HIL 极性确认记录。
 - [`sprint-artifacts/evidence/story-3-5-hil-closure-20260730.md`](sprint-artifacts/evidence/story-3-5-hil-closure-20260730.md)：Story 3.5 软件 Gate 与真实 NI HIL 最终闭环证据。
 - [`sprint-artifacts/evidence/atdd-checklist-3-3-manual-vs-ttl-trigger-modes.md`](sprint-artifacts/evidence/atdd-checklist-3-3-manual-vs-ttl-trigger-modes.md)：Story 3.3 已完成的 ATDD 设计与覆盖映射。
 - [`sprint-artifacts/evidence/spec-update-dev3-hardware-inventory-20260730.md`](sprint-artifacts/evidence/spec-update-dev3-hardware-inventory-20260730.md)：Dev3/USB-6501 现场硬件清单校正的冻结规格。

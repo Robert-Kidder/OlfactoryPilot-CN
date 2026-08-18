@@ -7,7 +7,8 @@ import subprocess
 import sys
 import threading
 import time
-from dataclasses import replace
+import uuid
+from dataclasses import asdict, replace
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -17,9 +18,20 @@ from PySide6.QtCore import QObject, Qt, QThread, QTimer, Signal, Slot
 from app.models import (
     ActuationCategory,
     AppState,
+    CleaningConfigSnapshot,
+    CleaningOperationIdentity,
+    CleaningOutcome,
+    CleaningResult,
+    CleaningSnapshot,
+    CleaningStatus,
+    CleaningViewSnapshot,
+    DeviceLeaseKind,
+    ExclusiveDeviceLease,
+    MaintenanceLeaseReleaseEvidence,
     ProtocolExecutionReadiness,
     ProtocolExecutionSnapshot,
     ProtocolExecutionStatus,
+    SafeStopIdentity,
     SafetyState,
 )
 from app.models.session import SessionState, SessionStatus, SessionViewSnapshot
@@ -29,6 +41,7 @@ from app.services import (
     AnalogInputFrame,
     BreathSampleBatch,
     CalibrationSession,
+    CleaningConfigStore,
     FlowApplyResult,
     FlowService,
     GatingService,
@@ -52,6 +65,8 @@ from app.workers import (
     InterlockSnapshot,
 )
 from app.workers.session_writer import (
+    MaintenanceReadinessLatch,
+    MaintenanceRecorderIngress,
     RecorderReadinessLatch,
     SessionRecorderIngress,
     SessionWriterConfig,
@@ -98,6 +113,8 @@ class MainController(QObject):
     _pretest_sequence_completed = Signal(str, list, object, bool, str)
     _startup_zero_completed = Signal(object)
     _session_finalized = Signal(object)
+    _maintenance_finalized = Signal(object)
+    _cleaning_config_saved = Signal(object, object)
 
     def __init__(
         self,
@@ -127,6 +144,7 @@ class MainController(QObject):
             retry_limit=int(shutdown_cfg.get("shutdown_retry_limit", 2)),
             retry_interval=float(shutdown_cfg.get("shutdown_retry_interval_s", 0.2)),
             record_path=self._resolve_record_path(shutdown_cfg),
+            selector=state.selector,
         )
         self.gating_service = GatingService(
             inhale_threshold=state.inhale_threshold,
@@ -139,6 +157,7 @@ class MainController(QObject):
             valve_variants=state.valve_variants,
             hardware_variant=state.hardware_variant,
             master_valve_line=state.master_valve_line,
+            selector=state.selector,
         )
         self.protocol_executor = ProtocolExecutor(
             gating_service=self.gating_service,
@@ -164,6 +183,10 @@ class MainController(QObject):
         self.actuation_adapter = ActuationDOAdapter(
             hal=hal_instance,
             target_resolver=self.valve_service.resolve_target,
+            selector_target=self.valve_service.selector_target or None,
+            selector_odor_level=(
+                True if state.selector is None else state.selector.odor_level
+            ),
             write_timeout_ms=int((config or {}).get("actuation_write_timeout_ms", 100)),
         )
         self.flow_service = FlowService(
@@ -171,11 +194,13 @@ class MainController(QObject):
             master_target=state.master_valve_line or None,
             master_writer=None,
         )
+        self.device_lease = ExclusiveDeviceLease()
         telemetry_hz = max(0.1, float(self.config.get("telemetry_hz", 5.0)))
         self.flow_worker = FlowWorker(
             self.flow_service,
             parent=self,
             airflow_poll_interval_s=1.0 / telemetry_hz,
+            device_lease=self.device_lease,
         )
         airflow_sink = getattr(worker, "consume_airflow_sample", None)
         if callable(airflow_sink):
@@ -189,10 +214,19 @@ class MainController(QObject):
             normal_queue_capacity=int((config or {}).get("actuation_normal_queue_capacity", 256)),
             flow_submitter=self.flow_worker.submit,
             metrics=ActuationMetrics(self.config),
+            cleaning_flow_ready_timeout_ms=int(
+                ((config or {}).get("cleaning") or {}).get(
+                    "flow_ready_timeout_ms",
+                    5000,
+                )
+            ),
             parent=self,
         )
         self.shutdown_service.actuation_worker = self.actuation_worker
         self.shutdown_service.flow_worker = self.flow_worker
+        self.shutdown_service.maintenance_handoff = (
+            self._handoff_maintenance_for_global_safe_stop
+        )
         self.shutdown_service.actuation_timeout_ms = int(
             (config or {}).get("actuation_shutdown_timeout_ms", 2000)
         )
@@ -218,6 +252,7 @@ class MainController(QObject):
         self._pending_plan_ui: dict[str, dict] = {}
         self._pending_flow_context: dict[str, dict] = {}
         self._last_flow_result: FlowApplyResult | None = None
+        self._startup_zero_confirmed = False
         self._pending_protocol_load = None
         self._last_document_load_success: bool | None = None
         self._protocol_lease_epoch: int | None = None
@@ -227,6 +262,28 @@ class MainController(QObject):
         self.session_file_service = SessionFileService(
             master_valve_line=state.master_valve_line
         )
+        self._cleaning_config_store: CleaningConfigStore | None = None
+        self._cleaning_config_error = ""
+        self._cleaning_save_in_progress = False
+        self._cleaning_save_thread: threading.Thread | None = None
+        self._cleaning_candidate: CleaningConfigSnapshot | None = None
+        self._cleaning_published: CleaningConfigSnapshot | None = None
+        self._cleaning_dirty = False
+        self._cleaning_output_root: Path | None = None
+        self._cleaning_generation = 0
+        self._cleaning_runtime = CleaningSnapshot()
+        self._cleaning_display_message = ""
+        self._cleaning_lease_token = None
+        self._cleaning_descriptor = None
+        self._cleaning_writer: SessionWriterWorker | None = None
+        self._cleaning_ingress: MaintenanceRecorderIngress | None = None
+        self._cleaning_readiness = MaintenanceReadinessLatch()
+        self._cleaning_controller_sequence = 0
+        self._cleaning_flow_sequence = 0
+        self._cleaning_finalize_event = threading.Event()
+        self._cleaning_finalize_result = None
+        self._cleaning_finalize_thread: threading.Thread | None = None
+        self._initialize_cleaning_config()
         self.recorder_readiness = RecorderReadinessLatch()
         self.session_writer: SessionWriterWorker | None = None
         self.session_ingress: SessionRecorderIngress | None = None
@@ -277,6 +334,15 @@ class MainController(QObject):
         self.actuation_worker.plan_result_ready.connect(self._handle_actuation_plan_result)
         self.flow_worker.result_ready.connect(self.actuation_worker.post_flow_result)
         self.actuation_worker.flow_result_ready.connect(self._handle_flow_command_result)
+        self.actuation_worker.cleaning_snapshot_ready.connect(
+            self._handle_cleaning_snapshot
+        )
+        self.actuation_worker.cleaning_result_ready.connect(
+            self._handle_cleaning_result
+        )
+        self.actuation_worker.protocol_safe_stop_handoff_requested.connect(
+            self._handle_protocol_safe_stop_handoff_requested
+        )
         self.actuation_worker.snapshot_ready.connect(self._handle_protocol_snapshot)
         self.actuation_worker.document_result_ready.connect(self._handle_document_result)
         self._protocol_snapshot = ProtocolExecutionSnapshot(
@@ -290,10 +356,43 @@ class MainController(QObject):
         self._pretest_sequence_completed.connect(self._handle_pretest_sequence_completed)
         self._startup_zero_completed.connect(self._handle_startup_zero_completed)
         self._session_finalized.connect(self._handle_session_finalized)
+        self._maintenance_finalized.connect(self._handle_maintenance_finalized)
+        self._cleaning_config_saved.connect(self._handle_cleaning_config_saved)
         self._breath_logger = logging.getLogger("breath_viz")
         self._protocol_tick_timer = QTimer(self)
         self._protocol_tick_timer.setInterval(50)
         self._protocol_tick_timer.timeout.connect(self.handle_protocol_executor_tick)
+
+    def _initialize_cleaning_config(self) -> None:
+        available = self.state.get_active_valve_map()
+        if not available or not isinstance(self.config.get("cleaning"), dict):
+            self._cleaning_config_error = "未找到清洗配置或当前硬件通道映射。"
+            return
+        local_path = (
+            self.config.get("_local_config_path")
+            or self.config.get("_config_write_path")
+            or self.config.get("_user_config_path")
+        )
+        try:
+            if local_path:
+                self._cleaning_config_store = CleaningConfigStore(
+                    effective_config=self.config,
+                    local_config_path=Path(local_path),
+                    available_channels=available,
+                )
+                snapshot = self._cleaning_config_store.snapshot
+            else:
+                snapshot = CleaningConfigSnapshot.from_effective_config(
+                    self.config,
+                    available_channels=available,
+                )
+            self._cleaning_published = snapshot
+            self._cleaning_candidate = snapshot
+        except Exception as exc:
+            self._cleaning_config_error = (
+                f"清洗配置加载失败：{exc}；安全动作：清洗保持禁用；"
+                "下一步：检查 cleaning 配置与本机覆盖文件。"
+            )
 
     def bind_view(self, view: MainWindow) -> None:
         self.view = view
@@ -313,6 +412,7 @@ class MainController(QObject):
         )
         self._refresh_toolbar_state()
         self._render_session_snapshot()
+        self._render_cleaning_snapshot()
         if hasattr(self.view, "pretest_view"):
             self.view.pretest_view.flow_sequence_requested.connect(self.handle_flow_sequence_request)
         if hasattr(self.view, "calibration_view"):
@@ -391,6 +491,11 @@ class MainController(QObject):
                 SessionWriterConfig.from_mapping(self.config).close_timeout_ms
                 / 1000.0
             )
+        if self._cleaning_writer is not None:
+            self.wait_for_cleaning_finalization(
+                SessionWriterConfig.from_mapping(self.config).close_timeout_ms
+                / 1000.0
+            )
 
     def shutdown_and_teardown(self) -> None:
         try:
@@ -433,6 +538,13 @@ class MainController(QObject):
                 message="测试/生命周期 teardown 已终止未收尾会话。",
             )
             writer.wait(timeout)
+        cleaning_writer = self._cleaning_writer
+        if cleaning_writer is not None and cleaning_writer.isRunning():
+            cleaning_writer.fail_from_producer(
+                stage="teardown",
+                message="生命周期 teardown 终止了未完成 maintenance 记录。",
+            )
+            cleaning_writer.wait(timeout)
         finalize_thread = self._session_finalize_thread
         if (
             finalize_thread is not None
@@ -440,6 +552,20 @@ class MainController(QObject):
             and finalize_thread.is_alive()
         ):
             finalize_thread.join(timeout / 1000.0)
+        cleaning_finalize_thread = self._cleaning_finalize_thread
+        if (
+            cleaning_finalize_thread is not None
+            and cleaning_finalize_thread is not threading.current_thread()
+            and cleaning_finalize_thread.is_alive()
+        ):
+            cleaning_finalize_thread.join(timeout / 1000.0)
+        cleaning_save_thread = self._cleaning_save_thread
+        if (
+            cleaning_save_thread is not None
+            and cleaning_save_thread is not threading.current_thread()
+            and cleaning_save_thread.is_alive()
+        ):
+            cleaning_save_thread.join(timeout / 1000.0)
         pretest_thread = self._pretest_thread
         if (
             pretest_thread is not None
@@ -456,11 +582,17 @@ class MainController(QObject):
         recovery = self._recovery_scan_worker
         writer = self.session_writer
         finalizer = self._session_finalize_thread
+        cleaning_writer = self._cleaning_writer
+        cleaning_finalizer = self._cleaning_finalize_thread
+        cleaning_saver = self._cleaning_save_thread
         pretest = self._pretest_thread
         return (
             (recovery is None or not recovery.isRunning())
             and (writer is None or not writer.isRunning())
             and (finalizer is None or not finalizer.is_alive())
+            and (cleaning_writer is None or not cleaning_writer.isRunning())
+            and (cleaning_finalizer is None or not cleaning_finalizer.is_alive())
+            and (cleaning_saver is None or not cleaning_saver.is_alive())
             and (pretest is None or not pretest.is_alive())
             and not self.actuation_worker.isRunning()
             and not self.worker.isRunning()
@@ -566,6 +698,7 @@ class MainController(QObject):
             if hasattr(self.view, "pretest_view"):
                 self.view.pretest_view.update_airflow(self.state.telemetry.airflow)
         self._refresh_toolbar_state()
+        self._render_cleaning_snapshot()
 
     @Slot(str)
     def handle_status(self, message: str) -> None:
@@ -1011,6 +1144,7 @@ class MainController(QObject):
             )
             self._drain_actuation_if_not_running()
         self._refresh_toolbar_state()
+        self._render_cleaning_snapshot()
 
     def request_self_check(self) -> None:
         """Trigger self-check from UI, keep thread-safe."""
@@ -1038,7 +1172,792 @@ class MainController(QObject):
         self._start_or_request_self_check()
         self._refresh_toolbar_state()
 
+    def _validate_cleaning_candidate(
+        self,
+        channels,
+        flow_sccm: float,
+        open_duration_s: float,
+        cycles: int,
+    ) -> CleaningConfigSnapshot:
+        values = tuple(int(channel) for channel in channels)
+        if self._cleaning_config_store is not None:
+            return self._cleaning_config_store.validate_candidate(
+                selected_channels=values,
+                flow_sccm=flow_sccm,
+                open_duration_s=open_duration_s,
+                cycles=cycles,
+            )
+        cleaning = dict(self.config.get("cleaning") or {})
+        cleaning.update(
+            {
+                "selected_channels": list(values),
+                "flow_sccm": float(flow_sccm),
+                "open_duration_s": float(open_duration_s),
+                "cycles": int(cycles),
+            }
+        )
+        effective = dict(self.config)
+        effective["cleaning"] = cleaning
+        return CleaningConfigSnapshot.from_effective_config(
+            effective,
+            available_channels=self.state.get_active_valve_map(),
+        )
+
+    @Slot(object, float, float, int)
+    def handle_cleaning_candidate_changed(
+        self,
+        channels,
+        flow_sccm: float,
+        open_duration_s: float,
+        cycles: int,
+    ) -> None:
+        try:
+            candidate = self._validate_cleaning_candidate(
+                channels,
+                flow_sccm,
+                open_duration_s,
+                cycles,
+            )
+        except Exception as exc:
+            self._cleaning_display_message = (
+                f"清洗配置无效：{exc}；安全动作：未发布且禁止启动；"
+                "下一步：修正参数或点击撤销修改。"
+            )
+            self._cleaning_dirty = True
+            self._render_cleaning_snapshot()
+            return
+        self._cleaning_candidate = candidate
+        self._cleaning_dirty = candidate != self._cleaning_published
+        self._cleaning_display_message = (
+            "配置有未保存修改，请先保存或撤销后再启动。"
+            if self._cleaning_dirty
+            else "配置与已保存版本一致。"
+        )
+        self._render_cleaning_snapshot()
+
+    @Slot(object, float, float, int)
+    def handle_cleaning_save_requested(
+        self,
+        channels,
+        flow_sccm: float,
+        open_duration_s: float,
+        cycles: int,
+    ) -> bool:
+        self.handle_cleaning_candidate_changed(
+            channels,
+            flow_sccm,
+            open_duration_s,
+            cycles,
+        )
+        if self.state.telemetry.connected or self.state.hardware_ready:
+            self._set_cleaning_status(
+                "保存失败：硬件仍处于连接状态；安全动作：活动配置保持不变；"
+                "下一步：先安全停止并断开硬件，再保存配置。"
+            )
+            return False
+        if (
+            self.device_lease.snapshot.kind != DeviceLeaseKind.IDLE
+            or self.session_state.status
+            in {SessionStatus.PREPARED, SessionStatus.RECORDING, SessionStatus.CLOSING}
+        ):
+            self._set_cleaning_status(
+                "保存失败：设备或会话仍被占用；安全动作：活动配置保持不变；"
+                "下一步：完成当前操作后重试。"
+            )
+            return False
+        if self._cleaning_config_store is None:
+            self._set_cleaning_status(
+                "保存失败：没有可写的本机配置路径；安全动作：活动配置保持不变；"
+                "下一步：使用 local_config.json 启动应用后重试。"
+            )
+            return False
+        if self._cleaning_save_in_progress:
+            self._set_cleaning_status("清洗配置正在保存，请等待事务完成。")
+            return False
+        selected = tuple(int(channel) for channel in channels)
+        store = self._cleaning_config_store
+        self._cleaning_save_in_progress = True
+        self._set_cleaning_status(
+            "正在原子保存清洗配置；安全动作：完成前仍使用旧的已发布快照。"
+        )
+
+        def save() -> None:
+            try:
+                saved = store.save(
+                    selected_channels=selected,
+                    flow_sccm=flow_sccm,
+                    open_duration_s=open_duration_s,
+                    cycles=cycles,
+                )
+            except Exception as exc:
+                self._cleaning_config_saved.emit(None, exc)
+            else:
+                self._cleaning_config_saved.emit(saved, None)
+
+        self._cleaning_save_thread = threading.Thread(
+            target=save,
+            name="cleaning-config-save",
+            daemon=True,
+        )
+        self._cleaning_save_thread.start()
+        return True
+
+    @Slot(object, object)
+    def _handle_cleaning_config_saved(self, saved, error) -> None:
+        self._cleaning_save_in_progress = False
+        if error is not None:
+            self._set_cleaning_status(
+                f"保存失败：{error}；安全动作：磁盘旧值与活动配置保持不变；"
+                "下一步：检查目录权限和参数后重试。"
+            )
+            return
+        self._cleaning_published = saved
+        self._cleaning_candidate = saved
+        self._cleaning_dirty = False
+        self._set_cleaning_status(
+            "已保存，关闭并重新启动软件后仍会保留；"
+            "安全动作：启动将只使用此已发布快照；"
+            "下一步：连接硬件并完成自检后可开始清洗。"
+        )
+
+    @Slot()
+    def handle_cleaning_revert_requested(self) -> None:
+        if self._cleaning_published is None:
+            return
+        self._cleaning_candidate = self._cleaning_published
+        self._cleaning_dirty = False
+        self._set_cleaning_status("已撤销未保存修改。")
+
+    def _cleaning_start_rejection(self) -> str:
+        config = self._cleaning_published
+        if config is None or self._cleaning_config_error:
+            return self._cleaning_config_error or "没有有效的已保存清洗配置。"
+        if not config.enabled:
+            return "清洗功能已在配置中禁用。"
+        if self._cleaning_dirty:
+            return "存在未保存修改，请先保存或撤销修改。"
+        if not config.selected_channels:
+            return "至少选择一路已配置清洗通道。"
+        if self._cleaning_output_root is None or not self._cleaning_output_root.is_dir():
+            return "请先在“文件”页选择有效的本地实验输出目录。"
+        if not self.state.telemetry.connected:
+            return "硬件未连接。"
+        if not self.state.hardware_ready:
+            return "硬件自检尚未通过。"
+        if not self.state.flow_setpoints_ready and not self._startup_zero_confirmed:
+            return "A/B/C 初始流量清零尚未确认。"
+        if self.state.telemetry.safety_state not in {"SAFE", "LOW_FLOW"}:
+            return (
+                f"当前安全状态为 {self.state.telemetry.safety_state}，"
+                "不是 SAFE/可恢复 LOW_FLOW。"
+            )
+        if self._unsafe_shutdown_latched:
+            return "存在未确认的上次关闭失败。"
+        if self.session_state.status in {
+            SessionStatus.PREPARED,
+            SessionStatus.RECORDING,
+            SessionStatus.CLOSING,
+        }:
+            return "会话已准备、记录中或关闭中。"
+        if self.device_lease.snapshot.kind != DeviceLeaseKind.IDLE:
+            return f"设备独占权当前属于 {self.device_lease.snapshot.kind.value}。"
+        if self._cleaning_runtime.status in {
+            CleaningStatus.PREPARING,
+            CleaningStatus.RUNNING,
+            CleaningStatus.STOPPING,
+        }:
+            return "当前清洗尚未安全终止。"
+        boundary = self._session_boundary_rejection()
+        if boundary:
+            return boundary
+        return ""
+
+    @Slot()
+    def handle_cleaning_start_requested(self) -> bool:
+        rejection = self._cleaning_start_rejection()
+        if rejection:
+            self._set_cleaning_status(
+                f"清洗未启动：{rejection}；安全动作：未开启任何阀门且未改变流量；"
+                "下一步：消除上述条件后重试。"
+            )
+            return False
+        config = self._cleaning_published
+        assert config is not None and self._cleaning_output_root is not None
+        self._cleaning_generation += 1
+        identity = CleaningOperationIdentity(
+            # 12 hex chars remain collision-resistant for local maintenance runs,
+            # while preserving the Windows path budget for bundle/log filenames.
+            operation_id=uuid.uuid4().hex[:12],
+            generation=self._cleaning_generation,
+        )
+        plan = config.build_plan(identity)
+        token = self.flow_worker.acquire_maintenance_lease(
+            identity.operation_id,
+            identity.generation,
+        )
+        if token is None:
+            self._set_cleaning_status(
+                "清洗未启动：无法原子取得 maintenance 独占权；"
+                "安全动作：未开启任何阀门且未改变流量；下一步：等待设备 owner 空闲后重试。"
+            )
+            return False
+        try:
+            descriptor = self.session_file_service.reserve_maintenance(
+                output_dir=self._cleaning_output_root,
+                identity=identity,
+                plan_snapshot=asdict(plan),
+                step_count=len(plan.steps),
+            )
+        except Exception as exc:
+            self.flow_worker.release_maintenance_lease(
+                token,
+                MaintenanceLeaseReleaseEvidence(True, True, True),
+            )
+            self._set_cleaning_status(
+                f"清洗未启动：维护记录目录预留失败（{exc}）；"
+                "安全动作：已释放独占权且未开启任何阀门；下一步：检查输出目录后重试。"
+            )
+            return False
+        writer = SessionWriterWorker(
+            descriptor=descriptor,
+            config=SessionWriterConfig.from_mapping(self.config),
+            expected_producers=("actuation", "controller", "flow"),
+            session_started_payload={
+                "recording_started_at": datetime.now().astimezone().isoformat(
+                    timespec="milliseconds"
+                ),
+                "operation": "cleaning",
+                "hardware_variant": self.state.hardware_variant,
+                "hardware_mode": "simulation" if self.state.simulation_mode else "real",
+                "output_root": str(self._cleaning_output_root),
+            },
+            readiness_latch=self._cleaning_readiness,
+            master_valve_line=self.state.master_valve_line,
+            failure_callback=self._wake_cleaning_for_recorder_failure,
+        )
+        ingress = MaintenanceRecorderIngress(writer, self._cleaning_readiness)
+        writer.failure_ready.connect(self._handle_cleaning_writer_failure)
+        writer.finished.connect(
+            lambda staging=descriptor.paths.staging_dir: (
+                self.session_file_service.mark_inactive(staging)
+            )
+        )
+        self._cleaning_lease_token = token
+        self._cleaning_descriptor = descriptor
+        self._cleaning_writer = writer
+        self._cleaning_ingress = ingress
+        self._cleaning_controller_sequence = 0
+        self._cleaning_flow_sequence = 0
+        self._cleaning_finalize_event.clear()
+        self._cleaning_finalize_result = None
+        self._cleaning_runtime = CleaningSnapshot(
+            status=CleaningStatus.PREPARING,
+            identity=identity,
+            lease_held=True,
+            bundle_path=str(descriptor.paths.staging_dir),
+        )
+        if not writer.start_and_wait():
+            failure = writer.failure
+            self._abort_cleaning_setup(
+                failure.message if failure is not None else "maintenance writer 初始化失败。"
+            )
+            return False
+        self.actuation_interlock.update(
+            device_lease="maintenance",
+            # Startup zero is a confirmed setpoint even though the protocol UI
+            # intentionally keeps its own flow readiness false until pretest.
+            flow_setpoints_ready=bool(
+                self.state.flow_setpoints_ready or self._startup_zero_confirmed
+            ),
+            recording_ready=True,
+            recorder_failed=False,
+            recorder_generation=descriptor.generation,
+            session_closing=False,
+        )
+        self._post_cleaning_controller_event(
+            event="maintenance_ready",
+            result="success",
+            message="maintenance lease 与 writer 已就绪。",
+            payload={"bundle": str(descriptor.paths.staging_dir)},
+        )
+        accepted = self.actuation_worker.post_cleaning_start(
+            plan,
+            lease_token=token,
+            recorder=ingress,
+        )
+        if not accepted:
+            self._abort_cleaning_setup("动作 owner 拒绝清洗启动消息。")
+            return False
+        self._set_cleaning_status("正在准备清洗：先执行全配置目标关闭并等待回执。")
+        self._drain_cleaning_if_not_running()
+        return True
+
+    def _abort_cleaning_setup(self, reason: str) -> None:
+        writer = self._cleaning_writer
+        ingress = self._cleaning_ingress
+        if writer is not None and ingress is not None and writer.failure is None:
+            ingress.post_fence("actuation", producer_sequence=0)
+            ingress.post_fence("controller", producer_sequence=self._cleaning_controller_sequence)
+            ingress.post_fence("flow", producer_sequence=self._cleaning_flow_sequence)
+            writer.close(
+                reason=reason,
+                maintenance_status=CleaningStatus.FAILED,
+                maintenance_outcome=CleaningOutcome.FAILED.value,
+                maintenance_failure_reason=reason,
+            )
+        token = self._cleaning_lease_token
+        if token is not None:
+            self.flow_worker.release_maintenance_lease(
+                token,
+                MaintenanceLeaseReleaseEvidence(True, True, True),
+            )
+        self.actuation_interlock.update(
+            device_lease="idle",
+            recording_ready=False,
+            recorder_failed=writer is not None and writer.failure is not None,
+        )
+        identity = (
+            None if self._cleaning_runtime.identity is None
+            else self._cleaning_runtime.identity
+        )
+        self._cleaning_runtime = replace(
+            self._cleaning_runtime,
+            status=CleaningStatus.FAILED,
+            identity=identity,
+            lease_held=False,
+            recording_ready=False,
+            recovery_reason=reason,
+        )
+        self._cleaning_lease_token = None
+        self._set_cleaning_status(
+            f"清洗启动失败：{reason}；安全动作：未进入开阀步骤并已请求释放独占权；"
+            "下一步：检查输出目录、owner 与硬件状态后重试。"
+        )
+
+    @Slot()
+    def handle_cleaning_stop_requested(self) -> bool:
+        accepted = self.actuation_worker.post_cleaning_stop(
+            reason="用户请求停止清洗。",
+            aborted=True,
+        )
+        if accepted:
+            self._set_cleaning_status("正在安全关闭：全配置目标关闭后将 A/B/C 清零。")
+            self._drain_cleaning_if_not_running()
+        return accepted
+
+    @Slot()
+    def handle_cleaning_recover_requested(self) -> bool:
+        accepted = self.actuation_worker.post_cleaning_recover()
+        if accepted:
+            self._set_cleaning_status(
+                "正在执行安全恢复：重新全关所有配置目标并确认 A/B/C 清零。"
+            )
+            self._drain_cleaning_if_not_running()
+        return accepted
+
+    @Slot(object)
+    def _handle_cleaning_snapshot(self, snapshot: CleaningSnapshot) -> None:
+        bundle = snapshot.bundle_path or self._cleaning_runtime.bundle_path
+        self._cleaning_runtime = replace(snapshot, bundle_path=bundle)
+        self._cleaning_display_message = {
+            CleaningStatus.IDLE: "清洗空闲。",
+            CleaningStatus.PREPARING: "正在准备清洗：等待全关、流量与主阀回执。",
+            CleaningStatus.RUNNING: "正在自动清洗，配方已锁定。",
+            CleaningStatus.STOPPING: "正在安全关闭：等待全目标关闭与 A/B/C 清零回执。",
+            CleaningStatus.FAILED: (
+                f"清洗失败：{snapshot.recovery_reason or 'owner 未能安全完成'}；"
+                "安全动作：已停止新步骤并请求全关/清零；下一步：检查硬件后执行安全恢复。"
+            ),
+            CleaningStatus.RECOVERY_REQUIRED: (
+                f"清洗需要恢复：{snapshot.recovery_reason or '仍有未确认目标'}；"
+                "安全动作：保持 maintenance 门禁；下一步：点击安全恢复并核对硬件。"
+            ),
+            CleaningStatus.COMPLETED: "气路安全收敛已确认，正在完成 owner/lease 与记录交接。",
+        }[snapshot.status]
+        self._render_cleaning_snapshot()
+
+    @Slot(object)
+    def _handle_cleaning_result(self, result: CleaningResult) -> None:
+        if (
+            self._cleaning_runtime.identity != result.identity
+            or self._cleaning_ingress is None
+            or self._cleaning_writer is None
+        ):
+            return
+        if not self.actuation_worker.cleaning_owner_handoff_ready:
+            self._set_cleaning_status(
+                f"清洗异常：{result.reason or '仍有未确认关闭目标'}；"
+                "安全动作：maintenance 独占权与记录器继续保持；下一步：点击安全恢复。"
+            )
+            return
+        self._post_cleaning_controller_event(
+            event="cleaning_terminal",
+            result=result.outcome.value,
+            message=result.reason or "清洗 owner 已到达安全终态。",
+            payload={"status": result.status.value},
+        )
+        ingress = self._cleaning_ingress
+        snapshot = self._cleaning_runtime
+        controller_fenced = ingress.post_fence(
+            "controller",
+            producer_sequence=self._cleaning_controller_sequence,
+            final_payload={"result": result.outcome.value},
+        )
+        flow_fenced = ingress.post_fence(
+            "flow",
+            producer_sequence=self._cleaning_flow_sequence,
+            final_payload={
+                "flow_zero_confirmed": snapshot.flow_zero_confirmed,
+                "selector_safe_confirmed": snapshot.selector_safe_confirmed,
+            },
+        )
+        actuation_fenced = self.actuation_worker.finalize_maintenance_recorder()
+        all_closed = bool(
+            not snapshot.possibly_open
+            and (
+                snapshot.close_required == 0
+                or snapshot.close_confirmed >= snapshot.close_required
+            )
+        )
+        fences_complete = controller_fenced and flow_fenced and actuation_fenced
+        if not fences_complete or self._cleaning_writer.failure is not None:
+            reason = "maintenance producer fence/recording 不完整，owner lease 保持且不得发布 complete。"
+            self._cleaning_runtime = replace(
+                snapshot,
+                status=CleaningStatus.RECOVERY_REQUIRED,
+                recovery_reason=reason,
+            )
+            self._set_cleaning_status(reason)
+            return
+        token = self._cleaning_lease_token
+        released = bool(
+            token is not None
+            and self.flow_worker.release_maintenance_lease(
+                token,
+                MaintenanceLeaseReleaseEvidence(
+                    operation_terminal=True,
+                    all_targets_closed=all_closed,
+                    owner_handoff=self.actuation_worker.cleaning_owner_handoff_ready,
+                ),
+            )
+        )
+        if not released:
+            self._set_cleaning_status(
+                "清洗收尾异常：maintenance 独占权交接未确认；"
+                "安全动作：保持禁止新操作与 staging bundle；下一步：执行安全恢复并检查 owner。"
+            )
+            return
+        self._cleaning_lease_token = None
+        final_result = result
+        self._cleaning_runtime = replace(
+            snapshot,
+            status=final_result.status,
+            lease_held=False,
+            recording_ready=False,
+            recovery_reason=final_result.reason,
+        )
+        self.actuation_interlock.update(
+            device_lease="idle",
+            recording_ready=False,
+            recorder_failed=final_result.outcome == CleaningOutcome.FAILED,
+        )
+        self._begin_cleaning_finalization(final_result)
+
+    def _handoff_maintenance_for_global_safe_stop(self) -> bool:
+        """Fence every maintenance producer and synchronously finalize its bundle."""
+
+        actuation_fenced = self.actuation_worker.handoff_maintenance_for_safe_stop()
+        ingress = self._cleaning_ingress
+        writer = self._cleaning_writer
+        if ingress is None and writer is None:
+            return actuation_fenced
+        if ingress is None or writer is None:
+            return False
+        if self._cleaning_finalize_result is not None and not writer.isRunning():
+            return actuation_fenced
+        controller_fenced = ingress.post_fence(
+            "controller",
+            producer_sequence=self._cleaning_controller_sequence,
+            final_payload={"global_safe_stop": True},
+        )
+        flow_fenced = ingress.post_fence(
+            "flow",
+            producer_sequence=self._cleaning_flow_sequence,
+            final_payload={
+                "global_safe_stop": True,
+                "flow_zero_confirmed": True,
+            },
+        )
+        if not (actuation_fenced and controller_fenced and flow_fenced):
+            return False
+        reason = "全局安全停止已抢占 cleaning，并完成 producer/owner handoff。"
+        final_result = writer.close(
+            reason=reason,
+            maintenance_status=CleaningStatus.RECOVERY_REQUIRED,
+            maintenance_outcome=CleaningOutcome.FAILED.value,
+            maintenance_failure_reason=reason,
+            timeout_ms=int(self.config.get("session_writer_close_timeout_ms", 2000)),
+        )
+        self._cleaning_finalize_result = final_result
+        self._cleaning_finalize_event.set()
+        # A preempted cleaning run intentionally remains an incomplete staging
+        # bundle.  Owner handoff means the fenced writer reached a terminal
+        # state; it does not mean a failed maintenance run may be published as
+        # a complete bundle.
+        return not writer.isRunning()
+
+    def _begin_cleaning_finalization(self, result: CleaningResult) -> None:
+        writer = self._cleaning_writer
+        if writer is None or (
+            self._cleaning_finalize_thread is not None
+            and self._cleaning_finalize_thread.is_alive()
+        ):
+            return
+
+        def finalize() -> None:
+            final_result = writer.close(
+                reason=result.reason or result.outcome.value,
+                maintenance_status=result.status,
+                maintenance_outcome=result.outcome.value,
+                maintenance_failure_reason=(
+                    result.reason if result.outcome == CleaningOutcome.FAILED else ""
+                ),
+            )
+            self._cleaning_finalize_result = final_result
+            self._maintenance_finalized.emit(final_result)
+            self._cleaning_finalize_event.set()
+
+        self._cleaning_finalize_thread = threading.Thread(
+            target=finalize,
+            name=f"maintenance-finalize-{result.identity.generation}",
+            daemon=True,
+        )
+        self._cleaning_finalize_thread.start()
+        self._set_cleaning_status("正在发布 maintenance bundle，请等待完整性校验。")
+
+    def _wake_cleaning_for_recorder_failure(self, failure) -> None:
+        self.actuation_interlock.update(
+            recording_ready=False,
+            recorder_failed=True,
+            recorder_generation=failure.session_generation,
+        )
+        self.actuation_worker.post_recorder_failed(failure.message)
+        self.actuation_worker.post_cleaning_stop(
+            reason=f"maintenance writer 失败：{failure.message}",
+            aborted=False,
+        )
+
+    @Slot(object)
+    def _handle_cleaning_writer_failure(self, failure) -> None:
+        self._set_cleaning_status(
+            f"清洗记录失败：{failure.message}；安全动作：已请求全关与 A/B/C 清零；"
+            "下一步：等待安全收敛后检查 staging bundle。"
+        )
+
+    @Slot(object)
+    def _handle_maintenance_finalized(self, result) -> None:
+        descriptor = self._cleaning_descriptor
+        if result.complete:
+            bundle = str(result.final_dir or "")
+            self._cleaning_runtime = replace(
+                self._cleaning_runtime,
+                bundle_path=bundle,
+            )
+            message = f"清洗记录已完整发布：{bundle}"
+        else:
+            staging = (
+                ""
+                if descriptor is None
+                else str(descriptor.paths.staging_dir)
+            )
+            self._cleaning_runtime = replace(
+                self._cleaning_runtime,
+                status=CleaningStatus.RECOVERY_REQUIRED,
+                bundle_path=staging,
+                recovery_reason=result.message,
+            )
+            self.actuation_interlock.update(recorder_failed=True)
+            message = (
+                f"清洗记录未发布完整 bundle：{result.message}；"
+                f"安全动作：staging 保留于 {staging}；下一步：检查恢复诊断。"
+            )
+        self._set_cleaning_status(message)
+
+    def _post_cleaning_controller_event(
+        self,
+        *,
+        event: str,
+        result: str,
+        message: str,
+        payload: dict | None = None,
+    ) -> bool:
+        ingress = self._cleaning_ingress
+        if ingress is None:
+            return False
+        self._cleaning_controller_sequence += 1
+        return ingress.post_event(
+            producer="controller",
+            producer_sequence=self._cleaning_controller_sequence,
+            record_type="controller_event",
+            event=event,
+            result=result,
+            message=message,
+            payload=payload,
+        )
+
+    def _record_cleaning_flow_result(self, wrapped) -> None:
+        ingress = self._cleaning_ingress
+        identity = self._cleaning_runtime.identity
+        command = wrapped.command
+        if (
+            ingress is None
+            or identity is None
+            or command.operation_id != identity.operation_id
+            or command.generation != identity.generation
+        ):
+            return
+        self._cleaning_flow_sequence += 1
+        accepted = ingress.post_event(
+            producer="flow",
+            producer_sequence=self._cleaning_flow_sequence,
+            record_type="flow_result",
+            event=command.mode,
+            result="success" if wrapped.result.success and not wrapped.stale else "failed",
+            message=wrapped.result.message,
+            payload={
+                "command_id": command.command_id,
+                "a": wrapped.result.a,
+                "b": wrapped.result.b,
+                "c": wrapped.result.c,
+                "stale": wrapped.stale,
+            },
+        )
+        if not accepted:
+            self.actuation_worker.post_recorder_failed(
+                "maintenance recorder 拒绝 flow 回执。"
+            )
+
+    def _drain_cleaning_if_not_running(self) -> None:
+        self._drain_actuation_if_not_running()
+        if not self._allow_test_actuation_bridge:
+            return
+        for _ in range(64):
+            processed = 0
+            if not self.flow_worker.isRunning():
+                processed += self.flow_worker.process_ready()
+            if not self.actuation_worker.isRunning():
+                processed += self.actuation_worker.process_ready_with_do_ownership()
+            if not processed:
+                break
+
+    def _set_cleaning_status(self, message: str) -> None:
+        self._cleaning_display_message = str(message)
+        self.state.update_status(str(message))
+        if self.view:
+            self.view.update_status(str(message))
+        self._render_cleaning_snapshot()
+
+    def _render_cleaning_snapshot(self) -> None:
+        if self.view is None or not hasattr(self.view, "cleaning_view"):
+            return
+        config = self._cleaning_candidate or self._cleaning_published
+        if config is None:
+            self.view.cleaning_view.render_snapshot(
+                CleaningViewSnapshot(
+                    status_text=self._cleaning_config_error or "清洗配置不可用。",
+                    controls_enabled=False,
+                )
+            )
+            return
+        runtime = self._cleaning_runtime
+        active = runtime.status in {
+            CleaningStatus.PREPARING,
+            CleaningStatus.RUNNING,
+            CleaningStatus.STOPPING,
+        }
+        lease_idle = self.device_lease.snapshot.kind == DeviceLeaseKind.IDLE
+        session_idle = self.session_state.status not in {
+            SessionStatus.PREPARED,
+            SessionStatus.RECORDING,
+            SessionStatus.CLOSING,
+        }
+        start_rejection = self._cleaning_start_rejection()
+        default_status = {
+            CleaningStatus.IDLE: "清洗空闲",
+            CleaningStatus.PREPARING: "正在准备：全关、流量与主阀按回执推进",
+            CleaningStatus.RUNNING: "正在自动清洗",
+            CleaningStatus.STOPPING: "正在安全关闭",
+            CleaningStatus.FAILED: "清洗失败，未发布完整 bundle",
+            CleaningStatus.RECOVERY_REQUIRED: "需要安全恢复",
+            CleaningStatus.COMPLETED: "已安全停止",
+        }[runtime.status]
+        status_text = self._cleaning_display_message or default_status
+        controls_enabled = (
+            not active
+            and lease_idle
+            and session_idle
+            and not self._cleaning_save_in_progress
+        )
+        can_save = bool(
+            self._cleaning_dirty
+            and controls_enabled
+            and not self.state.telemetry.connected
+            and not self.state.hardware_ready
+            and self._cleaning_config_store is not None
+        )
+        self.view.cleaning_view.render_snapshot(
+            CleaningViewSnapshot(
+                status=runtime.status,
+                status_text=status_text,
+                available_channels=tuple(
+                    channel for channel, _ in config.available_targets
+                ),
+                selected_channels=config.selected_channels,
+                external_labels=config.external_labels,
+                gas_label=config.gas_label,
+                flow_sccm=config.flow_sccm,
+                max_flow_sccm=config.max_approved_flow_sccm,
+                open_duration_s=config.open_duration_s,
+                max_open_duration_s=config.max_open_duration_s,
+                cycles=config.cycles,
+                max_cycles=config.max_cycles,
+                estimated_duration_s=(
+                    len(config.selected_channels)
+                    * config.open_duration_s
+                    * config.cycles
+                ),
+                dirty=self._cleaning_dirty,
+                controls_enabled=controls_enabled,
+                can_save=can_save,
+                can_start=not bool(start_rejection),
+                can_stop=runtime.status
+                in {CleaningStatus.PREPARING, CleaningStatus.RUNNING},
+                can_recover=runtime.status
+                in {CleaningStatus.FAILED, CleaningStatus.RECOVERY_REQUIRED},
+                current_step_id=runtime.current_step_id or "",
+                current_channel=runtime.current_channel,
+                remaining_s=max(0.0, runtime.remaining_ns / 1_000_000_000),
+                lease_text=(
+                    "maintenance"
+                    if runtime.lease_held
+                    else self.device_lease.snapshot.kind.value
+                ),
+                recording_ready=runtime.recording_ready,
+                close_progress_text=(
+                    f"{runtime.close_confirmed}/{runtime.close_required}"
+                ),
+                bundle_path=runtime.bundle_path or "",
+                output_root=(
+                    "" if self._cleaning_output_root is None
+                    else str(self._cleaning_output_root)
+                ),
+                recovery_reason=runtime.recovery_reason,
+            )
+        )
+
     def _session_boundary_rejection(self) -> str:
+        if self.device_lease.snapshot.kind == DeviceLeaseKind.MAINTENANCE:
+            return "maintenance 清洗仍持有设备独占权，请先完成安全收尾。"
         if self._pending_protocol_load is not None:
             return "协议加载仍在等待动作 owner 的安全清理确认，请等待加载完成。"
         if self._protocol_start_pending or self._protocol_master_prepare_pending:
@@ -1362,6 +2281,8 @@ class MainController(QObject):
             self._render_session_snapshot("请选择本地输出目录。")
             return
         output_path = Path(output_dir).expanduser().resolve(strict=False)
+        self._cleaning_output_root = output_path if output_path.is_dir() else None
+        self._render_cleaning_snapshot()
         if output_path.is_dir():
             self._start_recovery_scan(output_path)
         try:
@@ -1534,6 +2455,16 @@ class MainController(QObject):
             remaining = max(0.0, wait_seconds - (time.monotonic() - started))
             thread.join(remaining)
         return self._session_finalize_result
+
+    def wait_for_cleaning_finalization(self, timeout: float = 5.0):
+        wait_seconds = max(0.0, float(timeout))
+        started = time.monotonic()
+        self._cleaning_finalize_event.wait(wait_seconds)
+        thread = self._cleaning_finalize_thread
+        if thread is not None and thread is not threading.current_thread():
+            remaining = max(0.0, wait_seconds - (time.monotonic() - started))
+            thread.join(remaining)
+        return self._cleaning_finalize_result
 
     def _post_controller_session_event(
         self,
@@ -2093,8 +3024,6 @@ class MainController(QObject):
             self.view.update_status(self.state.status_message)
 
         finalize_session = self._prepare_session_for_global_stop("reset")
-        self.actuation_worker.post_stop(message="硬件重置请求已停止门控流程。")
-        self._drain_actuation_if_not_running()
         event = self.shutdown_service.shutdown(
             source="reset",
             reason="reset_request",
@@ -2138,8 +3067,6 @@ class MainController(QObject):
 
     def stop_hardware(self) -> None:
         finalize_session = self._prepare_session_for_global_stop("global_stop")
-        self.actuation_worker.post_stop(message="用户停止硬件，门控流程已停止。")
-        self._drain_actuation_if_not_running()
         self.state.update_status("正在安全停止，关闭阀门并释放资源...")
         if self.view:
             self.view.update_status(self.state.status_message)
@@ -2342,8 +3269,11 @@ class MainController(QObject):
 
     def _publish_interlock_from_state(self, *, device_lease: str | None = None) -> None:
         current = self.actuation_interlock.read()[1]
+        holder_kind = self.device_lease.snapshot.kind
         lease = device_lease or (
-            "protocol" if self._protocol_lease_epoch is not None else "idle"
+            "protocol"
+            if self._protocol_lease_epoch is not None
+            else holder_kind.value
         )
         self.actuation_interlock.update(
             has_protocol=bool(
@@ -2363,7 +3293,15 @@ class MainController(QObject):
             LOG.error("ActuationWorker unavailable; refusing UI-thread DO ownership")
             return
         if self._allow_test_actuation_bridge:
-            self.actuation_worker.process_ready_with_do_ownership()
+            # The explicit test bridge owns both stopped workers.  Drain the
+            # cross-worker receipt loop to quiescence so tests exercise the
+            # same A=0 -> selector -> odor -> final-zero sequence as QThreads.
+            for _ in range(64):
+                processed = self.actuation_worker.process_ready_with_do_ownership()
+                if not self.flow_worker.isRunning():
+                    processed += self.flow_worker.process_ready()
+                if not processed:
+                    break
 
     def _submit_flow_intent(
         self,
@@ -2429,6 +3367,7 @@ class MainController(QObject):
 
     @Slot(object)
     def _handle_flow_command_result(self, wrapped) -> None:
+        self._record_cleaning_flow_result(wrapped)
         result = wrapped.result
         context = self._pending_flow_context.pop(wrapped.command.source, {})
         kind = context.get("kind")
@@ -2537,7 +3476,13 @@ class MainController(QObject):
                 "stale": receipt.stale,
             },
         )
-        self._render_protocol_execution_state()
+        if receipt.operation_id is None:
+            self._render_protocol_execution_state()
+        else:
+            # maintenance receipt 已由 ActuationWorker owner 推进清洗状态；
+            # 此处不得递归 drain 动作队列，否则测试桥/启动桥会在外层批次尚未
+            # 结束时提前释放 DO ownership。
+            self._render_cleaning_snapshot()
         if self.view and hasattr(self.view, "render_actuation_alert"):
             severe = bool(
                 receipt.jitter_ms is not None
@@ -2665,6 +3610,32 @@ class MainController(QObject):
             self.handle_session_end_requested("protocol_completed")
         else:
             self._maybe_begin_session_finalization()
+
+    @Slot(object)
+    def _handle_protocol_safe_stop_handoff_requested(
+        self,
+        identity: SafeStopIdentity,
+    ) -> None:
+        held_epoch = self._protocol_lease_epoch
+        if held_epoch is None:
+            released = self.flow_worker.release_lease_for_safe_stop(identity)
+        else:
+            released = self.flow_worker.release_protocol_lease(
+                held_epoch,
+                next_execution_epoch=identity.execution_epoch,
+            )
+            if released:
+                self._protocol_lease_epoch = None
+        if not released:
+            self.actuation_interlock.update(
+                connected=False,
+                flow_setpoints_ready=False,
+                device_lease=self.flow_worker.lease_snapshot.kind.value,
+            )
+        self.actuation_worker.confirm_protocol_safe_stop_handoff(
+            identity,
+            released,
+        )
 
     @Slot(object)
     def _handle_document_result(self, result: dict) -> None:
@@ -2862,6 +3833,7 @@ class MainController(QObject):
 
     def _reset_startup_flows_to_zero_async(self) -> None:
         """Ensure opening/connecting the app leaves Alicat setpoints at no-flow."""
+        self._startup_zero_confirmed = False
         self.state.flow_setpoints_ready = False
         self.state.update_status("硬件自检通过，正在清零 A/B/C...")
         if self.view:
@@ -2884,6 +3856,7 @@ class MainController(QObject):
         pretest = self.view.pretest_view if self.view and hasattr(self.view, "pretest_view") else None
         self.state.flow_setpoints_ready = False
         if result and result.success:
+            self._startup_zero_confirmed = True
             self.state.applied_a = 0.0
             self.state.applied_b = 0.0
             self.state.applied_c = 0.0
@@ -2894,6 +3867,7 @@ class MainController(QObject):
                 pretest.set_flow_message("默认无气流：A/B/C 已清零")
                 pretest.show_warning("")
         else:
+            self._startup_zero_confirmed = False
             message = result.message if result else "未知错误"
             self.state.update_status(f"硬件自检通过，但流量清零失败：{message}")
             if pretest:
@@ -2952,6 +3926,22 @@ class MainController(QObject):
         success = event.get("result") == "success"
         self._unsafe_shutdown_latched = not success
         self.state.flow_setpoints_ready = False
+        flow_lease_idle = self.flow_worker.lease_snapshot.kind == DeviceLeaseKind.IDLE
+        if flow_lease_idle:
+            self._protocol_lease_epoch = None
+            self._protocol_start_pending = False
+        if success and flow_lease_idle:
+            self._cleaning_lease_token = None
+            self.actuation_worker.complete_global_safe_stop_handoff()
+            self._cleaning_runtime = replace(
+                self._cleaning_runtime,
+                lease_held=False,
+                recording_ready=False,
+            )
+            self.actuation_interlock.update(
+                device_lease="idle",
+                recording_ready=False,
+            )
         message = (
             success_message
             if success

@@ -32,6 +32,7 @@ from app.models import (
     ActuationReceipt,
     ActuationResult,
     AppState,
+    DeviceLeaseKind,
     ProtocolDocument,
     ProtocolExecutionReadiness,
     ProtocolExecutionSnapshot,
@@ -690,6 +691,12 @@ class Runtime:
         self.adapter = ActuationDOAdapter(
             hal=hal,
             target_resolver=self.valves.resolve_target,
+            selector_target=self.valves.selector_target or None,
+            selector_odor_level=(
+                True
+                if self.valves.selector is None
+                else self.valves.selector.odor_level
+            ),
             write_timeout_ms=int(config.get("actuation_write_timeout_ms", 100)),
         )
         self.flow_service = FlowService(hal, master_target=None, master_writer=None)
@@ -716,6 +723,9 @@ class Runtime:
             **actuation_kwargs,
         )
         self.actuation.receipt_ready.connect(self.collector.record)
+        self.actuation.protocol_safe_stop_handoff_requested.connect(
+            self._handle_protocol_safe_stop_handoff
+        )
         self.ai_hal = AIOnlyHal(
             hal,
             airflow,
@@ -757,6 +767,23 @@ class Runtime:
         self._hil_flow_results[wrapped.command.source] = wrapped
         if wrapped.command.source == "safety:hil-restore" and wrapped.result.success:
             self._flow_restore_confirmed = True
+
+    def _handle_protocol_safe_stop_handoff(self, identity) -> None:
+        """Release the exact HIL protocol lease before Worker may report STOPPED."""
+
+        lease = self.flow.lease_snapshot
+        if lease.kind == DeviceLeaseKind.PROTOCOL:
+            released = self.flow.release_protocol_lease(
+                lease.generation,
+                next_execution_epoch=identity.execution_epoch,
+            )
+        elif lease.kind == DeviceLeaseKind.IDLE:
+            released = self.flow.release_lease_for_safe_stop(identity)
+        else:
+            released = False
+        if released:
+            self.ingress.update(device_lease="idle")
+        self.actuation.confirm_protocol_safe_stop_handoff(identity, released)
 
     def start(self) -> None:
         if getattr(self, "_story_35_recording_enabled", False):
@@ -1154,17 +1181,11 @@ class Runtime:
         # MFC recovery is forbidden while a protocol owns the device lease.
         self.actuation.post_stop(message="HIL LOW_FLOW closed; release protocol flow lease")
         self.wait_status({ProtocolExecutionStatus.STOPPED}, timeout_s=timeout_s)
-        epoch = self.actuation.protocol_state.execution_epoch
-        held_epoch = self.flow.execution_context[0]
-        if held_epoch is None or not self.flow.release_protocol_lease(
-            held_epoch,
-            next_execution_epoch=epoch,
-        ):
+        if self.flow.lease_snapshot.kind != DeviceLeaseKind.IDLE:
             raise RuntimeError(
                 "LOW_FLOW recovery could not release FlowWorker lease: "
-                f"context={self.flow.execution_context}, epoch={epoch}"
+                f"context={self.flow.execution_context}"
             )
-        self.ingress.update(device_lease="idle")
         source = f"safety:hil-low-recovery-{self.sequence + 1}"
         self._hil_flow_results.pop(source, None)
         self.actuation.post_flow_intent(
@@ -1375,24 +1396,17 @@ class Runtime:
             if (
                 self.actuation.isRunning()
                 and not self._shutdown_completed
-                and not self._abort_close_confirmed
             ):
                 try:
-                    closed = self.actuation.emergency_close_all(
-                        int(
-                            self.config.get(
-                                "actuation_emergency_close_timeout_ms",
-                                500,
-                            )
-                        )
-                        * 4
-                    )
+                    event = self.shutdown_via_service()
                 except Exception:
                     self._fail_story_35_shutdown_close()
                     raise
-                if not closed:
+                if event.get("result") != "success":
                     self._fail_story_35_shutdown_close()
-                    raise RuntimeError("shutdown emergency close-all 未获得全部成功回执")
+                    raise RuntimeError(
+                        "shutdown unified safe-stop 未获得完整 A/selector/odor/owner 证据"
+                    )
         finally:
             timeout_ms = int(self.config.get("actuation_shutdown_timeout_ms", 2000))
             owner_failures = []

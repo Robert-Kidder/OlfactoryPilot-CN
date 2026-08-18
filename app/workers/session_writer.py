@@ -15,7 +15,16 @@ from typing import Any
 
 from PySide6.QtCore import QThread, Signal
 
-from app.models import ActuationQualitySnapshot, ActuationReceipt, ProtocolGateEvent
+from app.models import (
+    ActuationCategory,
+    ActuationQualitySnapshot,
+    ActuationReceipt,
+    CleaningStatus,
+    MaintenanceDescriptor,
+    MaintenanceProducerFence,
+    MaintenanceRecordEnvelope,
+    ProtocolGateEvent,
+)
 from app.models.session import (
     ProducerFence,
     SessionDescriptor,
@@ -179,6 +188,82 @@ class RecorderReadinessLatch:
 
 
 @dataclass(frozen=True, slots=True)
+class MaintenanceReadinessSnapshot:
+    operation_id: str = ""
+    generation: int = 0
+    recording_ready: bool = False
+    failed: bool = False
+    message: str = ""
+
+
+class MaintenanceReadinessLatch:
+    def __init__(self) -> None:
+        self._lock = threading.RLock()
+        self._snapshot = MaintenanceReadinessSnapshot()
+
+    def bind(self, descriptor: MaintenanceDescriptor) -> None:
+        with self._lock:
+            self._snapshot = MaintenanceReadinessSnapshot(
+                operation_id=descriptor.operation_id,
+                generation=descriptor.generation,
+            )
+
+    def mark_ready(self, descriptor: MaintenanceDescriptor) -> bool:
+        with self._lock:
+            if (
+                self._snapshot.operation_id != descriptor.operation_id
+                or self._snapshot.generation != descriptor.generation
+                or self._snapshot.failed
+            ):
+                return False
+            self._snapshot = MaintenanceReadinessSnapshot(
+                operation_id=descriptor.operation_id,
+                generation=descriptor.generation,
+                recording_ready=True,
+            )
+            return True
+
+    def fail(
+        self,
+        message: str,
+        *,
+        operation_id: str,
+        generation: int,
+    ) -> bool:
+        with self._lock:
+            if (
+                self._snapshot.operation_id != operation_id
+                or self._snapshot.generation != int(generation)
+                or self._snapshot.failed
+            ):
+                return False
+            self._snapshot = MaintenanceReadinessSnapshot(
+                operation_id=operation_id,
+                generation=int(generation),
+                failed=True,
+                message=str(message),
+            )
+            return True
+
+    def close(self, *, operation_id: str, generation: int) -> bool:
+        with self._lock:
+            if (
+                self._snapshot.operation_id != operation_id
+                or self._snapshot.generation != int(generation)
+            ):
+                return False
+            self._snapshot = MaintenanceReadinessSnapshot(
+                operation_id=operation_id,
+                generation=int(generation),
+            )
+            return True
+
+    def read(self) -> MaintenanceReadinessSnapshot:
+        with self._lock:
+            return self._snapshot
+
+
+@dataclass(frozen=True, slots=True)
 class SessionWriterFailure:
     session_id: str
     session_generation: int
@@ -195,6 +280,27 @@ class SessionFinalizationResult:
     status: SessionStatus
     final_dir: Path | None
     message: str
+
+
+@dataclass(frozen=True, slots=True)
+class MaintenanceFinalizationResult:
+    operation_id: str
+    complete: bool
+    status: CleaningStatus
+    outcome: str
+    final_dir: Path | None
+    message: str
+
+
+@dataclass(frozen=True, slots=True)
+class MaintenanceWriterTerminalSnapshot:
+    operation_id: str
+    generation: int
+    status: CleaningStatus
+    outcome: str
+    persisted_log_event_count: int
+    unpersisted_count: int
+    reason: str
 
 
 class SessionRecorderIngress:
@@ -523,6 +629,204 @@ class SessionRecorderIngress:
         return True
 
 
+class MaintenanceRecorderIngress:
+    """Producer-safe ingress for a log-only maintenance bundle."""
+
+    def __init__(
+        self,
+        writer: SessionWriterWorker,
+        readiness_latch: MaintenanceReadinessLatch,
+    ) -> None:
+        if not isinstance(writer.descriptor, MaintenanceDescriptor):
+            raise TypeError("maintenance ingress 只能绑定 maintenance descriptor。")
+        self.writer = writer
+        self.readiness_latch = readiness_latch
+        self._lock = threading.RLock()
+        self._last_sequence: dict[str, int] = {}
+        self._fenced: set[str] = set()
+
+    def post_receipt(
+        self,
+        receipt: ActuationReceipt,
+        *,
+        producer_sequence: int,
+        generation: int | None = None,
+    ) -> bool:
+        return self._post(
+            producer="actuation",
+            producer_sequence=producer_sequence,
+            generation=generation,
+            record_type="receipt",
+            payload={"receipt": receipt},
+            timestamp=receipt.wall_timestamp,
+            monotonic_ns=receipt.actual_ns,
+        )
+
+    def post_event(
+        self,
+        *,
+        producer: str,
+        producer_sequence: int,
+        record_type: str,
+        event: str,
+        result: str,
+        message: str,
+        payload: dict[str, Any] | None = None,
+        timestamp: float | None = None,
+        monotonic_ns: int | None = None,
+        generation: int | None = None,
+    ) -> bool:
+        values = dict(payload or {})
+        values.update(
+            {
+                "event": str(event),
+                "result": str(result),
+                "message": str(message),
+            }
+        )
+        return self._post(
+            producer=str(producer),
+            producer_sequence=producer_sequence,
+            generation=generation,
+            record_type=str(record_type),
+            payload=values,
+            timestamp=time.time() if timestamp is None else float(timestamp),
+            monotonic_ns=monotonic_ns,
+        )
+
+    def post_fence(
+        self,
+        producer: str,
+        *,
+        producer_sequence: int,
+        final_payload: dict[str, Any] | None = None,
+    ) -> bool:
+        notify = False
+        with self._lock:
+            if not self._identity_ready(
+                producer=producer,
+                producer_sequence=producer_sequence,
+                generation=None,
+                fence=True,
+            ):
+                accepted = False
+                notify = True
+            else:
+                descriptor = self.writer.descriptor
+                assert isinstance(descriptor, MaintenanceDescriptor)
+                fence = MaintenanceProducerFence(
+                    operation_id=descriptor.operation_id,
+                    operation_generation=descriptor.generation,
+                    producer=producer,
+                    producer_sequence=producer_sequence,
+                    final_payload=final_payload or {},
+                )
+                accepted = self.writer.put_nowait(fence, notify_failure=False)
+                if accepted:
+                    self._fenced.add(producer)
+                else:
+                    notify = self.writer.failure is not None
+        if notify:
+            self.writer.notify_failure()
+        return accepted
+
+    def _post(
+        self,
+        *,
+        producer: str,
+        producer_sequence: int,
+        generation: int | None,
+        record_type: str,
+        payload: dict[str, Any],
+        timestamp: float | None,
+        monotonic_ns: int | None,
+    ) -> bool:
+        notify = False
+        with self._lock:
+            if not self._identity_ready(
+                producer=producer,
+                producer_sequence=producer_sequence,
+                generation=generation,
+                fence=False,
+            ):
+                accepted = False
+                notify = True
+            else:
+                descriptor = self.writer.descriptor
+                assert isinstance(descriptor, MaintenanceDescriptor)
+                envelope = MaintenanceRecordEnvelope(
+                    operation_id=descriptor.operation_id,
+                    operation_generation=descriptor.generation,
+                    producer=producer,
+                    producer_sequence=producer_sequence,
+                    event_id=f"{producer}:{descriptor.generation}:{producer_sequence}",
+                    record_type=record_type,
+                    payload=payload,
+                    timestamp=timestamp,
+                    monotonic_ns=monotonic_ns,
+                )
+                accepted = self.writer.put_nowait(envelope, notify_failure=False)
+                if accepted:
+                    self._last_sequence[producer] = producer_sequence
+                else:
+                    notify = self.writer.failure is not None
+        if notify:
+            self.writer.notify_failure()
+        return accepted
+
+    def _identity_ready(
+        self,
+        *,
+        producer: str,
+        producer_sequence: int,
+        generation: int | None,
+        fence: bool,
+    ) -> bool:
+        descriptor = self.writer.descriptor
+        assert isinstance(descriptor, MaintenanceDescriptor)
+        snapshot = self.readiness_latch.read()
+        target_generation = descriptor.generation if generation is None else int(generation)
+        if producer not in self.writer.expected_producers:
+            self.writer.fail_from_producer(
+                stage="producer",
+                message=f"maintenance producer 未注册：{producer}。",
+                notify=False,
+            )
+            return False
+        if (
+            not snapshot.recording_ready
+            or snapshot.failed
+            or snapshot.operation_id != descriptor.operation_id
+            or target_generation != descriptor.generation
+        ):
+            self.writer.fail_from_producer(
+                stage="identity",
+                message="maintenance generation 不匹配或 recorder 未就绪。",
+                notify=False,
+            )
+            return False
+        if producer in self._fenced:
+            self.writer.fail_from_producer(
+                stage="producer_fence",
+                message=f"{producer} 已提交 maintenance fence。",
+                notify=False,
+            )
+            return False
+        previous = self._last_sequence.get(producer, 0)
+        expected = previous if fence else previous + 1
+        if int(producer_sequence) != expected:
+            self.writer.fail_from_producer(
+                stage="producer_sequence",
+                message=(
+                    f"{producer} maintenance sequence 不连续："
+                    f"expected={expected}, actual={producer_sequence}。"
+                ),
+                notify=False,
+            )
+            return False
+        return True
+
+
 class SessionWriterWorker(QThread):
     failure_ready = Signal(object)
     finalization_ack = Signal(object)
@@ -530,23 +834,32 @@ class SessionWriterWorker(QThread):
     def __init__(
         self,
         *,
-        descriptor: SessionDescriptor,
+        descriptor: SessionDescriptor | MaintenanceDescriptor,
         config: SessionWriterConfig | dict[str, Any] | None,
         expected_producers: tuple[str, ...],
         session_started_payload: dict[str, Any],
-        readiness_latch: RecorderReadinessLatch,
+        readiness_latch: RecorderReadinessLatch | MaintenanceReadinessLatch,
         master_valve_line: str = "",
         fault_injector=None,
         failure_callback=None,
     ) -> None:
         super().__init__()
         self.descriptor = descriptor
+        self._maintenance = isinstance(descriptor, MaintenanceDescriptor)
         self.config = (
             config
             if isinstance(config, SessionWriterConfig)
             else SessionWriterConfig.from_mapping(config)
         )
         self.expected_producers = frozenset(expected_producers)
+        if self._maintenance and self.expected_producers != {
+            "actuation",
+            "controller",
+            "flow",
+        }:
+            raise ValueError(
+                "maintenance expected_producers 必须恰为 actuation/controller/flow。"
+            )
         self.session_started_payload = dict(session_started_payload)
         actual_started_at = self.session_started_payload.get(
             "recording_started_at",
@@ -569,9 +882,12 @@ class SessionWriterWorker(QThread):
         )
         self._fault_injector = fault_injector
         self._failure_callback = failure_callback
-        self._queue: queue.Queue[SessionRecordEnvelope | ProducerFence] = queue.Queue(
-            maxsize=self.config.queue_capacity
-        )
+        self._queue: queue.Queue[
+            SessionRecordEnvelope
+            | ProducerFence
+            | MaintenanceRecordEnvelope
+            | MaintenanceProducerFence
+        ] = queue.Queue(maxsize=self.config.queue_capacity)
         self._state_lock = threading.RLock()
         self._initialized = threading.Event()
         self._initialized_success = False
@@ -581,8 +897,16 @@ class SessionWriterWorker(QThread):
         self._close_reason = ""
         self._close_deadline_monotonic: float | None = None
         self._final_quality: ActuationQualitySnapshot | None = None
-        self._final_result: SessionFinalizationResult | None = None
+        self._maintenance_status = CleaningStatus.COMPLETED
+        self._maintenance_outcome = "completed"
+        self._maintenance_failure_reason = ""
+        self._final_result: (
+            SessionFinalizationResult | MaintenanceFinalizationResult | None
+        ) = None
         self._failure: SessionWriterFailure | None = None
+        self._maintenance_terminal_snapshot: (
+            MaintenanceWriterTerminalSnapshot | None
+        ) = None
         self._failure_notified = False
         self._publish_cancelled = threading.Event()
         self._fences: dict[str, int] = {}
@@ -610,6 +934,13 @@ class SessionWriterWorker(QThread):
         with self._state_lock:
             return self._failure
 
+    @property
+    def maintenance_terminal_snapshot(
+        self,
+    ) -> MaintenanceWriterTerminalSnapshot | None:
+        with self._state_lock:
+            return self._maintenance_terminal_snapshot
+
     def start_and_wait(self, timeout_ms: int | None = None) -> bool:
         if not self.isRunning() and not self._initialized.is_set():
             self.start()
@@ -635,7 +966,12 @@ class SessionWriterWorker(QThread):
 
     def put_nowait(
         self,
-        item: SessionRecordEnvelope | ProducerFence,
+        item: (
+            SessionRecordEnvelope
+            | ProducerFence
+            | MaintenanceRecordEnvelope
+            | MaintenanceProducerFence
+        ),
         *,
         notify_failure: bool = True,
     ) -> bool:
@@ -695,7 +1031,10 @@ class SessionWriterWorker(QThread):
         reason: str,
         final_quality: ActuationQualitySnapshot | None = None,
         timeout_ms: int | None = None,
-    ) -> SessionFinalizationResult:
+        maintenance_status: CleaningStatus | None = None,
+        maintenance_outcome: str | None = None,
+        maintenance_failure_reason: str = "",
+    ) -> SessionFinalizationResult | MaintenanceFinalizationResult:
         timeout = (
             self.config.close_timeout_ms
             if timeout_ms is None
@@ -715,6 +1054,18 @@ class SessionWriterWorker(QThread):
                 if not self._close_requested.is_set():
                     self._close_reason = str(reason)
                     self._final_quality = final_quality
+                    if self._maintenance:
+                        self._maintenance_status = (
+                            CleaningStatus.COMPLETED
+                            if maintenance_status is None
+                            else CleaningStatus(maintenance_status)
+                        )
+                        self._maintenance_outcome = str(
+                            maintenance_outcome or "completed"
+                        )
+                        self._maintenance_failure_reason = str(
+                            maintenance_failure_reason
+                        )
                     self._close_requested.set()
         if existing_result is not None:
             if self.isRunning():
@@ -781,6 +1132,9 @@ class SessionWriterWorker(QThread):
         self._cleanup_handles()
 
     def _initialize_files(self) -> None:
+        if self._maintenance:
+            self._initialize_maintenance_files()
+            return
         self._raw_handle = self.descriptor.paths.raw_path.open("r+b")
         self._log_handle = self.descriptor.paths.log_path.open("r+b")
         self._assert_empty_reserved_stream(
@@ -845,7 +1199,51 @@ class SessionWriterWorker(QThread):
         }
         self._write_log_record(started, stage="log_session_started_write")
 
-    def _consume(self, item: SessionRecordEnvelope | ProducerFence) -> None:
+    def _initialize_maintenance_files(self) -> None:
+        descriptor = self.descriptor
+        assert isinstance(descriptor, MaintenanceDescriptor)
+        self._log_handle = descriptor.paths.log_path.open("r+b")
+        self._assert_empty_reserved_stream(
+            self._log_handle,
+            descriptor.paths.log_path,
+        )
+        started_payload = {
+            key: value
+            for key, value in self.session_started_payload.items()
+            if key not in _CANONICAL_LOG_FIELDS
+        }
+        self._write_log_record(
+            {
+                "record_type": "maintenance_event",
+                "event": "maintenance_started",
+                "timestamp": descriptor.started_at_iso,
+                "monotonic_ns": None,
+                "source": "maintenance",
+                "result": "success",
+                "message": "maintenance bundle 已绑定并进入记录就绪。",
+                "producer": "maintenance",
+                "producer_sequence": 1,
+                "event_id": f"maintenance:{descriptor.generation}:1",
+                "plan_snapshot": dict(descriptor.plan_snapshot),
+                "step_count": descriptor.step_count,
+                **started_payload,
+            },
+            stage="log_session_started_write",
+        )
+
+    def _consume(
+        self,
+        item: (
+            SessionRecordEnvelope
+            | ProducerFence
+            | MaintenanceRecordEnvelope
+            | MaintenanceProducerFence
+        ),
+    ) -> None:
+        if self._maintenance:
+            self._consume_maintenance(item)
+            return
+        assert isinstance(item, SessionRecordEnvelope | ProducerFence)
         if isinstance(item, ProducerFence):
             if (
                 item.session_id != self.descriptor.session_id
@@ -875,6 +1273,100 @@ class SessionWriterWorker(QThread):
             self._consume_session_event(item)
         else:
             raise ValueError(f"未知 session record_type：{item.record_type}")
+        self._records_since_flush += 1
+        if self._records_since_flush >= self.config.flush_every_records:
+            self._periodic_flush()
+
+    def _consume_maintenance(
+        self,
+        item: (
+            SessionRecordEnvelope
+            | ProducerFence
+            | MaintenanceRecordEnvelope
+            | MaintenanceProducerFence
+        ),
+    ) -> None:
+        descriptor = self.descriptor
+        assert isinstance(descriptor, MaintenanceDescriptor)
+        if isinstance(item, MaintenanceProducerFence):
+            if (
+                item.operation_id != descriptor.operation_id
+                or item.operation_generation != descriptor.generation
+            ):
+                raise ValueError("maintenance producer fence identity 不匹配。")
+            self._fences[item.producer] = item.producer_sequence
+            return
+        if not isinstance(item, MaintenanceRecordEnvelope):
+            raise TypeError("maintenance writer 收到 session envelope。")
+        if (
+            item.operation_id != descriptor.operation_id
+            or item.operation_generation != descriptor.generation
+        ):
+            raise ValueError("maintenance record identity 不匹配。")
+        if item.record_type == "receipt":
+            receipt = item.payload.get("receipt")
+            if not isinstance(receipt, ActuationReceipt):
+                raise TypeError("maintenance receipt payload 无效。")
+            if (
+                receipt.operation_id != descriptor.operation_id
+                or receipt.generation != descriptor.generation
+                or receipt.category not in {
+                    ActuationCategory.CLEANING,
+                    ActuationCategory.SAFETY,
+                }
+            ):
+                raise ValueError("maintenance receipt identity/category 不匹配。")
+            identity = (
+                descriptor.operation_id,
+                descriptor.generation,
+                receipt.command_id,
+            )
+            previous = self._seen_receipts.get(identity)
+            if previous is not None:
+                if previous != receipt:
+                    raise ValueError("maintenance receipt canonical identity 内容冲突。")
+                return
+            self._seen_receipts[identity] = receipt
+            self._receipt_count += 1
+            values = {
+                "event": "actuation_receipt",
+                "result": receipt.result.value,
+                "message": receipt.message or "动作回执已记录。",
+                "command_id": receipt.command_id,
+                "step_id": receipt.step_id,
+                "generation": receipt.generation,
+                "target": receipt.target,
+                "action_kind": (
+                    None if receipt.action_kind is None else receipt.action_kind.value
+                ),
+                "category": receipt.category.value,
+                "valve": receipt.valve,
+                "safety_generation": receipt.safety_generation,
+                "started_ns": receipt.started_ns,
+                "actual_ns": receipt.actual_ns,
+                "stale": receipt.stale,
+            }
+        else:
+            values = dict(item.payload)
+        event = str(values.pop("event"))
+        result = str(values.pop("result"))
+        message = str(values.pop("message"))
+        self._write_log_record(
+            {
+                "record_type": item.record_type,
+                "event": event,
+                "timestamp": _timestamp_iso(item.timestamp),
+                "monotonic_ns": item.monotonic_ns,
+                "source": item.producer,
+                "result": result,
+                "message": message,
+                "producer": item.producer,
+                "producer_sequence": item.producer_sequence,
+                "event_id": item.event_id,
+                **values,
+            },
+            stage="log_write",
+        )
         self._records_since_flush += 1
         if self._records_since_flush >= self.config.flush_every_records:
             self._periodic_flush()
@@ -980,6 +1472,13 @@ class SessionWriterWorker(QThread):
             "actual_duration_ms": receipt.actual_duration_ms,
             "target_device": receipt.target_device,
             "target_line": receipt.target_line,
+            "operation_id": receipt.operation_id,
+            "generation": receipt.generation,
+            "step_id": receipt.step_id,
+            "action_kind": (
+                None if receipt.action_kind is None else receipt.action_kind.value
+            ),
+            "safety_generation": receipt.safety_generation,
         }
         contract_reason = _receipt_contract_reason(
             payload,
@@ -1096,11 +1595,15 @@ class SessionWriterWorker(QThread):
 
     def _periodic_flush(self) -> None:
         self._fault("periodic_flush", self.descriptor.paths.staging_dir)
-        self._raw_handle.flush()
+        if self._raw_handle is not None:
+            self._raw_handle.flush()
         self._log_handle.flush()
         self._records_since_flush = 0
 
     def _finalize(self) -> None:
+        if self._maintenance:
+            self._finalize_maintenance()
+            return
         self._ensure_publish_allowed()
         ended_at = datetime.now().astimezone()
         final_event_count = self._log_event_count + 1
@@ -1224,25 +1727,165 @@ class SessionWriterWorker(QThread):
                 )
         self.finalization_ack.emit(result)
 
+    def _finalize_maintenance(self) -> None:
+        descriptor = self.descriptor
+        assert isinstance(descriptor, MaintenanceDescriptor)
+        self._ensure_publish_allowed()
+        if (
+            self._maintenance_status != CleaningStatus.COMPLETED
+            or self._maintenance_outcome not in {"completed", "aborted"}
+        ):
+            raise RuntimeError(
+                "失败或 recovery-required maintenance bundle 不得发布 complete。"
+            )
+        ended_at = datetime.now().astimezone()
+        self._write_log_record(
+            {
+                "record_type": "maintenance_event",
+                "event": "maintenance_closed",
+                "timestamp": ended_at.isoformat(timespec="milliseconds"),
+                "monotonic_ns": time.perf_counter_ns(),
+                "source": "maintenance",
+                "result": self._maintenance_outcome,
+                "message": "maintenance bundle 已完成收尾，等待发布。",
+                "producer": "maintenance",
+                "producer_sequence": 2,
+                "event_id": f"maintenance:{descriptor.generation}:2",
+                "reason": self._close_reason,
+                "operation_status": self._maintenance_status.value,
+                "outcome": self._maintenance_outcome,
+                "failure_reason": self._maintenance_failure_reason,
+                "receipt_count": self._receipt_count,
+                "producer_fences": dict(self._fences),
+            },
+            stage="log_write",
+        )
+        self._flush_fsync_close(
+            self._log_handle,
+            descriptor.paths.log_path,
+            "log",
+        )
+        self._log_handle = None
+        manifest = {
+            "schema": "maintenance-v1",
+            "status": "complete",
+            "operation_id": descriptor.operation_id,
+            "operation_generation": descriptor.generation,
+            "stem": descriptor.stem,
+            "log_file": descriptor.paths.log_path.name,
+            "plan_snapshot": _to_jsonable(descriptor.plan_snapshot),
+            "step_count": descriptor.step_count,
+            "receipt_count": self._receipt_count,
+            "producer_fences": dict(self._fences),
+            "log_sha256": self._log_hash.hexdigest(),
+            "log_bytes": self._log_bytes,
+            "log_event_count": self._log_event_count,
+            "last_sequence": self._session_sequence,
+            "operation_status": self._maintenance_status.value,
+            "outcome": self._maintenance_outcome,
+            "failure_reason": self._maintenance_failure_reason,
+            "queue_high_water": self._queue_high_water,
+            "dropped_count": self._dropped_count,
+            "started_at": self._recording_started_at_iso,
+            "ended_at": ended_at.isoformat(timespec="milliseconds"),
+        }
+        self._commit_manifest(manifest)
+        self._fault("publish_rename", descriptor.paths.staging_dir)
+        result = MaintenanceFinalizationResult(
+            operation_id=descriptor.operation_id,
+            complete=True,
+            status=CleaningStatus.COMPLETED,
+            outcome=self._maintenance_outcome,
+            final_dir=descriptor.paths.final_dir,
+            message="maintenance bundle 已完整发布。",
+        )
+        self._ensure_publish_allowed()
+        if descriptor.paths.final_dir.exists():
+            raise FileExistsError(
+                f"最终 maintenance 目录已存在：{descriptor.paths.final_dir}"
+            )
+        os.rename(descriptor.paths.staging_dir, descriptor.paths.final_dir)
+        rollback = False
+        with self._state_lock:
+            if self._publish_cancelled.is_set() or self._final_result is not None:
+                rollback = True
+            elif (
+                self._close_deadline_monotonic is not None
+                and time.monotonic() >= self._close_deadline_monotonic
+            ):
+                self._claim_close_timeout_locked()
+                rollback = True
+            else:
+                self._final_result = result
+                self._maintenance_terminal_snapshot = (
+                    MaintenanceWriterTerminalSnapshot(
+                        operation_id=descriptor.operation_id,
+                        generation=descriptor.generation,
+                        status=CleaningStatus.COMPLETED,
+                        outcome=self._maintenance_outcome,
+                        persisted_log_event_count=self._log_event_count,
+                        unpersisted_count=0,
+                        reason=self._close_reason,
+                    )
+                )
+                self.readiness_latch.close(
+                    operation_id=descriptor.operation_id,
+                    generation=descriptor.generation,
+                )
+                self._finalized.set()
+        if rollback:
+            try:
+                if descriptor.paths.final_dir.exists() and not descriptor.paths.staging_dir.exists():
+                    os.rename(descriptor.paths.final_dir, descriptor.paths.staging_dir)
+            finally:
+                raise _FinalizationCancelled(
+                    "maintenance publish 完成前收到失败/timeout，已撤销最终目录"
+                )
+        self.finalization_ack.emit(result)
+
     def _claim_close_timeout_locked(self) -> None:
         message = (
-            "会话关闭等待 producer fence 超时；硬件安全释放不受阻，"
-            "未完成数据保留在 .session.part。"
+            "maintenance 关闭等待 producer fence 超时；安全全关不受阻，"
+            "未完成数据保留在 .maintenance.part。"
+            if self._maintenance
+            else (
+                "会话关闭等待 producer fence 超时；硬件安全释放不受阻，"
+                "未完成数据保留在 .session.part。"
+            )
         )
-        self._final_result = SessionFinalizationResult(
-            session_id=self.descriptor.session_id,
-            complete=False,
-            status=SessionStatus.RECOVERY_REQUIRED,
-            final_dir=None,
-            message=message,
-        )
+        if self._maintenance:
+            descriptor = self.descriptor
+            assert isinstance(descriptor, MaintenanceDescriptor)
+            self._final_result = MaintenanceFinalizationResult(
+                operation_id=descriptor.operation_id,
+                complete=False,
+                status=CleaningStatus.RECOVERY_REQUIRED,
+                outcome="failed",
+                final_dir=None,
+                message=message,
+            )
+            self._maintenance_terminal_snapshot = (
+                MaintenanceWriterTerminalSnapshot(
+                    operation_id=descriptor.operation_id,
+                    generation=descriptor.generation,
+                    status=CleaningStatus.RECOVERY_REQUIRED,
+                    outcome="failed",
+                    persisted_log_event_count=self._log_event_count,
+                    unpersisted_count=self._queue.qsize() + self._dropped_count,
+                    reason=message,
+                )
+            )
+        else:
+            self._final_result = SessionFinalizationResult(
+                session_id=self.descriptor.session_id,
+                complete=False,
+                status=SessionStatus.RECOVERY_REQUIRED,
+                final_dir=None,
+                message=message,
+            )
         self._stop_requested.set()
         self._publish_cancelled.set()
-        self.readiness_latch.fail(
-            message,
-            session_id=self.descriptor.session_id,
-            generation=self.descriptor.generation,
-        )
+        self._fail_readiness(message)
         self._finalized.set()
 
     def _mark_publish_rollback_failure(self, error: Exception) -> None:
@@ -1254,12 +1897,24 @@ class SessionWriterWorker(QThread):
             "schema": "olfactorypilot.publish_failure",
             "schema_version": 1,
             "status": "recovery_required",
-            "session_id": self.descriptor.session_id,
-            "session_generation": self.descriptor.generation,
             "stem": self.descriptor.stem,
             "stage": "publish_rollback",
             "message": str(error),
         }
+        if self._maintenance:
+            payload.update(
+                {
+                    "operation_id": self.descriptor.operation_id,
+                    "operation_generation": self.descriptor.generation,
+                }
+            )
+        else:
+            payload.update(
+                {
+                    "session_id": self.descriptor.session_id,
+                    "session_generation": self.descriptor.generation,
+                }
+            )
         handle = None
         try:
             handle = temp.open("xb")
@@ -1372,14 +2027,25 @@ class SessionWriterWorker(QThread):
 
     def _write_log_record(self, values: dict[str, Any], *, stage: str) -> None:
         self._session_sequence += 1
-        record = {
-            **_to_jsonable(values),
-            "schema": "olfactorypilot.event",
-            "schema_version": 1,
-            "session_id": self.descriptor.session_id,
-            "session_generation": self.descriptor.generation,
-            "session_sequence": self._session_sequence,
-        }
+        if self._maintenance:
+            descriptor = self.descriptor
+            assert isinstance(descriptor, MaintenanceDescriptor)
+            record = {
+                **_to_jsonable(values),
+                "schema": "maintenance-v1.event",
+                "operation_id": descriptor.operation_id,
+                "operation_generation": descriptor.generation,
+                "operation_sequence": self._session_sequence,
+            }
+        else:
+            record = {
+                **_to_jsonable(values),
+                "schema": "olfactorypilot.event",
+                "schema_version": 1,
+                "session_id": self.descriptor.session_id,
+                "session_generation": self.descriptor.generation,
+                "session_sequence": self._session_sequence,
+            }
         required = {
             "record_type",
             "event",
@@ -1450,18 +2116,24 @@ class SessionWriterWorker(QThread):
         notify: bool = True,
     ) -> None:
         message = (
-            f"会话写入失败（{stage}）：{detail}。请检查磁盘空间或目录权限；"
-            "实验已停止记录，请执行安全停止后新建会话。"
+            (
+                f"maintenance 写入失败（{stage}）：{detail}。"
+                "记录 readiness 已锁存失败；系统继续执行安全全关，"
+                "请按恢复提示处理隔离目录。"
+            )
+            if self._maintenance
+            else (
+                f"会话写入失败（{stage}）：{detail}。请检查磁盘空间或目录权限；"
+                "实验已停止记录，请执行安全停止后新建会话。"
+            )
         )
-        first = self.readiness_latch.fail(
-            message,
-            session_id=self.descriptor.session_id,
-            generation=self.descriptor.generation,
-        )
+        first = self._fail_readiness(message)
         with self._state_lock:
             if self._failure is None:
                 self._failure = SessionWriterFailure(
-                    session_id=self.descriptor.session_id,
+                    session_id=(
+                        "" if self._maintenance else self.descriptor.session_id
+                    ),
                     session_generation=self.descriptor.generation,
                     stage=stage,
                     path=str(path),
@@ -1473,20 +2145,60 @@ class SessionWriterWorker(QThread):
                 self._stop_requested.set()
                 self._publish_cancelled.set()
                 if self._final_result is None:
-                    self._final_result = SessionFinalizationResult(
-                        session_id=self.descriptor.session_id,
-                        complete=False,
-                        status=(
-                            SessionStatus.RECOVERY_REQUIRED
-                            if recovery_required or self._initialized_success
-                            else SessionStatus.FAILED
-                        ),
-                        final_dir=None,
-                        message=message,
-                    )
+                    if self._maintenance:
+                        self._final_result = MaintenanceFinalizationResult(
+                            operation_id=self.descriptor.operation_id,
+                            complete=False,
+                            status=(
+                                CleaningStatus.RECOVERY_REQUIRED
+                                if recovery_required or self._initialized_success
+                                else CleaningStatus.FAILED
+                            ),
+                            outcome="failed",
+                            final_dir=None,
+                            message=message,
+                        )
+                        self._maintenance_terminal_snapshot = (
+                            MaintenanceWriterTerminalSnapshot(
+                                operation_id=self.descriptor.operation_id,
+                                generation=self.descriptor.generation,
+                                status=self._final_result.status,
+                                outcome="failed",
+                                persisted_log_event_count=self._log_event_count,
+                                unpersisted_count=(
+                                    self._queue.qsize() + self._dropped_count
+                                ),
+                                reason=message,
+                            )
+                        )
+                    else:
+                        self._final_result = SessionFinalizationResult(
+                            session_id=self.descriptor.session_id,
+                            complete=False,
+                            status=(
+                                SessionStatus.RECOVERY_REQUIRED
+                                if recovery_required or self._initialized_success
+                                else SessionStatus.FAILED
+                            ),
+                            final_dir=None,
+                            message=message,
+                        )
                 self._finalized.set()
         if first and notify:
             self.notify_failure()
+
+    def _fail_readiness(self, message: str) -> bool:
+        if self._maintenance:
+            return self.readiness_latch.fail(
+                message,
+                operation_id=self.descriptor.operation_id,
+                generation=self.descriptor.generation,
+            )
+        return self.readiness_latch.fail(
+            message,
+            session_id=self.descriptor.session_id,
+            generation=self.descriptor.generation,
+        )
 
     def _ensure_publish_allowed(self) -> None:
         with self._state_lock:

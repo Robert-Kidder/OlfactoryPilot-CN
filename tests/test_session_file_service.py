@@ -1471,6 +1471,55 @@ def test_complete_validator_rejects_invalid_receipt_and_quality_semantics(
     assert not validation.complete
 
 
+def test_complete_validator_accepts_reverse_polarity_selector_safe_receipt(
+    tmp_path: Path,
+) -> None:
+    bundle, raw, log, manifest_path = _write_strict_complete_bundle(
+        tmp_path,
+        "selector-safe-open",
+    )
+    _insert_contract_record(
+        log,
+        manifest_path,
+        {
+            "record_type": "receipt",
+            "event": "actuation_receipt",
+            "canonical_identity": ["session-selector-safe-open", 4, "selector-1"],
+            "command_id": "selector-1",
+            "execution_epoch": 4,
+            "arm_epoch": 3,
+            "sequence": 11,
+            "trial_id": None,
+            "trial_index": None,
+            "valve": 0,
+            "action": "open",
+            "category": "safety",
+            "expected_ns": 100,
+            "started_ns": 105,
+            "actual_ns": 110,
+            "offset_ms": 0.00001,
+            "jitter_ms": 0.00001,
+            "measurement_point": "daqmx_write_ack",
+            "actual_ns_semantics": "daqmx_write_ack",
+            "stale": False,
+            "actual_duration_ms": None,
+            "target_device": "Dev2",
+            "target_line": "P1.0",
+            "operation_id": "safe-stop-1",
+            "generation": 1,
+            "step_id": "selector_safe",
+            "action_kind": "open",
+        },
+    )
+    _refresh_bundle_manifest(raw, log, manifest_path)
+
+    validation = SessionFileService(
+        master_valve_line="Dev2/P1.0"
+    ).validate_complete_bundle(bundle)
+
+    assert validation.complete, validation.reason
+
+
 @pytest.mark.parametrize(
     ("field", "mutate"),
     [

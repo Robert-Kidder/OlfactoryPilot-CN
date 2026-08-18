@@ -13,6 +13,7 @@ from app.models import (
     AppState,
     ProtocolDocument,
     ProtocolTrial,
+    SelectorConfig,
     TriggerMode,
 )
 from app.models.protocol_execution import ProtocolExecutionStatus
@@ -43,6 +44,8 @@ def _document(mode: TriggerMode = TriggerMode.MANUAL) -> ProtocolDocument:
 def _controller(mode: TriggerMode = TriggerMode.MANUAL) -> MainController:
     state = AppState(simulation_mode=True)
     state.valve_variants = {"20-channel": {1: "Dev1/P0.0", 2: "Dev1/P0.1"}}
+    state.selector = SelectorConfig("Dev2/P1.0")
+    state.master_valve_line = "Dev2/P1.0"
     state.loaded_protocol = _document(mode)
     state.hardware_ready = True
     state.flow_setpoints_ready = True
@@ -1141,3 +1144,31 @@ def test_failed_terminal_flow_release_keeps_fail_closed_lease_token() -> None:
     assert interlock.device_lease == "protocol"
     assert interlock.connected is False
     assert "租约释放失败" in controller.state.status_message
+
+
+def test_global_stop_clears_controller_protocol_lease_bookkeeping(
+    tmp_path: Path,
+) -> None:
+    controller = _controller()
+    controller.shutdown_service.record_path = tmp_path / "shutdown.json"
+    controller.handle_protocol_start_requested()
+    controller._drain_actuation_if_not_running()
+    assert controller._protocol_lease_epoch is not None
+
+    controller.stop_hardware()
+
+    assert controller.state.last_shutdown_event["result"] == "success"
+    assert controller._protocol_lease_epoch is None
+    assert controller.flow_worker.lease_snapshot.kind.value == "idle"
+    assert controller.actuation_interlock.read()[1].device_lease == "idle"
+
+
+def test_stop_before_protocol_lease_clears_flow_safe_stop_identity() -> None:
+    controller = _controller()
+    controller.handle_protocol_stop_requested()
+    controller._drain_actuation_if_not_running()
+
+    assert controller.protocol_executor.state.status == ProtocolExecutionStatus.STOPPED
+    assert controller.flow_worker._safe_stop_identity is None
+    next_epoch = controller.protocol_executor.state.execution_epoch + 1
+    assert controller.flow_worker.acquire_protocol_lease(next_epoch)

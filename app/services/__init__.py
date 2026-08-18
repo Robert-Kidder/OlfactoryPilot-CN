@@ -2,6 +2,7 @@ from .actuation_do_adapter import ActuationDOAdapter  # noqa: F401
 from .actuation_metrics import ActuationMetrics, ActuationMetricsConfig  # noqa: F401
 from .breath_metrics import BreathSampleBuffer, FrameRateTracker, FrameStats  # noqa: F401
 from .calibration_service import CalibrationResult, CalibrationSession  # noqa: F401
+from .cleaning_config_store import CleaningConfigStore  # noqa: F401
 from .flow_service import FlowApplyResult, FlowService  # noqa: F401
 from .gating_service import GatingService  # noqa: F401
 from .hal import (  # noqa: F401
@@ -43,6 +44,7 @@ from .valve_service import ValveService  # noqa: F401
 __all__ = [
     "ActuationMetrics",
     "ActuationMetricsConfig",
+    "CleaningConfigStore",
     "ActuationDOAdapter",
     "BreathSampleBuffer",
     "FrameRateTracker",

@@ -95,6 +95,84 @@ class SessionDescriptor:
 
 
 @dataclass(frozen=True, slots=True)
+class MaintenancePaths:
+    output_dir: Path
+    staging_dir: Path
+    final_dir: Path
+    log_path: Path
+    manifest_path: Path
+    final_log_path: Path
+    final_manifest_path: Path
+
+
+@dataclass(frozen=True, slots=True)
+class MaintenanceDescriptor:
+    operation_id: str
+    generation: int
+    timestamp_text: str
+    started_at: float
+    started_at_iso: str
+    stem: str
+    paths: MaintenancePaths
+    plan_snapshot: Mapping[str, Any]
+    step_count: int
+
+    def __post_init__(self) -> None:
+        if not self.operation_id:
+            raise ValueError("maintenance operation_id 不能为空。")
+        if self.generation <= 0:
+            raise ValueError("maintenance generation 必须为正整数。")
+        if self.step_count < 0:
+            raise ValueError("maintenance step_count 不得为负数。")
+        object.__setattr__(self, "plan_snapshot", _deep_freeze(self.plan_snapshot))
+
+
+@dataclass(frozen=True, slots=True)
+class MaintenanceRecordEnvelope:
+    operation_id: str
+    operation_generation: int
+    producer: str
+    producer_sequence: int
+    event_id: str
+    record_type: str
+    payload: Mapping[str, Any]
+    timestamp: float | None = None
+    monotonic_ns: int | None = None
+
+    def __post_init__(self) -> None:
+        if not self.operation_id or self.operation_generation <= 0:
+            raise ValueError("maintenance record identity 无效。")
+        if not self.producer or self.producer_sequence < 0:
+            raise ValueError("maintenance producer identity 无效。")
+        if not self.event_id or not self.record_type:
+            raise ValueError("maintenance event identity 无效。")
+        object.__setattr__(self, "payload", _deep_freeze(self.payload))
+
+
+@dataclass(frozen=True, slots=True)
+class MaintenanceProducerFence:
+    operation_id: str
+    operation_generation: int
+    producer: str
+    producer_sequence: int
+    final_payload: Mapping[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not self.operation_id or self.operation_generation <= 0 or not self.producer:
+            raise ValueError("maintenance producer fence identity 无效。")
+        if self.producer_sequence < 0:
+            raise ValueError("maintenance producer fence sequence 无效。")
+        object.__setattr__(self, "final_payload", _deep_freeze(self.final_payload))
+
+    @property
+    def event_id(self) -> str:
+        return (
+            f"{self.producer}:{self.operation_generation}:"
+            f"fence:{self.producer_sequence}"
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class SessionRecordEnvelope:
     session_id: str
     session_generation: int

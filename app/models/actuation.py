@@ -17,6 +17,7 @@ class ActuationCategory(StrEnum):
     MANUAL = "manual"
     PRETEST = "pretest"
     MASTER = "master"
+    CLEANING = "cleaning"
 
 
 class ActuationResult(StrEnum):
@@ -66,6 +67,10 @@ class ActuationCommand:
     safety_generation: int
     target_device: str | None = None
     target_line: str | None = None
+    operation_id: str | None = None
+    generation: int | None = None
+    step_id: str | None = None
+    action_kind: ActuationAction | None = None
 
     def __post_init__(self) -> None:
         if not self.command_id:
@@ -80,6 +85,23 @@ class ActuationCommand:
             raise ValueError("duration_ns 必须位于有效正整数范围。")
         if not math.isfinite(float(self.wall_timestamp)):
             raise ValueError("wall_timestamp 必须为有限值。")
+        if self.category == ActuationCategory.CLEANING and (
+            not self.operation_id
+            or self.generation is None
+            or not self.step_id
+            or self.action_kind is None
+        ):
+            raise ValueError("CLEANING 命令必须包含完整 maintenance identity。")
+        if self.generation is not None and self.generation < 0:
+            raise ValueError("generation 必须为非负整数。")
+        if self.action_kind is not None and self.action_kind != self.action:
+            raise ValueError("action_kind 必须与 action 一致。")
+
+    @property
+    def target(self) -> str | None:
+        if self.target_device and self.target_line:
+            return f"{self.target_device}/{self.target_line}"
+        return self.target_line
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,6 +128,11 @@ class ActuationReceipt:
     actual_duration_ms: float | None = None
     target_device: str | None = None
     target_line: str | None = None
+    operation_id: str | None = None
+    generation: int | None = None
+    step_id: str | None = None
+    action_kind: ActuationAction | None = None
+    safety_generation: int = 0
 
     @classmethod
     def from_write(
@@ -156,7 +183,18 @@ class ActuationReceipt:
             actual_duration_ms=actual_duration_ms,
             target_device=command.target_device,
             target_line=command.target_line,
+            operation_id=command.operation_id,
+            generation=command.generation,
+            step_id=command.step_id,
+            action_kind=command.action_kind,
+            safety_generation=command.safety_generation,
         )
+
+    @property
+    def target(self) -> str | None:
+        if self.target_device and self.target_line:
+            return f"{self.target_device}/{self.target_line}"
+        return self.target_line
 
 
 @dataclass(frozen=True, slots=True)

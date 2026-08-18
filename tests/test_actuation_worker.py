@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -15,13 +16,17 @@ from app.models import (
     ActuationResult,
     ActuationStreamSnapshot,
     AppState,
+    AZeroReceipt,
     ProtocolDocument,
     ProtocolExecutionReadiness,
     ProtocolExecutionState,
     ProtocolExecutionStatus,
     ProtocolGateEvent,
     ProtocolTrial,
+    SafeStopPlan,
     SafetyState,
+    SelectorConfig,
+    SelectorRoute,
     TriggerMode,
 )
 from app.services.actuation_metrics import ActuationMetrics
@@ -1348,7 +1353,7 @@ def test_protocol_lease_rejects_new_manual_open_plan() -> None:
     assert "租约" in results[-1]["message"]
 
 
-def test_emergency_close_all_confirms_every_configured_target() -> None:
+def test_emergency_close_all_confirms_odor_targets_without_routing_selector() -> None:
     clock = FakeClock()
     app_state = AppState(
         hardware_variant="test",
@@ -1380,12 +1385,527 @@ def test_emergency_close_all_confirms_every_configured_target() -> None:
 
     assert worker.emergency_close_all(100)
     assert {(c.valve, c.target_line) for c in calls} == {
-        (0, "P1.0"),
         (1, "P0.0"),
         (2, "P0.1"),
     }
     assert all(c.category == ActuationCategory.SAFETY for c in calls)
     assert state.possibly_open_valves == set()
+
+
+def test_safe_stop_owner_routes_selector_only_after_a_zero_evidence() -> None:
+    clock = FakeClock()
+    app_state = AppState(
+        hardware_variant="test",
+        valve_variants={"test": {1: "Dev1/P0.0", 2: "Dev1/P0.1"}},
+        selector=SelectorConfig("Dev2/P1.0"),
+        master_valve_line="Dev2/P1.0",
+    )
+    valve_service = ValveService(
+        state=app_state,
+        safety_manager=SafetyManager(),
+        worker=None,
+        valve_variants=app_state.valve_variants,
+        hardware_variant="test",
+        selector=app_state.selector,
+    )
+    calls = []
+
+    def writer(command):
+        calls.append(command)
+        return ActuationReceipt.from_write(
+            command=command,
+            started_ns=clock.value,
+            actual_ns=clock.value,
+            wall_timestamp=10.0,
+            result=ActuationResult.SUCCESS,
+        )
+
+    worker, _state, _ = _worker(clock, writer)
+    worker.valve_service = valve_service
+    identity = worker.fence_for_safe_stop(
+        operation_id="safe-1",
+        generation=1,
+        reason="stop",
+        timeout_ms=100,
+    )
+    assert identity is not None
+    plan = SafeStopPlan(identity, app_state.selector)
+    plan.expect_a_zero("a-zero")
+    assert plan.accept_a_zero(AZeroReceipt("a-zero", identity, True, 0.0))
+
+    selector_receipt = worker.route_selector_safe(plan, 100)
+    assert selector_receipt is not None
+    assert plan.accept_selector(selector_receipt)
+    assert worker.close_odors_for_safe_stop(identity, 100)
+
+    assert [(item.valve, item.target_line) for item in calls] == [
+        (0, "P1.0"),
+        (1, "P0.0"),
+        (2, "P0.1"),
+    ]
+
+
+def test_safe_stop_owner_refuses_selector_without_a_zero_evidence() -> None:
+    clock = FakeClock()
+    app_state = AppState(
+        hardware_variant="test",
+        valve_variants={"test": {1: "Dev1/P0.0"}},
+        selector=SelectorConfig("Dev2/P1.0"),
+        master_valve_line="Dev2/P1.0",
+    )
+    valve_service = ValveService(
+        state=app_state,
+        safety_manager=SafetyManager(),
+        worker=None,
+        valve_variants=app_state.valve_variants,
+        hardware_variant="test",
+        selector=app_state.selector,
+    )
+    calls = []
+    worker, _state, _ = _worker(clock, calls.append)
+    worker.valve_service = valve_service
+    identity = worker.fence_for_safe_stop(
+        operation_id="safe-2",
+        generation=2,
+        reason="stop",
+        timeout_ms=100,
+    )
+    assert identity is not None
+    plan = SafeStopPlan(identity, app_state.selector)
+    plan.expect_a_zero("pending")
+
+    assert worker.route_selector_safe(plan, 100) is None
+    assert calls == []
+
+
+def test_generic_emergency_close_rejects_selector_valve_zero() -> None:
+    worker, _state, _ = _worker(FakeClock(), lambda command: command)
+
+    with pytest.raises(ValueError, match="SafeStopPlan"):
+        worker.submit_emergency_close(0, reason="must not bypass A zero")
+
+
+def test_public_submit_rejects_forged_selector_safety_command() -> None:
+    calls = []
+    worker, _state, _ = _worker(FakeClock(), calls.append)
+    forged = ActuationCommand(
+        command_id="forged-selector",
+        execution_epoch=2,
+        arm_epoch=2,
+        sequence=1,
+        trial_id=None,
+        trial_index=None,
+        valve=0,
+        action=ActuationAction.CLOSE,
+        category=ActuationCategory.SAFETY,
+        expected_ns=1_000_000_000,
+        duration_ns=None,
+        wall_timestamp=10.0,
+        safety_generation=1,
+        target_device="Dev2",
+        target_line="P1.0",
+        operation_id="forged",
+        generation=1,
+        step_id="selector_safe",
+        action_kind=ActuationAction.CLOSE,
+    )
+
+    assert worker.submit(forged) is False
+    assert worker.emergency_queue_size == 0
+    assert calls == []
+
+
+def test_public_submit_rejects_business_command_that_selects_safe_route() -> None:
+    worker, _state, _ = _worker(FakeClock(), lambda command: command)
+    worker.valve_service = _configured_valve_service()
+    command = ActuationCommand(
+        command_id="forged-selector-business",
+        execution_epoch=2,
+        arm_epoch=2,
+        sequence=1,
+        trial_id=None,
+        trial_index=None,
+        valve=0,
+        action=ActuationAction.CLOSE,
+        category=ActuationCategory.MASTER,
+        expected_ns=1_000_000_000,
+        duration_ns=None,
+        wall_timestamp=10.0,
+        safety_generation=1,
+        target_device="Dev2",
+        target_line="P1.0",
+    )
+
+    assert worker.submit(command) is False
+    assert worker.normal_queue_size == 0
+
+
+def test_selector_receipt_identity_conflict_requires_recovery() -> None:
+    clock = FakeClock()
+    app_state = AppState(
+        hardware_variant="test",
+        valve_variants={"test": {1: "Dev1/P0.0"}},
+        selector=SelectorConfig("Dev2/P1.0"),
+    )
+    valve_service = ValveService(
+        state=app_state,
+        safety_manager=SafetyManager(),
+        worker=None,
+        valve_variants=app_state.valve_variants,
+        hardware_variant="test",
+        selector=app_state.selector,
+    )
+
+    def writer(command):
+        receipt = ActuationReceipt.from_write(
+            command=command,
+            started_ns=clock.value,
+            actual_ns=clock.value,
+            wall_timestamp=10.0,
+            result=ActuationResult.SUCCESS,
+        )
+        return replace(receipt, operation_id="conflicting-safe-stop")
+
+    worker, _state, _ = _worker(clock, writer)
+    worker.valve_service = valve_service
+    identity = worker.fence_for_safe_stop(
+        operation_id="safe-conflict",
+        generation=3,
+        reason="stop",
+        timeout_ms=100,
+    )
+    assert identity is not None
+    plan = SafeStopPlan(identity, app_state.selector)
+    plan.expect_a_zero("a-zero")
+    assert plan.accept_a_zero(AZeroReceipt("a-zero", identity, True, 0.0))
+
+    receipt = worker.route_selector_safe(plan, 100)
+
+    assert receipt is not None
+    assert not plan.accept_selector(receipt)
+    assert plan.status.value == "recovery_required"
+    assert valve_service.selector_route == SelectorRoute.UNKNOWN
+
+
+def test_selector_receipt_rejects_mutated_arm_and_action_identity() -> None:
+    clock = FakeClock()
+    valve_service = _configured_valve_service()
+
+    def writer(command):
+        receipt = ActuationReceipt.from_write(
+            command=command,
+            started_ns=clock.value,
+            actual_ns=clock.value,
+            wall_timestamp=10.0,
+            result=ActuationResult.SUCCESS,
+        )
+        return replace(
+            receipt,
+            arm_epoch=receipt.arm_epoch + 1,
+            action_kind=None,
+        )
+
+    worker, _state, _ = _worker(clock, writer)
+    worker.valve_service = valve_service
+    identity = worker.fence_for_safe_stop(
+        operation_id="safe-full-identity",
+        generation=4,
+        reason="stop",
+        timeout_ms=100,
+    )
+    assert identity is not None
+    plan = SafeStopPlan(identity, valve_service.selector)
+    plan.expect_a_zero("a-zero")
+    assert plan.accept_a_zero(AZeroReceipt("a-zero", identity, True, 0.0))
+
+    receipt = worker.route_selector_safe(plan, 100)
+
+    assert receipt is not None and not receipt.success and receipt.stale
+    assert not plan.accept_selector(receipt)
+    assert plan.status.value == "recovery_required"
+
+
+def test_conflicting_duplicate_selector_receipt_downgrades_integrated_plan() -> None:
+    clock = FakeClock()
+    valve_service = _configured_valve_service()
+    emitted = []
+
+    def writer(command):
+        return ActuationReceipt.from_write(
+            command=command,
+            started_ns=clock.value,
+            actual_ns=clock.value,
+            wall_timestamp=10.0,
+            result=ActuationResult.SUCCESS,
+        )
+
+    worker, _state, _ = _worker(clock, writer)
+    worker.valve_service = valve_service
+    worker.receipt_ready.connect(emitted.append)
+    identity = worker.fence_for_safe_stop(
+        operation_id="safe-duplicate",
+        generation=4,
+        reason="stop",
+        timeout_ms=100,
+    )
+    assert identity is not None
+    plan = SafeStopPlan(identity, valve_service.selector)
+    plan.expect_a_zero("a-zero")
+    assert plan.accept_a_zero(AZeroReceipt("a-zero", identity, True, 0.0))
+    selector_receipt = worker.route_selector_safe(plan, 100)
+    assert selector_receipt is not None and plan.accept_selector(selector_receipt)
+    actual_receipt = next(receipt for receipt in emitted if receipt.valve == 0)
+
+    worker.consume_receipt(
+        replace(
+            actual_receipt,
+            result=ActuationResult.FAILED,
+            message="conflicting duplicate",
+        )
+    )
+
+    assert plan.status.value == "recovery_required"
+    assert "冲突" in plan.recovery_reason
+    assert valve_service.selector_route == SelectorRoute.UNKNOWN
+
+
+def test_blocking_selector_write_returning_after_deadline_is_recovery_required() -> None:
+    clock = FakeClock()
+    valve_service = _configured_valve_service()
+
+    def writer(command):
+        if command.valve == 0:
+            clock.value += 2_000_000
+        return ActuationReceipt.from_write(
+            command=command,
+            started_ns=command.expected_ns,
+            actual_ns=clock.value,
+            wall_timestamp=10.0,
+            result=ActuationResult.SUCCESS,
+        )
+
+    worker, _state, _ = _worker(clock, writer)
+    worker.valve_service = valve_service
+    identity = worker.fence_for_safe_stop(
+        operation_id="safe-late-selector",
+        generation=5,
+        reason="stop",
+        timeout_ms=100,
+    )
+    assert identity is not None
+    plan = SafeStopPlan(identity, valve_service.selector)
+    plan.expect_a_zero("a-zero")
+    assert plan.accept_a_zero(AZeroReceipt("a-zero", identity, True, 0.0))
+
+    receipt = worker.route_selector_safe(plan, timeout_ms=1)
+
+    assert receipt is not None and receipt.stale
+    assert not plan.accept_selector(receipt)
+    assert plan.status.value == "recovery_required"
+
+
+def test_abnormal_stop_uses_a_zero_receipt_before_selector_and_odor_closes() -> None:
+    clock = FakeClock()
+    app_state = AppState(
+        hardware_variant="test",
+        valve_variants={
+            "test": {1: "Dev1/P0.0"},
+            "alternate": {2: "Dev1/P0.1"},
+        },
+        selector=SelectorConfig("Dev2/P1.0"),
+        master_valve_line="Dev2/P1.0",
+    )
+    valve_service = ValveService(
+        state=app_state,
+        safety_manager=SafetyManager(),
+        worker=None,
+        valve_variants=app_state.valve_variants,
+        hardware_variant="test",
+        selector=app_state.selector,
+    )
+    calls = []
+    flows = []
+
+    def writer(command):
+        calls.append(command)
+        return ActuationReceipt.from_write(
+            command=command,
+            started_ns=clock.value,
+            actual_ns=clock.value,
+            wall_timestamp=10.0,
+            result=ActuationResult.SUCCESS,
+        )
+
+    worker, state, _ = _worker(clock, writer)
+    worker.valve_service = valve_service
+    worker._flow_submitter = lambda command: flows.append(command) or True
+
+    worker.invalidate_execution(reason="LOW_FLOW", close_all_configured=True)
+
+    assert calls == []
+    assert len(flows) == 1 and flows[0].mode == "safe_stop_a_zero"
+    worker.post_flow_result(
+        FlowCommandResult(
+            command=flows.pop(),
+            result=FlowApplyResult(True, "A=0", 0, 0, 0, 0),
+        )
+    )
+    worker.process_ready()
+
+    assert [(command.valve, command.target_line) for command in calls] == [
+        (0, "P1.0"),
+        (1, "P0.0"),
+        (2, "P0.1"),
+    ]
+    assert len(flows) == 1 and flows[0].mode == "zero"
+    worker.post_flow_result(
+        FlowCommandResult(
+            command=flows.pop(),
+            result=FlowApplyResult(True, "A/B/C=0", 0, 0, 0, 0),
+        )
+    )
+    worker.process_ready()
+
+    assert not worker._background_safe_stop_plan.safe_terminal
+    assert worker._background_safe_stop_plan.status.value == "recovery_required"
+    assert "handoff" in worker._background_safe_stop_plan.recovery_reason
+    assert "RECOVERY_REQUIRED" in state.quality_block_reason
+
+
+def test_abnormal_stop_stale_a_zero_requires_recovery_without_selector() -> None:
+    clock = FakeClock()
+    app_state = AppState(
+        hardware_variant="test",
+        valve_variants={"test": {1: "Dev1/P0.0"}},
+        selector=SelectorConfig("Dev2/P1.0"),
+        master_valve_line="Dev2/P1.0",
+    )
+    valve_service = ValveService(
+        state=app_state,
+        safety_manager=SafetyManager(),
+        worker=None,
+        valve_variants=app_state.valve_variants,
+        hardware_variant="test",
+        selector=app_state.selector,
+    )
+    calls = []
+    flows = []
+
+    def writer(command):
+        calls.append(command)
+        return ActuationReceipt.from_write(
+            command=command,
+            started_ns=clock.value,
+            actual_ns=clock.value,
+            wall_timestamp=10.0,
+            result=ActuationResult.SUCCESS,
+        )
+
+    worker, state, _ = _worker(clock, writer)
+    worker.valve_service = valve_service
+    worker._flow_submitter = lambda command: flows.append(command) or True
+    worker.invalidate_execution(reason="disconnect", close_all_configured=True)
+    command = flows.pop()
+
+    worker.post_flow_result(
+        FlowCommandResult(
+            command=command,
+            result=FlowApplyResult(True, "late", 0, 0, 0, 0),
+            stale=True,
+        )
+    )
+    worker.process_ready()
+
+    assert all(item.valve != 0 for item in calls)
+    assert worker._background_safe_stop_plan.status.value == "recovery_required"
+    assert "RECOVERY_REQUIRED" in state.quality_block_reason
+
+
+def test_abnormal_stop_rejects_flow_receipt_with_mutated_full_identity() -> None:
+    clock = FakeClock()
+    valve_service = _configured_valve_service()
+    calls = []
+    flows = []
+
+    def writer(command):
+        calls.append(command)
+        return ActuationReceipt.from_write(
+            command=command,
+            started_ns=clock.value,
+            actual_ns=clock.value,
+            wall_timestamp=10.0,
+            result=ActuationResult.SUCCESS,
+        )
+
+    worker, state, _ = _worker(clock, writer)
+    worker.valve_service = valve_service
+    worker._flow_submitter = lambda command: flows.append(command) or True
+    worker.invalidate_execution(reason="identity conflict", close_all_configured=True)
+    expected = flows.pop()
+
+    worker.post_flow_result(
+        FlowCommandResult(
+            command=replace(expected, source="manual"),
+            result=FlowApplyResult(True, "A=0", 0, 0, 0, 0),
+        )
+    )
+    worker.process_ready()
+
+    assert all(command.valve != 0 for command in calls)
+    assert worker._background_safe_stop_plan.status.value == "recovery_required"
+    assert "identity" in worker._background_safe_stop_plan.recovery_reason
+    assert "RECOVERY_REQUIRED" in state.quality_block_reason
+
+
+def test_abnormal_stop_missing_selector_still_confirms_a_zero_before_odors() -> None:
+    clock = FakeClock()
+    app_state = AppState(
+        hardware_variant="test",
+        valve_variants={"test": {1: "Dev1/P0.0"}},
+    )
+    valve_service = ValveService(
+        state=app_state,
+        safety_manager=SafetyManager(),
+        worker=None,
+        valve_variants=app_state.valve_variants,
+        hardware_variant="test",
+    )
+    calls = []
+    flows = []
+
+    def writer(command):
+        calls.append(command)
+        return ActuationReceipt.from_write(
+            command=command,
+            started_ns=clock.value,
+            actual_ns=clock.value,
+            wall_timestamp=10.0,
+            result=ActuationResult.SUCCESS,
+        )
+
+    worker, state, _ = _worker(clock, writer)
+    worker.valve_service = valve_service
+    worker._flow_submitter = lambda command: flows.append(command) or True
+
+    worker.invalidate_execution(reason="selector missing", close_all_configured=True)
+
+    assert calls == []
+    assert len(flows) == 1 and flows[0].mode == "safe_stop_a_zero"
+    worker.post_flow_result(
+        FlowCommandResult(
+            command=flows.pop(),
+            result=FlowApplyResult(True, "A=0", 0, 0, 0, 0),
+        )
+    )
+    worker.process_ready()
+
+    assert [(command.valve, command.target_line) for command in calls] == [
+        (1, "P0.0")
+    ]
+    assert len(flows) == 1 and flows[0].mode == "zero"
+    assert worker._background_safe_stop_plan.status.value == "recovery_required"
+    assert "selector" in worker._background_safe_stop_plan.recovery_reason
+    assert "RECOVERY_REQUIRED" in state.quality_block_reason
 
 
 def test_pause_closes_active_valve_then_resume_retries_same_trial_with_new_epoch() -> None:
@@ -1544,7 +2064,7 @@ def test_severe_close_advances_final_trial_then_explicit_ack_completes_without_r
     assert executor.state.trial_index == 1
 
 
-def test_severe_normal_close_enqueues_every_configured_emergency_close_before_fence() -> None:
+def test_severe_close_without_flow_owner_closes_odors_and_requires_recovery_before_fence() -> None:
     clock = FakeClock()
     readiness = ProtocolExecutionReadiness(True, True, True, "SAFE", True)
     document = ProtocolDocument(
@@ -1610,17 +2130,16 @@ def test_severe_normal_close_enqueues_every_configured_emergency_close_before_fe
         (item.valve, item.target_device, item.target_line)
         for item in severe_closes
     } == {
-        (0, "Dev2", "P1.0"),
         (1, "Dev1", "P0.0"),
         (2, "Dev1", "P0.1"),
     }
     assert all(
-        item.command_id.startswith("severe-close-")
+        item.command_id.startswith("recovery-odor-close-")
         and item.category == ActuationCategory.SAFETY
-        and item.trial_id == "one"
-        and item.trial_index == 0
         for item in severe_closes
     )
+    assert worker.valve_service.selector_route == SelectorRoute.UNKNOWN
+    assert "RECOVERY_REQUIRED" in worker.protocol_state.quality_block_reason
 
     worker.process_ready()
     assert worker._emit_recorder_fence()
@@ -1631,9 +2150,9 @@ def test_severe_normal_close_enqueues_every_configured_emergency_close_before_fe
         index
         for index, call in enumerate(recorder.calls)
         if call[0] == "receipt"
-        and call[2].command_id.startswith("severe-close-")
+        and call[2].command_id.startswith("recovery-odor-close-")
     ]
-    assert len(emergency_receipt_indexes) == 3
+    assert len(emergency_receipt_indexes) == 2
     assert max(emergency_receipt_indexes) < fence_index
 
 
@@ -1929,7 +2448,7 @@ def test_failed_do_release_prevents_false_handoff_and_restart() -> None:
     assert worker.prepare_restart() is False
 
 
-def test_failed_multistep_plan_rolls_back_every_opened_or_uncertain_target() -> None:
+def test_failed_multistep_plan_never_rolls_selector_without_a_zero_owner() -> None:
     clock = FakeClock()
     app_state = AppState(
         hardware_variant="20-channel",
@@ -1988,11 +2507,11 @@ def test_failed_multistep_plan_rolls_back_every_opened_or_uncertain_target() -> 
         (ActuationAction.OPEN, "P1.0"),
         (ActuationAction.OPEN, "P0.0"),
         (ActuationAction.CLOSE, "P0.0"),
-        (ActuationAction.CLOSE, "P1.0"),
     ]
     assert results[-1]["success"] is False
-    assert "补偿关闭" in results[-1]["message"]
-    assert valve_service.master_is_open() is False
+    assert "异常安全停止" in results[-1]["message"]
+    assert valve_service.selector_route == SelectorRoute.ODOR
+    assert "RECOVERY_REQUIRED" in worker.protocol_state.quality_block_reason
     assert valve_service.is_open(1) is False
 
 
@@ -2094,7 +2613,7 @@ def _configured_valve_service() -> ValveService:
     )
 
 
-def test_readiness_loss_closes_every_configured_target_while_executor_is_idle() -> None:
+def test_readiness_loss_without_flow_owner_never_routes_selector_and_requires_recovery() -> None:
     clock = FakeClock()
     valve_service = _configured_valve_service()
     executor = ProtocolExecutor(
@@ -2131,15 +2650,16 @@ def test_readiness_loss_closes_every_configured_target_while_executor_is_idle() 
     worker.process_ready()
 
     assert {(command.valve, command.target_line) for command in calls} == {
-        (0, "P1.0"),
         (1, "P0.0"),
         (2, "P0.1"),
     }
     assert all(command.category == ActuationCategory.SAFETY for command in calls)
     assert executor.state.status == ProtocolExecutionStatus.BLOCKED
+    assert "RECOVERY_REQUIRED" in executor.state.quality_block_reason
+    assert valve_service.selector_route == SelectorRoute.UNKNOWN
 
 
-def test_stop_waits_for_close_receipts_from_every_configured_target() -> None:
+def test_protocol_stop_uses_a_zero_before_selector_then_odors_and_final_zero() -> None:
     clock = FakeClock()
     document = ProtocolDocument(
         source_path=Path("stop.csv"),
@@ -2153,6 +2673,8 @@ def test_stop_waits_for_close_receipts_from_every_configured_target() -> None:
     )
     executor.reset(document)
     calls = []
+    flows = []
+    handoffs = []
 
     def writer(command):
         calls.append(command)
@@ -2170,8 +2692,20 @@ def test_stop_waits_for_close_receipts_from_every_configured_target() -> None:
         interlock=ActuationInterlockIngress(_safe_snapshot()),
         valve_service=_configured_valve_service(),
         monotonic_ns_clock=clock,
+        flow_submitter=lambda command: flows.append(command) or True,
     )
+    worker.protocol_safe_stop_handoff_requested.connect(handoffs.append)
     worker.post_stop(message="stop")
+    worker.process_ready()
+
+    assert calls == []
+    assert len(flows) == 1 and flows[0].mode == "safe_stop_a_zero"
+    worker.post_flow_result(
+        FlowCommandResult(
+            command=flows.pop(),
+            result=FlowApplyResult(True, "A=0", 0, 0, 0, 0),
+        )
+    )
     worker.process_ready()
 
     assert {(command.valve, command.target_line) for command in calls} == {
@@ -2179,8 +2713,31 @@ def test_stop_waits_for_close_receipts_from_every_configured_target() -> None:
         (1, "P0.0"),
         (2, "P0.1"),
     }
-    assert executor.state.status == ProtocolExecutionStatus.STOPPED
+    assert len(flows) == 1 and flows[0].mode == "zero"
+    worker.post_flow_result(
+        FlowCommandResult(
+            command=flows.pop(),
+            result=FlowApplyResult(True, "A/B/C=0", 0, 0, 0, 0),
+        )
+    )
+    worker.process_ready()
+
+    assert executor.state.status == ProtocolExecutionStatus.BLOCKED
     assert worker._safe_transition_close_pending == set()
+    assert handoffs == [worker._background_safe_stop_plan.identity]
+    worker.post_stop(message="duplicate stop while handoff is pending")
+    worker.process_ready()
+    assert executor.state.status == ProtocolExecutionStatus.BLOCKED
+    assert not worker._background_safe_stop_plan.safe_terminal
+    wrong_identity = replace(
+        handoffs[-1],
+        operation_id="different-safe-stop",
+    )
+    assert not worker.confirm_protocol_safe_stop_handoff(wrong_identity, True)
+    assert executor.state.status == ProtocolExecutionStatus.BLOCKED
+    assert worker.confirm_protocol_safe_stop_handoff(handoffs[-1], True)
+    assert executor.state.status == ProtocolExecutionStatus.STOPPED
+    assert worker._background_safe_stop_plan.safe_terminal
 
 
 def test_stopped_worker_rejects_correlated_intents_instead_of_replaying_them() -> None:
@@ -2251,7 +2808,7 @@ def test_invalidation_emits_terminal_receipt_for_every_removed_normal_command() 
     assert not worker._commands_by_id
 
 
-def test_generation_change_finishes_manual_plan_with_correlated_rollback() -> None:
+def test_generation_change_never_rolls_selector_before_a_zero_evidence() -> None:
     clock = FakeClock()
     valve_service = _configured_valve_service()
     plan = valve_service.plan_valve(
@@ -2290,12 +2847,15 @@ def test_generation_change_finishes_manual_plan_with_correlated_rollback() -> No
 
     assert [(command.action, command.target_line) for command in calls] == [
         (ActuationAction.OPEN, "P1.0"),
-        (ActuationAction.CLOSE, "P1.0"),
+        (ActuationAction.CLOSE, "P0.0"),
+        (ActuationAction.CLOSE, "P0.1"),
     ]
     assert results[-1]["request_id"] == "race"
     assert results[-1]["success"] is False
     assert worker._plan_contexts == {}
     assert worker._plan_by_command == {}
+    assert valve_service.selector_route == SelectorRoute.UNKNOWN
+    assert "RECOVERY_REQUIRED" in worker.protocol_state.quality_block_reason
 
 
 def test_load_preserves_quality_and_successful_start_clears_snapshot_atomically() -> None:

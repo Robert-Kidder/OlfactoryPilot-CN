@@ -50,7 +50,7 @@ tests/                 # 自动化测试
 - `ActuationWorker` 独占 `ProtocolExecutor`、`GatingService`、动作质量窗口和全部 DO session。协议、手动、预检与安全动作统一进入其 deadline/紧急队列，HAL 成功回执点明确为 `daqmx_write_ack`，不代表机械阀物理完成。
 - `FlowWorker` 是 Alicat 串口单写者。Controller 只提交 flow intent；`ActuationWorker` 先检查协议设备租约与 interlock，再把获准命令交给 `FlowWorker`。
 - `ActuationInterlockIngress` 是 producer-safe 的 immutable readiness store。AI/telemetry/serial producer 先更新 generation 和 unsafe latch，再发 UI 消息；只有动作 owner 在 readiness 恢复且阀门已确认关闭后才能清除 latch。
-- shutdown 固定为：停止新提交与失效 normal epoch → `emergency_close_all` 有界确认 → ActuationWorker 停止并释放 DO → HardwareWorker 在线程内释放 AI → FlowWorker 最后释放 serial。DO owner 未交还时禁止跨线程复用旧 task 做兜底关闭。
+- shutdown 的强制安全偏序为：停止新提交与失效 normal epoch → 请求 MFC A 清零并等待匹配成功 receipt → 才允许把 A 路三通选择阀切换到定义的安全路线。气味阀 1–20、B/C、ActuationWorker/DO、HardwareWorker/AI 与 FlowWorker/serial 的其余收敛顺序由 `SafeStopPlan` 明确定义；关键回执失败或状态不确定时进入 `RECOVERY_REQUIRED`。DO owner 未交还时禁止跨线程复用旧 task 做兜底写入。
 - RealHAL 按 device/port 建立持久 DO task，deadline 路径只更新端口状态向量并调用 on-demand `Task.write(auto_start=False)`；最终资源分组及 `<20ms` 性能仍必须由真实 Windows/NI HIL 证据确认。
 
 ### HAL 硬件抽象
@@ -64,14 +64,15 @@ tests/                 # 自动化测试
 
 ### 安全策略
 
-- 气流低于阈值时，阻止阀门、主阀和加热器动作。
-- 退出、停止、异常断连时关闭所有阀门。
+- 气流不满足安全条件时，阻止气味阀、A 路三通选择阀和其他危险动作。
+- `Dev2/P1.0` 是无独立全关态的 A 路三通选择阀，低电平路由到补偿出口、高电平路由到气味阀 1–20 总入口；不得建模成第 21 只普通阀。
+- 退出、停止、异常断连时按 `SafeStopPlan` 收敛，且 A 清零成功 receipt 必须先于三通阀安全路线切换。
 - 安全状态必须由 Worker/HAL 层保证，不能只依赖按钮是否可点击。
 - 关键安全事件写入日志。
 
 ### 协议与数据
 
-协议文件解析与执行能力已由 Epic 3 建立；后续变更仍以 `docs/sprint-artifacts/sprint-status.yaml` 为状态依据。相关模块包括：
+协议文件解析、TTL 和呼吸门控能力已由 Epic 3 建立；当前产品 UI 不暴露呼吸传感器操作入口，自动实验也属于后续范围，但既有底层能力和证据不回滚。后续变更仍以 `docs/sprint-artifacts/sprint-status.yaml` 为状态依据。相关模块包括：
 
 - 协议模型：保存 trial、timing、valve、trigger、metadata。
 - 协议解析服务：负责 `.txt`、`.csv` 解析和错误定位。
@@ -97,7 +98,7 @@ tests/                 # 自动化测试
 
 当前实验台的 NI 生产基线为两台 USB-6001：`Dev1` 与 `Dev2`。现场未安装 USB-6501，`Dev3` 不属于当前启动自检或 Story 3.5 HIL 的必需设备。硬件清单以设备铭牌与 NI MAX/NI-DAQmx 在线枚举共同确认；若日后新增扩展设备，只在对应电脑的本机覆盖配置中显式登记，不据此改变既有阀门映射。
 
-硬件通道映射、主阀线路、阈值、默认流量和界面文字应保持清晰可追踪。通用项目约定优先放入 `default_config.json`；只与某台电脑或某次现场校准有关的值必须放入本机覆盖配置，避免 Git 同步互相覆盖。
+硬件方案使用 versioned `HardwareProfile` 表达机外气口、内部控制阀位、NI target、显示名称、启用状态、极性和验证指纹。机外气口固定为 1–20；当前初始化映射为机外 2/4/6/8/12/14/16/18 对应内部阀位 2–9，三通选择阀单独建模。通用项目约定优先放入 `default_config.json`；只与某台电脑或某次现场校准有关的值放入本机覆盖配置。硬件配置必须经过 schema/交叉校验、同目录原子替换和显式回滚，不能存入 View 私有状态或 QSettings。
 
 ## 6. 测试策略
 
@@ -107,3 +108,30 @@ tests/                 # 自动化测试
 - 模拟模式测试：不依赖真实硬件即可运行 CI。
 
 真实硬件验证结果应记录到 sprint artifact 或专门的测试记录中，不应替代自动化测试。
+
+## 7. Epic 4 当前技术边界
+
+2026-07-31 的 Epic 4 冻结文档保留为历史证据，但其中“master valve / 21-target 全关”语义已被 2026-08-17 批准的 Correct Course 取代。当前只实施 Story 4.5 和 Story 4.6。
+
+### Story 4.5：SafeStopPlan
+
+- `Dev2/P1.0` 使用 selector 专用模型，不占用气味气口或普通阀身份。
+- 全局停止、故障停止和 shutdown 共享同一 `SafeStopPlan`；A 清零 receipt 是 selector 切换的硬前置条件。
+- stale/late/conflicting receipt 不推进步骤；失败、超时或不确定状态进入 `RECOVERY_REQUIRED`。
+- 保留现有 owner、lease、epoch、receipt、紧急队列和 handoff，不重写 HAL/Worker 拓扑。
+
+### Story 4.6：新版手动实验纵切片
+
+- 使用 Intent → Command → Receipt → immutable Snapshot。View 只保留未提交 draft 和即时视觉反馈，不直接访问 HAL、不持有硬件状态。
+- `FlowSetpoints` 校验 `0 ≤ A ≤ T` 并派生 `B=T-A`；`ChannelRegistry` 负责机外气口 ↔ 内部阀位 ↔ NI target。
+- 手动供气和刺激阶段由 ActuationWorker/协调器持有。刺激持续时间从全部目标成功 open receipt 的共同就绪时刻起算，由 monotonic deadline 自动关闭；UI `QTimer` 只刷新倒计时。
+- 未来自动实验只能生成相同的 typed phase plan，复用 ActuationWorker、FlowWorker、HAL、lease、epoch 和 receipt，不能模拟 UI 点击。
+- 方案 B V3 通过 Mock、UI 与适用 HIL 后，删除旧 `PreTestView`、View 硬件计时、重复状态、无用弹窗和第二条真实硬件入口。
+
+### 配置、清洗与验证
+
+- HardwareProfile 只来自 `default_config.json + local_config.json`；UI 编辑 candidate，保存需断开安全态、schema/唯一性校验和原子替换。
+- 映射或极性变化使相关气口重新待验证；仅修改显示名称保留验证状态。
+- 清洗继续保留 `CLEANING`、maintenance lease、`maintenance-v1` bundle、owner deadline 与 recovery 资产，但必须改用 selector、SafeStopPlan 和 HardwareProfile，不再使用 21-target 终态。
+- 跨 owner 交错使用 fake clock、Event/Barrier、cancellation token、fake filesystem 和 fault injection；禁止 sleep-only 竞态断言。
+- 修改 selector、SafeStopPlan、ActuationWorker/FlowWorker、NI/serial、deadline、映射或 shutdown 时执行范围触发式真实 Windows/NI HIL；Mock 和 `daqmx_write_ack` 不能替代机械/出口证据。

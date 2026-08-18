@@ -16,6 +16,7 @@ from app.models import (
     ProtocolDocument,
     ProtocolTrial,
     SafetyState,
+    SelectorConfig,
     TriggerMode,
 )
 from app.models.session import SessionStatus
@@ -57,6 +58,8 @@ def wait_until(qt_app, predicate, timeout: float = 1.0) -> None:
 
 def _session_lifecycle_controller(tmp_path: Path) -> MainController:
     state = AppState(simulation_mode=True)
+    state.selector = SelectorConfig("Dev2/P1.0")
+    state.master_valve_line = state.selector.target
     state.valve_variants = {"20-channel": {1: "Dev1/P0.0"}}
     state.loaded_protocol = ProtocolDocument(
         source_path=Path("demo.csv"),
@@ -1715,6 +1718,8 @@ def test_reset_requires_ready_and_reinitializes_hardware(qt_app, track_controlle
             "safety_state": "SAFE",
         }
     )
+    state.selector = SelectorConfig("Dev2/P1.0")
+    state.master_valve_line = state.selector.target
     worker = HardwareWorker(telemetry_hz=1)
     controller = track_controller_workers(
         MainController(state, worker, safety_manager=SafetyManager(low_flow_threshold=0.2))
@@ -1830,6 +1835,8 @@ def test_reset_reinitializes_without_pending_double_self_check(qt_app, track_con
             "safety_state": "SAFE",
         }
     )
+    state.selector = SelectorConfig("Dev2/P1.0")
+    state.master_valve_line = state.selector.target
     worker = HardwareWorker(telemetry_hz=1)
     controller = MainController(state, worker, safety_manager=SafetyManager(low_flow_threshold=0.2))
     track_controller_workers(controller)
@@ -1873,6 +1880,8 @@ def test_stop_records_shutdown_event_and_marks_disconnected(qt_app):
             "safety_state": "SAFE",
         }
     )
+    state.selector = SelectorConfig("Dev2/P1.0")
+    state.master_valve_line = state.selector.target
     worker = HardwareWorker(telemetry_hz=1)
     controller = MainController(state, worker, safety_manager=SafetyManager(low_flow_threshold=0.2))
     now_ts = time.time()
@@ -1914,6 +1923,8 @@ def test_stop_then_disconnect_telemetry_does_not_raise_safety_popup(qt_app):
             "safety_state": "SAFE",
         }
     )
+    state.selector = SelectorConfig("Dev2/P1.0")
+    state.master_valve_line = state.selector.target
     worker = HardwareWorker(telemetry_hz=1)
     controller = MainController(state, worker, safety_manager=SafetyManager(low_flow_threshold=0.2))
     window = MainWindow(controller, state)
@@ -1943,7 +1954,7 @@ def test_stop_then_disconnect_telemetry_does_not_raise_safety_popup(qt_app):
     assert "DATA_STALE" not in window._telemetry_label.text()
 
 
-def test_shutdown_without_actuation_owner_is_persisted_as_unsafe(tmp_path: Path):
+def test_shutdown_without_safe_stop_owners_requires_recovery(tmp_path: Path):
     state = AppState.from_config(
         {
             "language": "zh-CN",
@@ -1971,18 +1982,18 @@ def test_shutdown_without_actuation_owner_is_persisted_as_unsafe(tmp_path: Path)
 
     event = service.shutdown(source="tests", reason="unit", force=True)
 
-    assert event["result"] == "unsafe"
+    assert event["result"] == "recovery_required"
     assert event["source"] == "tests"
     assert record_path.exists()
     on_disk = ShutdownService.load_last_event(record_path)
     assert on_disk and on_disk["source"] == "tests"
-    assert state.last_shutdown_event["result"] == "unsafe"
+    assert state.last_shutdown_event["result"] == "recovery_required"
     assert state.hardware_ready is False
     assert state.telemetry.connected is False
-    assert state.telemetry.safety_state == "DATA_STALE"
+    assert state.telemetry.safety_state == "RECOVERY_REQUIRED"
 
 
-def test_shutdown_retry_marks_unsafe_on_failure(tmp_path: Path):
+def test_shutdown_retry_without_safe_stop_owners_remains_recovery_required(tmp_path: Path):
     class FailingWorker:
         def __init__(self) -> None:
             self.stopped = False
@@ -2030,10 +2041,10 @@ def test_shutdown_retry_marks_unsafe_on_failure(tmp_path: Path):
 
     event = service.shutdown(source="tests", reason="fail", force=True)
 
-    assert event["result"] == "unsafe"
+    assert event["result"] == "recovery_required"
     assert event["retries"] == 1
-    assert "失败" in event["error"] or "error" in event["error"].lower()
-    assert state.telemetry.safety_state == "DATA_STALE"
+    assert "safe-stop owners" in event["error"]
+    assert state.telemetry.safety_state == "RECOVERY_REQUIRED"
     assert worker.stopped is True
 
 
@@ -2109,6 +2120,8 @@ def test_stop_persists_shutdown_to_configured_path(tmp_path: Path, qt_app):
             "safety_state": "SAFE",
         }
     )
+    state.selector = SelectorConfig("Dev2/P1.0")
+    state.master_valve_line = state.selector.target
     worker = HardwareWorker(telemetry_hz=1)
     controller = MainController(
         state,

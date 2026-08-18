@@ -1,7 +1,7 @@
 # Sprint 状态文件
 # 生成时间: 2026-07-09 16:54
 generated: 2026-07-09 16:54
-last_updated: 2026-07-30
+last_updated: 2026-08-17
 project: OlfactoryPilot-CN
 project_key: OLFACTORY
 tracking_system: file-system
@@ -35,14 +35,53 @@ development_status:
   3-5-session-file-naming-and-logging: done
   epic-3-retrospective: done
 
-  epic-4: backlog
-  4-1-cleaning-automation: backlog
-  4-2-configurable-com-and-ni-ids: backlog
-  4-3-chinese-ui-localization: backlog
-  4-4-compensation-logic-automation: backlog
+  epic-4: in-progress
+  4-1-cleaning-automation: paused
+  4-2-configurable-com-and-ni-ids: superseded-by-4-6
+  4-3-chinese-ui-localization: superseded-by-4-6
+  4-4-compensation-logic-automation: superseded-by-4-6
+  4-5-safe-stop-selector-order: done
+  4-6-manual-experiment-v3-replacement: backlog
   epic-4-retrospective: optional
 
+epic_boundaries:
+  epic-4:
+    status: rebaselined
+    rebaselined_on: 2026-08-17
+    approved_by: Jing
+    supersedes:
+      - "docs/sprint-artifacts/epic-4-technical-boundary-2026-07-31.md"
+      - "docs/sprint-artifacts/sprint-change-proposal-2026-07-31.md"
+    change_proposal: "_bmad-output/planning-artifacts/sprint-change-proposal-2026-08-17.md"
+    recommended_implementation_order:
+      - 4-5-safe-stop-selector-order
+      - 4-6-manual-experiment-v3-replacement
+      - decide-4-1-cleaning-automation-resumption
+    change_control: "只有产品范围、硬件事实或安全不变量发生实质变化时运行 Correct Course；普通 UI、明确 bug 和局部重构默认使用 Quick Dev。"
+
+workflow_policy:
+  default: bmad-quick-dev
+  standard_feature: "Quick Dev + automated tests + one user acceptance"
+  safety_critical_hardware: "compact story/spec + Quick Dev + one independent code review + separately authorized HIL"
+  optional_by_default:
+    - validate-story
+    - standalone-code-review-for-noncritical-work
+    - retrospective
+
 action_items:
+  - epic: 4
+    action: "暂停旧 Story 4.1，停止基于 21-target 语义的旧 HIL；保护当前未提交实现和证据。"
+    owner: "Jing + Developer"
+    status: done
+    completed: 2026-08-17
+    evidence: "_bmad-output/planning-artifacts/sprint-change-proposal-2026-08-17.md"
+  - epic: 4
+    action: "实施 Story 4.5：确认 A 清零成功 receipt 后才切换三通阀安全路线。"
+    owner: "Developer + Jing"
+    status: done
+    completed: 2026-08-17
+    completion_note: "独立复审 R-01–R-10 已全部整改；415 项定向测试、762 项全量测试、Ruff 与 diff check 通过。真实 HIL 仍须另行授权。"
+    evidence: "docs/sprint-artifacts/4-5-safe-stop-selector-order.md"
   - epic: 3
     action: "对齐 BMM artifact 配置与项目权威 docs/sprint-artifacts 状态源。"
     owner: "Jing + Amelia"
@@ -58,19 +97,27 @@ action_items:
   - epic: 3
     action: "在 Story 4.1 开发前固定 CLEANING category、设备租约、记录和恢复矩阵。"
     owner: "Winston + Amelia + Murat"
-    status: open
+    status: done
+    completed: 2026-07-31
+    evidence: "docs/sprint-artifacts/epic-4-technical-boundary-2026-07-31.md#3-story-41--cleaning-状态机冻结"
   - epic: 3
     action: "在 Story 4.4 开发前固定 flow→master→odor 状态机和 receipt identity。"
     owner: "Winston + Amelia"
-    status: open
+    status: done
+    completed: 2026-07-31
+    evidence: "docs/sprint-artifacts/epic-4-technical-boundary-2026-07-31.md#6-story-44--flow--master--odor-状态机冻结"
   - epic: 3
     action: "为 Epic 4 建立 Event/Barrier/fake-clock/fault-injection 确定性并发测试清单。"
     owner: "Murat + Amelia"
-    status: open
+    status: done
+    completed: 2026-07-31
+    evidence: "docs/sprint-artifacts/epic-4-technical-boundary-2026-07-31.md#7-确定性并发测试清单"
   - epic: 3
     action: "在首个 Epic 4 硬件 Story 开发前建立变更触发式真实 Windows/NI HIL 矩阵。"
     owner: "Murat + Jing"
-    status: open
+    status: done
+    completed: 2026-07-31
+    evidence: "docs/sprint-artifacts/epic-4-technical-boundary-2026-07-31.md#8-真实-windowsni-hil-触发矩阵"
   - epic: 3
     action: "在实验室发布候选确认前完成 PyInstaller 干跑、资源审计与产物留证。"
     owner: "Amelia + Paige"
@@ -84,7 +131,9 @@ action_items:
   - epic: 3
     action: "在 Story 4.2 开发前完成断开态配置事务、回滚和 owner handoff 测试设计。"
     owner: "Amelia + Murat"
-    status: open
+    status: done
+    completed: 2026-07-31
+    evidence: "docs/sprint-artifacts/epic-4-technical-boundary-2026-07-31.md#4-story-42--断开态配置事务冻结"
   - epic: 3
     action: "在 Story 4.3 验收前增加用户可见中文与乱码自动化审计。"
     owner: "Paige + Amelia"

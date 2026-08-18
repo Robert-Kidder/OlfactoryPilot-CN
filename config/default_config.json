@@ -20,10 +20,52 @@
   "session_writer_queue_capacity": 4096,
   "session_writer_flush_every_records": 100,
   "session_writer_close_timeout_ms": 5000,
+  "cleaning": {
+    "enabled": true,
+    "gas_label": "Air",
+    "flow_channel": "A",
+    "default_flow_sccm": 1500,
+    "max_approved_flow_sccm": 1500,
+    "flow_ready_timeout_ms": 5000,
+    "fixed_flow_setpoints_sccm": {
+      "B": 0,
+      "C": 0
+    },
+    "default_open_duration_s": 10,
+    "max_open_duration_s": 120,
+    "default_cycles": 3,
+    "max_cycles": 20,
+    "parallel_open_limit": 1,
+    "default_channels": [
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9
+    ],
+    "external_labels": {
+      "2": "2",
+      "3": "4",
+      "4": "6",
+      "5": "8",
+      "6": "12",
+      "7": "14",
+      "8": "16",
+      "9": "18"
+    }
+  },
   "safety_state": "SAFE",
   "hardware_variant": "20-channel",
   "valve_mapping": {
-    "master_valve": "Dev2/P1.0",
+    "selector": {
+      "target": "Dev2/P1.0",
+      "safe_route": "compensation",
+      "safe_level": false,
+      "odor_level": true
+    },
     "variants": {
       "20-channel": {
         "1": "Dev1/P0.0",

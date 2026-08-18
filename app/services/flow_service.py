@@ -167,6 +167,51 @@ class FlowService:
             result.message = "流量已清零"
         return result
 
+    def apply_a_zero(self) -> FlowApplyResult:
+        """Confirm only MFC A=0; SafeStopPlan gates selector routing on this ack."""
+        try:
+            success = bool(self.hal.set_flow("A", 0.0, comp=False))
+        except TimeoutError:
+            return self._failure(
+                "A 通道清零超时，未确认 setpoint。",
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                "timeout",
+                "safe_stop_a_zero",
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            return self._failure(
+                f"A 通道清零异常：{exc}",
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                "exception",
+                "safe_stop_a_zero",
+            )
+        if not success:
+            return self._failure(
+                "A 通道 setpoint=0 未确认。",
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                "write_failed",
+                "safe_stop_a_zero",
+            )
+        self._logger.info(
+            "flow_event | %s",
+            {
+                "ts": time.time(),
+                "mode": "safe_stop_a_zero",
+                "a_target": 0.0,
+                "result": "success",
+            },
+        )
+        return FlowApplyResult(True, "A 流量已清零", 0.0, 0.0, 0.0, 0.0)
+
     def _set_master(self, state: bool) -> None:
         """主阀常开：流量写入不切换主阀。保留占位返回 True。"""
         return True

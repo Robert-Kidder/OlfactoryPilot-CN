@@ -2,7 +2,14 @@ from __future__ import annotations
 
 import threading
 
-from app.models import ProtocolExecutionState
+import pytest
+
+from app.models import (
+    DeviceLeaseKind,
+    MaintenanceLeaseReleaseEvidence,
+    ProtocolExecutionState,
+    SafeStopIdentity,
+)
 from app.services.flow_service import FlowApplyResult
 from app.workers.actuation_worker import (
     ActuationInterlockIngress,
@@ -22,6 +29,10 @@ class _FlowService:
 
     def apply_zero(self) -> FlowApplyResult:
         self.calls.append("zero")
+        return FlowApplyResult(True, "ok", 0, 0, 0, 0)
+
+    def apply_a_zero(self) -> FlowApplyResult:
+        self.calls.append("safe_stop_a_zero")
         return FlowApplyResult(True, "ok", 0, 0, 0, 0)
 
 
@@ -107,6 +118,80 @@ def test_protocol_lease_rejects_even_current_epoch_safety_flow_recovery() -> Non
 
     assert service.calls == []
     assert received == []
+
+
+def test_shutdown_zero_preempts_business_lease_but_stays_on_flow_owner() -> None:
+    service = _FlowService()
+    worker = FlowWorker(service)
+    assert worker.acquire_protocol_lease(8)
+
+    assert worker.zero_for_shutdown(1000) is True
+
+    assert service.calls == ["safe_stop_a_zero", "zero"]
+    assert worker.lease_snapshot.kind.value == "protocol"
+
+
+def test_safe_stop_a_zero_receipt_is_correlated_and_fences_business_queue() -> None:
+    service = _FlowService()
+    worker = FlowWorker(service)
+    cancelled = []
+    worker.result_ready.connect(cancelled.append)
+    assert worker.submit(FlowCommand("old", 7, 1, "rest", 1, 2, 3, "manual"))
+    identity = SafeStopIdentity("safe-1", 2, 8)
+
+    receipt = worker.zero_a_for_safe_stop(identity, 1000)
+
+    assert receipt is not None
+    assert receipt.identity == identity
+    assert receipt.success and receipt.confirmed_a == 0
+    assert service.calls == ["safe_stop_a_zero"]
+    assert cancelled[0].command.command_id == "old"
+    assert cancelled[0].result.success is False
+    assert worker.submit(
+        FlowCommand("new", 8, 2, "rest", 1, 2, 3, "manual")
+    ) is False
+
+
+def test_blocking_safe_stop_a_zero_returning_after_deadline_is_rejected(
+    monkeypatch,
+) -> None:
+    now = [10.0]
+    monkeypatch.setattr(
+        "app.workers.flow_worker.time.monotonic",
+        lambda: now[0],
+    )
+
+    class _SlowFlowService(_FlowService):
+        def apply_a_zero(self) -> FlowApplyResult:
+            now[0] += 0.01
+            return super().apply_a_zero()
+
+    worker = FlowWorker(_SlowFlowService())
+
+    assert worker.zero_a_for_safe_stop(
+        SafeStopIdentity("safe-slow", 1, 1),
+        timeout_ms=1,
+    ) is None
+
+
+def test_safe_stop_rejects_conflicting_identity() -> None:
+    worker = FlowWorker(_FlowService())
+    first = SafeStopIdentity("safe-1", 2, 8)
+    conflict = SafeStopIdentity("safe-2", 2, 8)
+
+    assert worker.zero_a_for_safe_stop(first, 1000) is not None
+    assert worker.zero_a_for_safe_stop(conflict, 1000) is None
+
+
+def test_newer_safe_stop_epoch_supersedes_old_identity_but_never_rolls_back() -> None:
+    worker = FlowWorker(_FlowService())
+    first = SafeStopIdentity("safe-1", 2, 8)
+    newer = SafeStopIdentity("safe-2", 3, 9)
+    older = SafeStopIdentity("safe-old", 4, 7)
+
+    assert worker.zero_a_for_safe_stop(first, 1000) is not None
+    assert worker.zero_a_for_safe_stop(newer, 1000) is not None
+    assert worker.zero_a_for_safe_stop(older, 1000) is None
 
 
 def test_shutdown_cancels_pending_flow_and_restart_does_not_replay_it() -> None:
@@ -258,3 +343,46 @@ def test_actuation_owner_authorizes_idle_flow_and_consumes_result() -> None:
 
     assert results == [result]
     assert ingress.read()[1].flow_setpoints_ready is True
+
+
+def test_non_threaded_shutdown_releases_serial_before_reporting_handoff() -> None:
+    class HAL:
+        def __init__(self) -> None:
+            self.serial_resources_in_use = True
+            self.release_calls = 0
+
+        def release_serial_resources(self) -> None:
+            self.release_calls += 1
+            self.serial_resources_in_use = False
+
+    service = _FlowService()
+    service.hal = HAL()
+    worker = FlowWorker(service)
+
+    assert worker.shutdown()
+    assert service.hal.release_calls == 1
+    assert service.hal.serial_resources_in_use is False
+
+
+@pytest.mark.parametrize(
+    "lease_kind",
+    [DeviceLeaseKind.PROTOCOL, DeviceLeaseKind.MAINTENANCE],
+)
+def test_correlated_safe_stop_releases_active_device_lease(lease_kind) -> None:
+    worker = FlowWorker(_FlowService())
+    if lease_kind == DeviceLeaseKind.PROTOCOL:
+        assert worker.acquire_protocol_lease(1)
+    else:
+        assert worker.acquire_maintenance_lease("maintenance-1", 1) is not None
+    identity = SafeStopIdentity("global-stop", 2, execution_epoch=2)
+
+    a_receipt = worker.zero_a_for_safe_stop(identity, 100)
+    assert a_receipt is not None and a_receipt.success
+    assert worker.zero_all_for_safe_stop(identity, 100)
+    evidence = (
+        MaintenanceLeaseReleaseEvidence(True, True, True)
+        if lease_kind == DeviceLeaseKind.MAINTENANCE
+        else None
+    )
+    assert worker.release_lease_for_safe_stop(identity, evidence)
+    assert worker._lease.snapshot.kind == DeviceLeaseKind.IDLE

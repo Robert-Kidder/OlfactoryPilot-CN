@@ -19,6 +19,7 @@ dist/
 # Tooling
 .pytest_cache/
 .ruff_cache/
+.diagnostics/
 
 # IDE/editor local settings
 .vscode/

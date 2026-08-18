@@ -17,32 +17,34 @@ inputDocuments:
 ### 功能需求
 
 - FR1.1：启动自检配置中声明的 NI 设备和 RS232 端口。当前生产基线为 `Dev1`、`Dev2` 两台 NI USB-6001；`Dev3`/USB-6501 仅作为经实物与 NI MAX 确认后由本机覆盖显式加入的可选扩展。
-- FR1.2：气流高于阈值后才允许阀门、主阀或加热器动作。
-- FR1.3：退出、急停或异常断连时关闭所有阀门。
+- FR1.2：气流满足安全条件后才允许气味阀、A 路三通选择阀或其他危险动作。
+- FR1.3：停止时先请求并确认 A 清零，再切换三通阀安全路线；失败或状态不确定时进入 `RECOVERY_REQUIRED`。
 - FR1.4：提供连接、重置、停止和帮助全局工具栏。
 - FR2.1：自动生成 `{Timestamp}_{Subject}_{Condition}.raw` 文件名。
 - FR2.2：解析旧系统兼容的 `.txt` 和 `.csv` 协议文件。
 - FR2.3：每次会话保存 `.raw` 信号文件和 `.log` 事件日志。
-- FR3.1：以 100Hz 数据流显示呼吸波形，图形刷新不低于 30 FPS。
-- FR3.2：支持呼气/吸气阈值调节和可视反馈。
-- FR4.1：提供 20 通道阀门矩阵，并支持 10 通道变体。
-- FR4.2：控制 Alicat A/B/C 三路流量。
-- FR4.3：静息阶段执行 `A_comp = A_target + C_target` 补偿逻辑。
-- FR5.1：支持手动触发和外部 TTL 触发。
-- FR5.2：刺激前等待呼吸信号超过呼气阈值。
+- FR3.1：保留既有呼吸采集、门控和 TTL 底层能力；当前不提供呼吸传感器操作 UI。
+- FR3.2：呼吸硬件和需求明确后再重新规划校准、波形和门控 UX。
+- FR4.1：方案 B V3 固定显示机外气口 1–20，可用性来自持久化 HardwareProfile。
+- FR4.2：可视化配置机外气口、内部阀位、NI target、显示名称和验证状态。
+- FR4.3：三通选择阀独立建模；手动流量使用 T/A/B=`T-A`/C 领域规则。
+- FR4.4：手动刺激从成功 open receipt 起算并由 ActuationWorker 自动结束。
+- FR5.1：当前交付新版手动实验；自动实验属于 Future Scope。
+- FR5.2：未来自动实验复用同一硬件执行核心，不模拟 UI 点击。
 - FR5.3：阀门动作软件抖动目标小于 20ms。
 - FR6.1：提供自动清洗流程。
-- FR7.1：通过界面配置 COM 端口和 NI 设备 ID。
+- FR7.1：通过界面配置 COM/NI、HardwareProfile 和气口映射，并跨启动保存。
 - FR7.2：界面和用户提示使用简体中文。
-- FR7.3：预实验界面根据硬件通道数动态调整。
+- FR7.3：最终只保留新版界面，不提供新旧界面切换。
 
 ### 非功能需求
 
 - NFR1：硬件安全逻辑运行在线程/服务层，不能只依赖 UI 状态。
-- NFR2：呼吸图形刷新不低于 30 FPS。
+- NFR2：实时气流图约 20–30Hz 刷新且不阻塞控制路径。
 - NFR3：使用 PySide6，便于 Windows 桌面交付。
 - NFR4：USB、串口和磁盘异常必须安全降级并记录。
 - NFR5：使用 Python 3.11、pip requirements、ruff、pytest 和 PyInstaller。
+- NFR6：固定当前 Python 3.11、PySide6、pyqtgraph 与现有依赖版本，本轮不迁移技术栈。
 
 ## Epic 1: 安全硬件基础
 
@@ -243,48 +245,57 @@ inputDocuments:
 - 日志包含模式、阈值、硬件变体、trial 和关键事件。
 - 磁盘写入失败时提示中文错误，并避免留下误导性半成品。
 
-## Epic 4: 运行维护、清洗与本地化
+## Epic 4: 运行安全、新版手动实验与交付收口
 
-完善清洗流程、硬件配置、中文帮助和长期维护能力，让软件可以稳定交付给实验室使用。
+先修复已确认的气路停止顺序，再用一个纵向 Story 完成方案 B V3、可持久硬件方案、Owner 持有的手动刺激计时和旧界面删除。Epic 4 保留现有 Worker、HAL、lease、epoch、receipt、maintenance bundle 和安全恢复资产，不进行技术栈迁移。
 
-覆盖需求：FR6.1、FR7.1、FR7.2。
+覆盖需求：FR1.3、FR4.1–FR4.5、FR5.1–FR5.3、FR6.1、FR7.1–FR7.3、NFR1–NFR6。
 
-#### Story 4.1: 自动清洗流程
+2026-07-31 的 Epic 4 技术边界保留为历史证据；其中“master valve / 21-target 全关”语义已由 2026-08-17 批准的 Sprint Change Proposal 取代。当前顺序为 **4.5 → 4.6 → 再决定 4.1 收尾**。
 
-作为实验室技术人员，我需要自动清洗序列，以便实验后冲洗残留气味。
+#### Story 4.1: 自动清洗流程（Paused）
 
-验收标准：
+现有实现和证据全部保留，不回滚、不继续旧 HIL。Worker/HAL、lease、maintenance-v1 bundle、owner deadline、receipt/recovery 和自动化测试可以复用；所有 21-target、主阀和旧停机顺序必须在恢复该 Story 前改用 selector、SafeStopPlan 与 HardwareProfile。Story 4.5 完成后再决定立即收尾还是等待 Story 4.6。
 
-- 按配置循环阀门和持续时间。
-- 全程遵守气流安全联锁。
-- 中止或失败时关闭阀门并记录步骤。
+#### Story 4.2: COM 与 NI ID 配置界面（Superseded by 4.6）
 
-#### Story 4.2: COM 与 NI ID 配置界面
+配置、断开态事务、HardwareProfile、三层映射和验证能力并入 Story 4.6；保留历史记录，不再单独进入开发循环。
 
-作为实验室技术人员，我需要在界面中配置串口和 NI 设备 ID，以匹配实际接线。
+#### Story 4.3: 中文界面本地化（Superseded by 4.6）
 
-验收标准：
+简体中文、乱码扫描、三段式错误和可访问状态作为 Story 4.6 的横切验收；不再单独进入开发循环。
 
-- 配置保存后下次连接生效。
-- 无效 ID 会阻止保存或连接。
-- 错误提示为中文。
+#### Story 4.4: 补偿逻辑与主阀自动化（Superseded by 4.6）
 
-#### Story 4.3: 中文界面本地化
+FlowWorker/ActuationWorker 单 Owner、phase identity、receipt 和补偿能力并入 Story 4.6；`master valve` 改为 A 路三通选择阀 selector 语义。
 
-作为研究人员，我需要界面、提示和帮助内容全部为中文，以降低培训成本。
+#### Story 4.5: 全局停止顺序与三通阀模型
+
+作为实验室技术人员，我需要全局停止按已确认气路顺序进入安全状态，以避免 A 仍有流量时错误切换三通阀路线。
 
 验收标准：
 
-- 标签、按钮、状态、错误、帮助入口均为简体中文。
-- 文案风格一致、简洁、可操作。
-- 不再出现乱码或旧英文用户提示。
+- `Dev2/P1.0` 作为独立二选一路由 selector 建模，不属于气味阀 1–20，也不称为第 21 只普通阀。
+- 所有全局停止、异常停止和 shutdown 路径保证：A 清零成功 receipt 先于 selector 切换安全路线。
+- A 清零失败、超时、迟到/冲突 receipt 或 selector 状态不确定时进入 `RECOVERY_REQUIRED`，不报告“已安全停止”。
+- 保留现有 Worker/HAL/lease/epoch/receipt、紧急抢占和 owner handoff，不重写硬件底层。
+- 自动化测试和经单独授权的真实 HIL 证明顺序；通过前，Story 4.6 不接入真实硬件。
 
-#### Story 4.4: 补偿逻辑与主阀自动化
+#### Story 4.6: 方案 B V3 手动实验替换
 
-作为研究人员，我需要系统自动处理静息和刺激阶段的补偿流量与主阀状态，以保持气压稳定。
+作为实验人员，我需要在唯一的新版手动实验界面中配置流量、选择真实机外气口并按可靠时长释放气味，以便无需理解内部线程或 NI 线路即可完成日常实验。
 
 验收标准：
 
-- 静息阶段主阀关闭，气味阀关闭，MFC A 设置为 `A_target + C_target`。
-- 刺激阶段主阀打开，目标气味阀打开，MFC A 设置为 `A_target`，MFC C 设置为 0。
-- 阶段切换时先调整流量，再切换主阀，减少压力突变。
+- 固定使用 Python 3.11、PySide6 Widgets、pyqtgraph 和现有 Worker/HAL，不安排版本或技术栈迁移。
+- 产品只保留方案 B V3 新版手动实验入口，不提供 legacy 开关。
+- 固定显示机外气口 1–20；未接入位置变灰。可用性来自可持久 HardwareProfile，不得写死在 View。
+- 设置中可视化配置“机外气口 → 内部控制阀位 → NI 线路”，支持显示名称、单气口验证、自然验证状态和跨启动保存。
+- 当前初始化映射为机外 2/4/6/8/12/14/16/18 对应内部阀位 2–9；`Dev2/P1.0` 单独作为 selector。
+- T/A/B/C 使用受校验的领域模型，B 只读派生为 `T-A`。
+- 手动刺激从全部目标成功 open receipt 的共同就绪时刻起算，由 `ActuationWorker` monotonic deadline 自动结束；UI `QTimer` 只刷新显示。
+- View 只提交 typed intent 并渲染 immutable Snapshot；不能直接访问 HAL、判断安全或乐观宣称硬件完成。
+- 未来自动实验复用同一执行核心且不得模拟按钮点击；当前不实现自动实验。
+- 当前不提供呼吸传感器操作 UI；既有底层能力可以保留，但主界面不留占位入口。
+- 新链通过 Mock、UI 与适用 HIL 后，删除旧 `PreTestView`、旧 View 计时、重复状态、无用弹窗和只服务旧页面的代码。
+- 用户可见界面为简体中文；当前只有 A 路 telemetry 时，不把曲线或状态误称为 A+B 总流量稳定。

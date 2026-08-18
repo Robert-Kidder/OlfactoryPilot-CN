@@ -374,13 +374,42 @@ def test_configured_master_prepare_writer_round_trip_accepts_manual_and_pretest(
     assert validation.complete, validation.reason
 
 
+def test_reverse_polarity_warmup_close_receipt_round_trip_is_valid(
+    tmp_path: Path,
+) -> None:
+    descriptor, writer, ingress, _ = _writer(
+        tmp_path,
+        expected_producers=("actuation", "controller"),
+        master_valve_line="Dev2/P1.0",
+    )
+    assert writer.start_and_wait()
+    assert ingress.post_receipt(
+        _receipt(
+            "warmup-reverse-polarity",
+            valve=0,
+            action=ActuationAction.CLOSE,
+            category=ActuationCategory.WARMUP,
+            target_device="Dev2",
+            target_line="P1.0",
+        ),
+        producer_sequence=1,
+    )
+    assert ingress.post_fence("actuation", producer_sequence=1)
+    assert ingress.post_fence("controller", producer_sequence=0)
+
+    result = writer.close(reason="reverse_polarity_master_prepare")
+
+    assert result.complete
+    validation = SessionFileService(
+        master_valve_line="Dev2/P1.0"
+    ).validate_complete_bundle(descriptor.paths.final_dir)
+    assert validation.complete, validation.reason
+
+
 @pytest.mark.parametrize(
     ("action", "category"),
     [
-        (ActuationAction.CLOSE, ActuationCategory.WARMUP),
         (ActuationAction.OPEN, ActuationCategory.SAFETY),
-        (ActuationAction.CLOSE, ActuationCategory.MANUAL),
-        (ActuationAction.CLOSE, ActuationCategory.PRETEST),
         (ActuationAction.OPEN, ActuationCategory.NORMAL),
     ],
 )

@@ -332,11 +332,11 @@ def test_failed_packed_close_cannot_be_reasserted_by_later_port_write(monkeypatc
     assert tasks[0].writes == [1, 0, 0]
 
 
-def test_collect_valve_lines_uses_only_active_hardware_variant() -> None:
+def test_collect_valve_lines_prepares_cross_variant_safety_union() -> None:
     import app.services.real_hal as real_hal_module
 
     mapping = {
-        "master_valve": "Dev2/P1.0",
+        "selector": {"target": "Dev2/P1.0"},
         "variants": {
             "10-channel": {"1": "Dev1/P0.0"},
             "20-channel": {"1": "Dev2/P0.0"},
@@ -345,7 +345,30 @@ def test_collect_valve_lines_uses_only_active_hardware_variant() -> None:
 
     assert real_hal_module._collect_valve_lines(
         mapping, hardware_variant="10-channel"
-    ) == ["Dev1/P0.0", "Dev2/P1.0"]
+    ) == ["Dev1/P0.0", "Dev2/P0.0"]
+    assert real_hal_module._collect_selector_line(mapping) == "Dev2/P1.0"
+
+
+def test_real_hal_close_all_never_writes_selector_line(monkeypatch) -> None:
+    import app.services.real_hal as real_hal_module
+
+    monkeypatch.setattr(real_hal_module, "_NIDAQMX_IMPORT_ERROR", None)
+    monkeypatch.setattr(real_hal_module, "_SERIAL_IMPORT_ERROR", None)
+    hal = real_hal_module.RealHAL(
+        serial_port="COM1",
+        valve_lines=["Dev1/P0.0", "Dev2/P1.0"],
+        odor_valve_lines=["Dev1/P0.0"],
+    )
+    calls = []
+    monkeypatch.setattr(hal, "prepare_do_output", lambda: True)
+    monkeypatch.setattr(
+        hal,
+        "write_digital",
+        lambda *, device, line, state: calls.append((device, line, state)) or True,
+    )
+
+    assert hal.close_all()
+    assert calls == [("Dev1", "P0.0", False)]
 
 
 def test_real_hal_rejects_noncontiguous_packed_port_mapping(monkeypatch) -> None:

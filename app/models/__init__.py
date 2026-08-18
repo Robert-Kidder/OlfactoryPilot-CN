@@ -11,6 +11,24 @@ from .actuation import (
     duration_ms_to_ns,
 )
 from .app_state import AppState, Telemetry
+from .cleaning import (
+    CleaningConfigSnapshot,
+    CleaningOperationIdentity,
+    CleaningOutcome,
+    CleaningPlan,
+    CleaningResult,
+    CleaningSnapshot,
+    CleaningStatus,
+    CleaningStep,
+    CleaningViewSnapshot,
+    normalize_cleaning_target,
+)
+from .lease import (
+    DeviceLeaseKind,
+    DeviceLeaseToken,
+    ExclusiveDeviceLease,
+    MaintenanceLeaseReleaseEvidence,
+)
 from .protocol import ProtocolDocument, ProtocolMetadata, ProtocolTrial, TriggerMode
 from .protocol_execution import (
     ProtocolExecutionReadiness,
@@ -19,9 +37,23 @@ from .protocol_execution import (
     ProtocolExecutionStatus,
     ProtocolGateEvent,
 )
+from .safe_stop import (
+    AZeroReceipt,
+    SafeStopIdentity,
+    SafeStopPlan,
+    SafeStopStatus,
+    SelectorConfig,
+    SelectorReceipt,
+    SelectorRoute,
+    normalize_digital_target,
+)
 from .safety_state import SafetyState
 from .self_check import SelfCheckResult
 from .session import (
+    MaintenanceDescriptor,
+    MaintenancePaths,
+    MaintenanceProducerFence,
+    MaintenanceRecordEnvelope,
     ProducerFence,
     SessionDescriptor,
     SessionPaths,
@@ -41,7 +73,25 @@ __all__ = [
     "ActuationResult",
     "ActuationStreamSnapshot",
     "ActuationWarningTransition",
+    "AZeroReceipt",
     "AppState",
+    "CleaningConfigSnapshot",
+    "CleaningOperationIdentity",
+    "CleaningOutcome",
+    "CleaningPlan",
+    "CleaningResult",
+    "CleaningSnapshot",
+    "CleaningStatus",
+    "CleaningStep",
+    "CleaningViewSnapshot",
+    "DeviceLeaseKind",
+    "DeviceLeaseToken",
+    "ExclusiveDeviceLease",
+    "MaintenanceLeaseReleaseEvidence",
+    "MaintenanceDescriptor",
+    "MaintenancePaths",
+    "MaintenanceProducerFence",
+    "MaintenanceRecordEnvelope",
     "ProtocolDocument",
     "ProtocolExecutionReadiness",
     "ProtocolExecutionSnapshot",
@@ -51,6 +101,9 @@ __all__ = [
     "ProtocolMetadata",
     "ProtocolTrial",
     "SafetyState",
+    "SafeStopIdentity",
+    "SafeStopPlan",
+    "SafeStopStatus",
     "ProducerFence",
     "SessionDescriptor",
     "SessionPaths",
@@ -59,7 +112,12 @@ __all__ = [
     "SessionStatus",
     "SessionViewSnapshot",
     "SelfCheckResult",
+    "SelectorConfig",
+    "SelectorReceipt",
+    "SelectorRoute",
     "Telemetry",
     "TriggerMode",
     "duration_ms_to_ns",
+    "normalize_cleaning_target",
+    "normalize_digital_target",
 ]

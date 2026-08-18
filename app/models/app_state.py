@@ -7,6 +7,11 @@ from pathlib import Path
 from typing import Any
 
 from app.models.protocol import ProtocolDocument
+from app.models.safe_stop import (
+    SelectorConfig,
+    SelectorRoute,
+    normalize_digital_target,
+)
 from app.models.safety_state import SafetyState
 from app.models.self_check import SelfCheckResult
 
@@ -46,6 +51,7 @@ class AppState:
     config_path: Path | None = None
     manual_path: Path | None = None
     valve_variants: dict[str, dict[int, str]] = field(default_factory=dict)
+    selector: SelectorConfig | None = None
     master_valve_line: str = ""
     last_shutdown_event: dict | None = None
     simulation_mode: bool = False
@@ -63,6 +69,45 @@ class AppState:
             manual_path = manual_candidate
 
         valve_cfg = config.get("valve_mapping") or {}
+        selector_raw = valve_cfg.get("selector") or {}
+        selector_target = ""
+        selector: SelectorConfig | None = None
+        if isinstance(selector_raw, dict):
+            selector_target = str(selector_raw.get("target", "") or "")
+        if not selector_target:
+            selector_target = str(valve_cfg.get("master_valve", "") or "")
+        if selector_target:
+            safe_route_raw = str(
+                selector_raw.get("safe_route", SelectorRoute.COMPENSATION.value)
+                if isinstance(selector_raw, dict)
+                else SelectorRoute.COMPENSATION.value
+            )
+            try:
+                safe_route = SelectorRoute(safe_route_raw)
+            except ValueError:
+                safe_route = None
+                LOG.error(
+                    "Invalid selector safe route %s; selector disabled",
+                    safe_route_raw,
+                )
+            if safe_route is None:
+                selector_target = ""
+            else:
+                try:
+                    safe_level = selector_raw.get("safe_level", False)
+                    odor_level = selector_raw.get("odor_level", True)
+                    if type(safe_level) is not bool or type(odor_level) is not bool:
+                        raise ValueError("selector safe_level/odor_level 必须是 JSON boolean")
+                    selector = SelectorConfig(
+                        target=selector_target,
+                        safe_route=safe_route,
+                        safe_level=safe_level,
+                        odor_level=odor_level,
+                    )
+                except ValueError as exc:
+                    LOG.error("Invalid selector configuration: %s", exc)
+                    selector = None
+                    selector_target = ""
         variants_raw = valve_cfg.get("variants") or {}
         valve_variants: dict[str, dict[int, str]] = {}
         for variant_name, mapping in variants_raw.items():
@@ -70,10 +115,46 @@ class AppState:
             if isinstance(mapping, dict):
                 for key, target in mapping.items():
                     try:
-                        mapped[int(key)] = str(target)
-                    except Exception:  # pragma: no cover - defensive parsing
+                        channel = int(key)
+                        normalized_target = normalize_digital_target(str(target))
+                    except (TypeError, ValueError, OverflowError):
                         continue
+                    if not 1 <= channel <= 20:
+                        LOG.error(
+                            "Invalid odor valve id %s in variant %s; only 1-20 are allowed",
+                            key,
+                            variant_name,
+                        )
+                        continue
+                    if normalized_target in {
+                        normalize_digital_target(existing)
+                        for existing in mapped.values()
+                    }:
+                        LOG.error(
+                            "Duplicate physical odor target %s in variant %s; channel %s ignored",
+                            target,
+                            variant_name,
+                            channel,
+                        )
+                        continue
+                    mapped[channel] = str(target)
             valve_variants[str(variant_name)] = mapped
+        selector_identity = (
+            None
+            if selector is None
+            else normalize_digital_target(selector.target)
+        )
+        if selector_identity is not None and any(
+            normalize_digital_target(target) == selector_identity
+            for mapping in valve_variants.values()
+            for target in mapping.values()
+        ):
+            LOG.error(
+                "Selector target %s is also mapped as an odor valve; selector disabled",
+                selector.target,
+            )
+            selector = None
+            selector_target = ""
 
         hardware_variant_raw = config.get("hardware_variant", "20-channel")
         hardware_variant = hardware_variant_raw
@@ -108,7 +189,10 @@ class AppState:
             manual_path=manual_path,
             hardware_variant=hardware_variant,
             valve_variants=valve_variants,
-            master_valve_line=str(valve_cfg.get("master_valve", "") or ""),
+            selector=selector,
+            # Compatibility alias for existing Story 4.1/session assets.  New
+            # routing logic consumes ``selector`` and never counts it as valve 21.
+            master_valve_line=selector_target,
             simulation_mode=bool(config.get("simulation_mode", False)),
         )
 

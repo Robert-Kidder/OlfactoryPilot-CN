@@ -9,5 +9,20 @@
   "ai0_channel": "Dev1/ai0",
   "ttl_input_channel": "Dev1/ai6",
   "signal_offset": 3.0472976569884125e-07,
-  "signal_gain": 10.000009535533744
+  "signal_gain": 10.000009535533744,
+  "cleaning": {
+    "selected_channels": [
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9
+    ],
+    "flow_sccm": 1500,
+    "open_duration_s": 10,
+    "cycles": 3
+  }
 }

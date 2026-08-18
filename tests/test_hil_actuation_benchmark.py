@@ -19,6 +19,7 @@ from app.models import (
     ActuationReceipt,
     ActuationResult,
     ActuationStreamSnapshot,
+    DeviceLeaseKind,
     ProtocolDocument,
     ProtocolTrial,
     TriggerMode,
@@ -93,6 +94,38 @@ def test_hil_starts_ai_and_do_owners_at_high_priority(monkeypatch) -> None:
         "flow": None,
         "hardware": QThread.Priority.HighPriority,
     }
+
+
+def test_hil_safe_stop_releases_protocol_lease_before_handoff_confirmation() -> None:
+    order = []
+    identity = SimpleNamespace(execution_epoch=9)
+    runtime = Runtime.__new__(Runtime)
+    runtime.flow = SimpleNamespace(
+        lease_snapshot=SimpleNamespace(
+            kind=DeviceLeaseKind.PROTOCOL,
+            generation=7,
+        ),
+        release_protocol_lease=lambda epoch, *, next_execution_epoch: (
+            order.append(("release", epoch, next_execution_epoch)),
+            True,
+        )[1],
+    )
+    runtime.ingress = SimpleNamespace(
+        update=lambda **values: order.append(("interlock", values))
+    )
+    runtime.actuation = SimpleNamespace(
+        confirm_protocol_safe_stop_handoff=lambda received, success: order.append(
+            ("confirm", received, success)
+        )
+    )
+
+    runtime._handle_protocol_safe_stop_handoff(identity)
+
+    assert order == [
+        ("release", 7, 9),
+        ("interlock", {"device_lease": "idle"}),
+        ("confirm", identity, True),
+    ]
 
 
 def test_live_preflight_rejects_finite_but_unsafe_low_flow(monkeypatch) -> None:
@@ -1001,7 +1034,7 @@ def test_severe_benchmark_waits_for_all_abort_closes_before_raising(
     assert runtime._abort_close_confirmed is True
 
 
-def test_confirmed_abort_close_is_not_replaced_by_a_second_shutdown_close_set() -> None:
+def test_confirmed_abort_close_still_uses_unified_shutdown_barrier() -> None:
     order: list[str] = []
 
     class Actuation:
@@ -1029,10 +1062,15 @@ def test_confirmed_abort_close_is_not_replaced_by_a_second_shutdown_close_set() 
     )
     runtime._shutdown_completed = False
     runtime._abort_close_confirmed = True
+    runtime.shutdown_via_service = lambda: (
+        order.append("unified_safe_stop"),
+        {"result": "success"},
+    )[1]
 
     runtime.stop()
 
     assert order == [
+        "unified_safe_stop",
         "actuation_fence_and_shutdown",
         "hardware_fence",
         "flow_shutdown",
@@ -1058,6 +1096,7 @@ def test_owner_teardown_failure_latches_story35_bundle_before_finalize() -> None
     )
     runtime._shutdown_completed = False
     runtime._abort_close_confirmed = True
+    runtime.shutdown_via_service = lambda: {"result": "success"}
     runtime._story_35_writer = SimpleNamespace(
         fail_from_producer=lambda *, stage, message: failures.append(
             (stage, message)
@@ -1095,13 +1134,14 @@ def test_incomplete_shutdown_close_latches_story35_bundle_failure_before_finaliz
     runtime.flow = SimpleNamespace(shutdown=lambda _timeout_ms: True)
     runtime._shutdown_completed = False
     runtime._abort_close_confirmed = False
+    runtime.shutdown_via_service = lambda: {"result": "failed"}
     runtime._story_35_writer = SimpleNamespace(
         fail_from_producer=lambda *, stage, message: failures.append(
             (stage, message)
         )
     )
 
-    with pytest.raises(RuntimeError, match="未获得全部成功回执"):
+    with pytest.raises(RuntimeError, match="unified safe-stop"):
         runtime.stop()
 
     assert failures == [

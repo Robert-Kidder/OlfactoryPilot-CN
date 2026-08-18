@@ -8,7 +8,7 @@ import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 
-from app.models import SelfCheckResult
+from app.models import SelfCheckResult, normalize_digital_target
 from app.services.hal import AnalogInputFrame, DigitalWriteAck, HalBase
 from app.services.ttl_trigger_service import TtlTriggerConfig
 
@@ -75,6 +75,7 @@ class RealHAL(HalBase):
         alicat_setpoint_scale: float = 0.001,
         alicat_readback_scale: float = 1000.0,
         valve_lines: Iterable[str] | None = None,
+        odor_valve_lines: Iterable[str] | None = None,
         monotonic_ns_clock: Callable[[], int] | None = None,
         wall_clock: Callable[[], float] | None = None,
     ) -> None:
@@ -112,6 +113,9 @@ class RealHAL(HalBase):
         self._setpoint_scale = float(alicat_setpoint_scale)
         self._readback_scale = float(alicat_readback_scale)
         self._digital_lines = list(valve_lines or [])
+        self._odor_valve_lines = list(
+            self._digital_lines if odor_valve_lines is None else odor_valve_lines
+        )
         self._do_sessions: dict[tuple[str, str], _DOPortSession] = {}
         self._do_owner_thread_id: int | None = None
         self._do_prepare_failed = False
@@ -125,10 +129,15 @@ class RealHAL(HalBase):
 
     @classmethod
     def from_config(cls, config: dict) -> RealHAL:
-        valve_lines = _collect_valve_lines(
-            config.get("valve_mapping") or {},
+        valve_mapping = config.get("valve_mapping") or {}
+        odor_valve_lines = _collect_valve_lines(
+            valve_mapping,
             hardware_variant=str(config.get("hardware_variant", "20-channel")),
         )
+        selector_line = _collect_selector_line(valve_mapping)
+        valve_lines = list(odor_valve_lines)
+        if selector_line is not None:
+            valve_lines.append(selector_line)
         ttl_config = TtlTriggerConfig.from_mapping(config)
         return cls(
             ai0_channel=str(config.get("ai0_channel", "Dev1/ai0")),
@@ -146,6 +155,7 @@ class RealHAL(HalBase):
             alicat_setpoint_scale=float(config.get("alicat_setpoint_scale", 0.001)),
             alicat_readback_scale=float(config.get("alicat_readback_scale", 1000.0)),
             valve_lines=valve_lines,
+            odor_valve_lines=odor_valve_lines,
         )
 
     def read_ai0(self, timestamp: float | None = None) -> float:
@@ -512,10 +522,10 @@ class RealHAL(HalBase):
         return True
 
     def close_all(self) -> bool:
-        if self._digital_lines and not self._do_sessions and not self.prepare_do_output():
+        if self._odor_valve_lines and not self._do_sessions and not self.prepare_do_output():
             return False
         success = True
-        for target in self._digital_lines:
+        for target in self._odor_valve_lines:
             device, line = _split_target(target)
             if not self.write_digital(device=device, line=line, state=False):
                 success = False
@@ -744,20 +754,34 @@ def _collect_valve_lines(
     valve_mapping: dict, *, hardware_variant: str = "20-channel"
 ) -> list[str]:
     lines: set[str] = set()
-    master = valve_mapping.get("master_valve")
-    if master:
-        lines.add(str(master))
+    selector_target = _collect_selector_line(valve_mapping)
+    selector_identity = (
+        None
+        if selector_target is None
+        else normalize_digital_target(selector_target)
+    )
     variants = valve_mapping.get("variants") or {}
     if isinstance(variants, dict):
-        selected_variant = hardware_variant
-        if selected_variant not in variants and "20-channel" in variants:
-            selected_variant = "20-channel"
-        mapping = variants.get(selected_variant)
-        if isinstance(mapping, dict):
-            for line in mapping.values():
-                if line:
+        for mapping in variants.values():
+            if not isinstance(mapping, dict):
+                continue
+            for channel, line in mapping.items():
+                try:
+                    channel_id = int(channel)
+                    identity = normalize_digital_target(str(line))
+                except (TypeError, ValueError, OverflowError):
+                    continue
+                if 1 <= channel_id <= 20 and identity != selector_identity:
                     lines.add(str(line))
     return sorted(lines)
+
+
+def _collect_selector_line(valve_mapping: dict) -> str | None:
+    selector = valve_mapping.get("selector") or {}
+    target = (
+        selector.get("target") if isinstance(selector, dict) else None
+    ) or valve_mapping.get("master_valve")
+    return None if not target else str(target)
 
 
 def _split_target(target: str) -> tuple[str | None, str]:
