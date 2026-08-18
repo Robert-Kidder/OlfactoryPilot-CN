@@ -1,6 +1,6 @@
 # Story 4.6：方案 B V3 手动实验替换
 
-Status: **in-progress：首轮独立复审整改与离线门禁已完成，等待整改后复审和用户 Mock 手动验收**
+Status: **review：离线实现、自动化、构建与独立复审已完成，等待用户 Mock 手动验收**
 
 Implementation date: 2026-08-18
 Baseline commit: `5625aa55bea6b916823a1cb676a560b8d5429b61`
@@ -30,6 +30,8 @@ Baseline commit: `5625aa55bea6b916823a1cb676a560b8d5429b61`
 | 领域模型与配置事务 | `de49df6` | 定向 97 项、全仓 841 项 |
 | 手动实验 owner core | `4311b66` | 定向/相关 188 项、全仓 867 项 |
 | V3、设置页与 Controller 接线 | `cb4a0ab` | 定向 161 项、全仓 894 项 |
+| 首轮独立复审整改 | `f5a2959` | 定向 344 项、全仓 928 项 |
+| 整改后复审收敛 | `5b2561e` | 定向 283 项、全仓 934 项 |
 
 ## 首轮独立复审与整改（2026-08-19）
 
@@ -48,12 +50,29 @@ Blind Hunter 与 Edge Case Hunter 从 baseline 独立审阅完整 diff，确认�
 
 清洗页候选 finding 被驳回：权威 PRD FR6 与 UX 明确要求保留清洗页；Story 4.1 的代码资产暂停不等于隐藏产品入口。未发现需要真实硬件才能整改的项目。
 
-## 最终离线门禁（首轮整改后）
+## 整改后独立复审
+
+两名独立复审者重新从 baseline 检查完整 diff。确认并完成第二轮 patch：
+
+- selector 危险路线谓词贯穿执行前、写入中和写入后二次联锁，支持身份绑定的 safe-high 安全路线。
+- legacy alias 自带其历史物理关闭电平；同 logical valve 的新 target 失败不会被旧 alias 成功掩盖。
+- future/late manual receipt、旧 operation flow result和 pending-start 取消分别隔离、fail-closed 或精确释放 lease。
+- 供气状态改为 receipt 驱动的开启/关闭/切换中/未知，不再在 A=0 提交时乐观显示关闭。
+- HardwareProfile nested connections 为唯一真源；现代显式 alias 冲突拒绝，旧无 revision 配置可单向迁移。
+- 保存/回滚采用 prepare → runtime publish → CAS disk commit；补偿失败锁定 configuration-divergence。
+- COM/NI/Alicat 标识变化后明确要求重启并阻止同进程旧 HAL 重连；mapping-only 保存不触发该 latch。
+- 新 cleaning operation 从当前 ChannelRegistry 重建 target；设置权限变化只刷新 gate，不覆盖未保存草稿。
+- 默认安全关闭维持 Story 4.5 已归档的 logical 1→20 顺序；remap 时同一 logical valve 内新 target 优先旧 alias。
+
+“完全相同 duplicate receipt 应幂等忽略”的候选未采纳：当前安全契约将重复硬件证据视为异常并保守进入恢复态。所有采纳项均由确定性离线回归覆盖；未运行真实 HIL。
+
+## 最终离线门禁（独立复审整改后）
 
 | Gate | Result |
 |---|---|
-| Story 4.6 + owner/flow/配置定向测试 | `344 passed in 8.73s` |
-| 完整 pytest | `928 passed in 42.61s` |
+| Story 4.6 + owner/flow/配置/清洗定向测试 | `283 passed in 8.09s` |
+| Story 4.5 FakeHAL manifest 兼容回归 | `87 passed in 2.66s` |
+| 完整 pytest | `934 passed in 42.72s` |
 | Ruff | `All checks passed!` |
 | `compileall` | 通过 |
 | `git diff --check` | 通过；仅 LF→CRLF 工作副本提示 |
@@ -64,6 +83,6 @@ PyInstaller 报告的 OpenGL、`pkg_resources`、macOS framework 提示来自既
 ## 验收状态
 
 - 自动化与构建：已完成。
-- 独立代码复审：首轮发现项已整改，等待整改后复审确认。
+- 独立代码复审：两轮完成；确认项已整改并通过全量门禁。
 - 用户 Mock 手动验收：待独立复审通过后，由 Codex 每次只提供一个启动或操作步骤并等待反馈。
 - 真实硬件/HIL：未授权、未执行，不作为当前离线完成证据。

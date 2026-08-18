@@ -1,7 +1,7 @@
 # Sprint 状态文件
 # 生成时间: 2026-07-09 16:54
 generated: 2026-07-09 16:54
-last_updated: 2026-08-18
+last_updated: 2026-08-19
 project: OlfactoryPilot-CN
 project_key: OLFACTORY
 tracking_system: file-system
@@ -41,7 +41,7 @@ development_status:
   4-3-chinese-ui-localization: superseded-by-4-6
   4-4-compensation-logic-automation: superseded-by-4-6
   4-5-safe-stop-selector-order: done
-  4-6-manual-experiment-v3-replacement: in-progress
+  4-6-manual-experiment-v3-replacement: review
   epic-4-retrospective: optional
 
 epic_boundaries:
