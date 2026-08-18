@@ -59,6 +59,43 @@
   },
   "safety_state": "SAFE",
   "hardware_variant": "20-channel",
+  "hardware_profile": {
+    "schema_version": 1,
+    "profile_name": "默认 8 气口方案",
+    "flow_limits_sccm": {
+      "total": 5000,
+      "sample_a": 5000,
+      "vacuum_c": 5000
+    },
+    "selector": {
+      "target": "Dev2/P1.0",
+      "safe_route": "compensation",
+      "safe_level": false,
+      "odor_level": true
+    },
+    "channels": [
+      {"external_port": 1, "internal_valve": null, "target": "", "active_high": true, "enabled": false, "display_name": "", "verification": {"status": "pending", "fingerprint": "", "verified_at": ""}},
+      {"external_port": 2, "internal_valve": 2, "target": "Dev1/P0.1", "active_high": true, "enabled": true, "display_name": "气口 2", "verification": {"status": "mock_verified", "fingerprint": "ad53edc7ba8e1bf609d11f4b008899c48169b4689ad6aa0f7af8b05c6a94bfa7", "verified_at": "2026-08-18"}},
+      {"external_port": 3, "internal_valve": null, "target": "", "active_high": true, "enabled": false, "display_name": "", "verification": {"status": "pending", "fingerprint": "", "verified_at": ""}},
+      {"external_port": 4, "internal_valve": 3, "target": "Dev1/P0.2", "active_high": true, "enabled": true, "display_name": "气口 4", "verification": {"status": "mock_verified", "fingerprint": "09eb74d1cf42463794331a9ea232423119d0e402ad15e0b6c0cce0a13e92cd77", "verified_at": "2026-08-18"}},
+      {"external_port": 5, "internal_valve": null, "target": "", "active_high": true, "enabled": false, "display_name": "", "verification": {"status": "pending", "fingerprint": "", "verified_at": ""}},
+      {"external_port": 6, "internal_valve": 4, "target": "Dev1/P0.3", "active_high": true, "enabled": true, "display_name": "气口 6", "verification": {"status": "mock_verified", "fingerprint": "7d2aef4d5ee6a9461e6ce9a1382a9147c3a2d0645c6eb011d1774486fe9642eb", "verified_at": "2026-08-18"}},
+      {"external_port": 7, "internal_valve": null, "target": "", "active_high": true, "enabled": false, "display_name": "", "verification": {"status": "pending", "fingerprint": "", "verified_at": ""}},
+      {"external_port": 8, "internal_valve": 5, "target": "Dev1/P0.4", "active_high": true, "enabled": true, "display_name": "气口 8", "verification": {"status": "mock_verified", "fingerprint": "c3107c5135f3e67f9c60e896171eadfaddbd3fe473e86c4207192d8f9a7b399d", "verified_at": "2026-08-18"}},
+      {"external_port": 9, "internal_valve": null, "target": "", "active_high": true, "enabled": false, "display_name": "", "verification": {"status": "pending", "fingerprint": "", "verified_at": ""}},
+      {"external_port": 10, "internal_valve": null, "target": "", "active_high": true, "enabled": false, "display_name": "", "verification": {"status": "pending", "fingerprint": "", "verified_at": ""}},
+      {"external_port": 11, "internal_valve": null, "target": "", "active_high": true, "enabled": false, "display_name": "", "verification": {"status": "pending", "fingerprint": "", "verified_at": ""}},
+      {"external_port": 12, "internal_valve": 6, "target": "Dev1/P0.5", "active_high": true, "enabled": true, "display_name": "气口 12", "verification": {"status": "mock_verified", "fingerprint": "f0cb0868fba4a9ef0c586a6937c6dae10a38b30dfa8db12cdeb41c902e15092f", "verified_at": "2026-08-18"}},
+      {"external_port": 13, "internal_valve": null, "target": "", "active_high": true, "enabled": false, "display_name": "", "verification": {"status": "pending", "fingerprint": "", "verified_at": ""}},
+      {"external_port": 14, "internal_valve": 7, "target": "Dev1/P0.6", "active_high": true, "enabled": true, "display_name": "气口 14", "verification": {"status": "mock_verified", "fingerprint": "81229ebbd4e09135496b762079081588f1c97df979a866d2ad5739a7b13310c4", "verified_at": "2026-08-18"}},
+      {"external_port": 15, "internal_valve": null, "target": "", "active_high": true, "enabled": false, "display_name": "", "verification": {"status": "pending", "fingerprint": "", "verified_at": ""}},
+      {"external_port": 16, "internal_valve": 8, "target": "Dev1/P0.7", "active_high": true, "enabled": true, "display_name": "气口 16", "verification": {"status": "mock_verified", "fingerprint": "d3fee6a40b6281c9dd6fe09d00ab82397e5653f4cbf631d87b23a0d608bb22bb", "verified_at": "2026-08-18"}},
+      {"external_port": 17, "internal_valve": null, "target": "", "active_high": true, "enabled": false, "display_name": "", "verification": {"status": "pending", "fingerprint": "", "verified_at": ""}},
+      {"external_port": 18, "internal_valve": 9, "target": "Dev1/P1.0", "active_high": true, "enabled": true, "display_name": "气口 18", "verification": {"status": "mock_verified", "fingerprint": "48ae115ea799217cbd15cf158d2ef35c0611c693bd3d4cfdff3baf0d558373e6", "verified_at": "2026-08-18"}},
+      {"external_port": 19, "internal_valve": null, "target": "", "active_high": true, "enabled": false, "display_name": "", "verification": {"status": "pending", "fingerprint": "", "verified_at": ""}},
+      {"external_port": 20, "internal_valve": null, "target": "", "active_high": true, "enabled": false, "display_name": "", "verification": {"status": "pending", "fingerprint": "", "verified_at": ""}}
+    ]
+  },
   "valve_mapping": {
     "selector": {
       "target": "Dev2/P1.0",

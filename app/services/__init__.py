@@ -14,6 +14,10 @@ from .hal import (  # noqa: F401
     HalInterface,
 )
 from .hardware_check_service import HardwareCheckService  # noqa: F401
+from .hardware_profile_store import (  # noqa: F401
+    HardwareProfileStore,
+    StaleHardwareProfileRevisionError,
+)
 from .mock_hal import MockHAL  # noqa: F401
 from .protocol_executor import (  # noqa: F401
     ProtocolExecutionConfig,
@@ -61,6 +65,7 @@ __all__ = [
     "BreathSampleBatch",
     "DigitalWriteAck",
     "HardwareCheckService",
+    "HardwareProfileStore",
     "MockHAL",
     "ProtocolParseError",
     "ProtocolExecutionConfig",
@@ -69,6 +74,7 @@ __all__ = [
     "RealHAL",
     "SafetyManager",
     "ShutdownService",
+    "StaleHardwareProfileRevisionError",
     "BundleValidation",
     "RecoveryFinding",
     "SessionFileError",

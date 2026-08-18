@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from app.models.hardware_profile import ChannelRegistry, HardwareProfile
 from app.models.protocol import ProtocolDocument
 from app.models.safe_stop import (
     SelectorConfig,
@@ -51,6 +52,8 @@ class AppState:
     config_path: Path | None = None
     manual_path: Path | None = None
     valve_variants: dict[str, dict[int, str]] = field(default_factory=dict)
+    hardware_profile: HardwareProfile | None = None
+    channel_registry: ChannelRegistry | None = None
     selector: SelectorConfig | None = None
     master_valve_line: str = ""
     last_shutdown_event: dict | None = None
@@ -67,6 +70,12 @@ class AppState:
             if not manual_candidate.is_absolute() and manual_anchor:
                 manual_candidate = Path(manual_anchor).parent.parent / manual_candidate
             manual_path = manual_candidate
+
+        hardware_profile: HardwareProfile | None = None
+        channel_registry: ChannelRegistry | None = None
+        if "hardware_profile" in config:
+            hardware_profile = HardwareProfile.from_config(config)
+            channel_registry = hardware_profile.registry
 
         valve_cfg = config.get("valve_mapping") or {}
         selector_raw = valve_cfg.get("selector") or {}
@@ -170,6 +179,10 @@ class AppState:
                 hardware_variant_raw,
             )
 
+        if hardware_profile is not None and channel_registry is not None:
+            selector = hardware_profile.selector
+            selector_target = selector.target if selector is not None else ""
+
         return cls(
             language=config.get("language", "zh-CN"),
             window_title=config.get("window_title", "OlfactoryPilot 控制台"),
@@ -189,6 +202,8 @@ class AppState:
             manual_path=manual_path,
             hardware_variant=hardware_variant,
             valve_variants=valve_variants,
+            hardware_profile=hardware_profile,
+            channel_registry=channel_registry,
             selector=selector,
             # Compatibility alias for existing Story 4.1/session assets.  New
             # routing logic consumes ``selector`` and never counts it as valve 21.
@@ -244,6 +259,16 @@ class AppState:
 
     def resolve_valve_line(self, channel_id: int) -> str | None:
         return self.get_active_valve_map().get(int(channel_id))
+
+    def resolve_external_port(self, external_port: int) -> str | None:
+        """Resolve a verified V3 external port without consulting legacy variants."""
+
+        if self.channel_registry is None:
+            return None
+        return self.channel_registry.target_for_external_port(
+            external_port,
+            allow_mock=self.simulation_mode,
+        )
 
     def has_active_valve_map(self) -> bool:
         """Check whether the current hardware variant has a mapping configured."""
