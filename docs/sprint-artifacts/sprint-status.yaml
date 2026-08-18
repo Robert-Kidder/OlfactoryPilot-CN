@@ -41,7 +41,7 @@ development_status:
   4-3-chinese-ui-localization: superseded-by-4-6
   4-4-compensation-logic-automation: superseded-by-4-6
   4-5-safe-stop-selector-order: done
-  4-6-manual-experiment-v3-replacement: backlog
+  4-6-manual-experiment-v3-replacement: in-progress
   epic-4-retrospective: optional
 
 epic_boundaries:
