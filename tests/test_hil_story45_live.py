@@ -261,9 +261,9 @@ def test_status_parser_rejects_non_finite_values(response):
 def test_read_only_preflight_uses_only_documented_query_frames(monkeypatch, config):
     commands = []
     responses = {
-        "a??D*\r": [b"Mass Flow NLPM\r\n", b"Setpoint NLPM\r\n", b"Gas\r\n"],
-        "b??D*\r": [b"Mass Flow NLPM\r\n", b"Setpoint NLPM\r\n", b"Gas\r\n"],
-        "c??D*\r": [b"Mass Flow NLPM\r\n", b"Setpoint NLPM\r\n", b"Gas\r\n"],
+        "a??D*\r": [b"Mass Flow NLPM\r\n", b"Mass Flow Setpt NLPM\r\n", b"Gas\r\n"],
+        "b??D*\r": [b"Mass Flow NLPM\r\n", b"Mass Flow Setpt NLPM\r\n", b"Gas\r\n"],
+        "c??D*\r": [b"Mass Flow NLPM\r\n", b"Mass Flow Setpt NLPM\r\n", b"Gas\r\n"],
         "a\r": [b"A +014.57 +029.93 +0.0000 +0.0000 +0.0000 Air\r\n"],
         "b\r": [b"B +014.57 +030.65 +0.0000 +0.0000 +0.0000 Air\r\n"],
         "c\r": [b"C +002.63 +029.39 +0.0000 +0.0000 +0.0000 Air\r\n"],

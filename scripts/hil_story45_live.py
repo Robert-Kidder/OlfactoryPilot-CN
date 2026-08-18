@@ -365,8 +365,14 @@ def _parse_status(response: str, expected_unit: str) -> dict[str, Any]:
 
 def _validate_data_frame_description(unit: str, lines: list[str]) -> None:
     text = " ".join(lines).casefold()
-    required = ("mass flow", "setpoint", "gas")
-    positions = [text.find(item) for item in required]
+    mass_flow_position = text.find("mass flow")
+    setpoint_positions = [
+        position
+        for position in (text.find("mass flow setpt"), text.find("setpoint"))
+        if position >= 0
+    ]
+    setpoint_position = min(setpoint_positions) if setpoint_positions else -1
+    positions = [mass_flow_position, setpoint_position, text.find("gas")]
     if not lines or any(item < 0 for item in positions) or positions != sorted(positions):
         raise RuntimeError(
             f"Alicat {unit} 数据帧字段不是已批准的 Mass Flow/Setpoint/Gas 顺序：{lines!r}"
