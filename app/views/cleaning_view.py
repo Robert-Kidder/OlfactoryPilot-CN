@@ -9,7 +9,6 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QLabel,
-    QMessageBox,
     QPushButton,
     QSpinBox,
     QVBoxLayout,
@@ -33,6 +32,7 @@ class CleaningView(QWidget):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._rendering = False
+        self._start_confirmation_pending = False
         self._snapshot = CleaningViewSnapshot()
         self.channel_checks: dict[int, QCheckBox] = {}
         channel_group = QGroupBox("清洗气路（软件通道 / 机外气路标签）")
@@ -121,6 +121,7 @@ class CleaningView(QWidget):
         self.recover_button.clicked.connect(self.recover_requested.emit)
 
     def render_snapshot(self, snapshot: CleaningViewSnapshot) -> None:
+        self._start_confirmation_pending = False
         self._snapshot = snapshot
         labels = dict(snapshot.external_labels)
         available = set(snapshot.available_channels)
@@ -128,9 +129,7 @@ class CleaningView(QWidget):
         self._rendering = True
         try:
             for channel, checkbox in self.channel_checks.items():
-                checkbox.setText(
-                    f"软件通道 {channel} / 机外气路 {labels.get(channel, str(channel))}"
-                )
+                checkbox.setText(f"软件通道 {channel} / 机外气路 {labels.get(channel, str(channel))}")
                 checkbox.setChecked(channel in selected)
                 checkbox.setEnabled(snapshot.controls_enabled and channel in available)
             self.flow_input.setRange(0.1, max(0.1, snapshot.max_flow_sccm))
@@ -147,13 +146,9 @@ class CleaningView(QWidget):
         self.select_all_button.setEnabled(snapshot.controls_enabled)
         self.clear_button.setEnabled(snapshot.controls_enabled)
         minutes = snapshot.estimated_duration_s / 60.0
-        self.estimate_label.setText(
-            f"预计总时长：约 {minutes:.1f} 分钟"
-        )
+        self.estimate_label.setText(f"预计总时长：约 {minutes:.1f} 分钟")
         self.saved_label.setText("有未保存修改" if snapshot.dirty else "已保存")
-        self.output_label.setText(
-            f"输出位置：{snapshot.output_root or '未选择本地实验输出目录'}"
-        )
+        self.output_label.setText(f"输出位置：{snapshot.output_root or '未选择本地实验输出目录'}")
         self.status_label.setText(snapshot.status_text)
         self.detail_label.setText(
             " | ".join(
@@ -175,9 +170,7 @@ class CleaningView(QWidget):
         self.start_button.setEnabled(snapshot.can_start)
         self.stop_button.setEnabled(snapshot.can_stop)
         self.recover_button.setEnabled(snapshot.can_recover)
-        self.start_button.setText(
-            "正在清洗" if snapshot.status == CleaningStatus.RUNNING else "开始清洗"
-        )
+        self.start_button.setText("正在清洗" if snapshot.status == CleaningStatus.RUNNING else "开始清洗")
 
     def selected_channels(self) -> tuple[int, ...]:
         return tuple(
@@ -195,6 +188,7 @@ class CleaningView(QWidget):
         )
 
     def _emit_candidate(self, *_args) -> None:
+        self._start_confirmation_pending = False
         if not self._rendering:
             self.candidate_changed.emit(*self._candidate_values())
 
@@ -223,10 +217,7 @@ class CleaningView(QWidget):
 
     def _confirm_start(self) -> None:
         labels = dict(self._snapshot.external_labels)
-        routes = "、".join(
-            labels.get(channel, str(channel))
-            for channel in self._snapshot.selected_channels
-        )
+        routes = "、".join(labels.get(channel, str(channel)) for channel in self._snapshot.selected_channels)
         summary = (
             f"气体：{self._snapshot.gas_label}\n"
             f"A/B/C：{self._snapshot.flow_sccm:.1f}/0/0 ml/min\n"
@@ -235,12 +226,12 @@ class CleaningView(QWidget):
             f"循环：{self._snapshot.cycles} 轮\n"
             f"输出：{self._snapshot.output_root}"
         )
-        answer = QMessageBox.question(
-            self,
-            "确认开始自动清洗",
-            summary,
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        )
-        if answer == QMessageBox.StandardButton.Yes:
-            self.start_requested.emit()
+        if not self._start_confirmation_pending:
+            self._start_confirmation_pending = True
+            self.status_label.setText("请确认清洗参数")
+            self.detail_label.setText(summary)
+            self.start_button.setText("再次点击开始清洗")
+            return
+        self._start_confirmation_pending = False
+        self.start_button.setText("开始清洗")
+        self.start_requested.emit()

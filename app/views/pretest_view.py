@@ -136,9 +136,7 @@ class ValveButtonWidget(QWidget):
         color = "#28a745" if active else "#444444"
         border = "#ffffff" if active else "#6c757d"
         radius = max(self._led.width(), self._led.height()) // 2
-        self._led.setStyleSheet(
-            f"border-radius: {radius}px; background-color: {color}; border: 1px solid {border};"
-        )
+        self._led.setStyleSheet(f"border-radius: {radius}px; background-color: {color}; border: 1px solid {border};")
 
 
 class ManualLedButton(QPushButton):
@@ -157,9 +155,7 @@ class ManualLedButton(QPushButton):
         radius = self.width() // 2
         fill = self.color if active else "#343a40"
         border = "2px solid white" if active else "2px solid #6c757d"
-        self.setStyleSheet(
-            f"border-radius: {radius}px; background-color: {fill}; {border};"
-        )
+        self.setStyleSheet(f"border-radius: {radius}px; background-color: {fill}; {border};")
 
     def set_checked(self, is_open: bool) -> None:
         self.setChecked(is_open)
@@ -202,18 +198,20 @@ class PreTestView(QWidget):
         self._open_states: dict[int, bool] = {}
         self._buttons: dict[int, QPushButton] = {}
         self._master_open = bool(master_valve)
-        self._warning_label = QLabel()
+        self._warning_label = QLabel(self)
         self._warning_label.setStyleSheet("color: #DC3545; font-weight: 600;")
         self._warning_label.hide()
-        self._status_label = QLabel(self._build_status_text("SAFE", ""))
+        self._status_label = QLabel(self._build_status_text("SAFE", ""), self)
         self._status_label.setFrameShape(QFrame.StyledPanel)
-        self._status_label.setStyleSheet("padding: 6px; background-color: #f5f5f5;")
+        self._status_label.setStyleSheet(
+            "padding: 6px; color: #ffd4cf; background-color: #322523; " "border: 1px solid #794843;"
+        )
         self._status_label.hide()
-        self._flow_message_label = QLabel("")
+        self._flow_message_label = QLabel("", self)
         self._flow_message_label.setStyleSheet("color: #555;")
-        self._applied_label = QLabel("已应用: -")
+        self._applied_label = QLabel("已应用: -", self)
         self._applied_label.setStyleSheet("color: #333;")
-        self._airflow_label = QLabel("当前气流：0.00 sccm")
+        self._airflow_label = QLabel("当前气流：0.00 sccm", self)
         self._applied_targets = {"A": 0.0, "B": 0.0, "C": 0.0, "A_comp": 0.0}
 
         # Flow / timing state
@@ -255,7 +253,7 @@ class PreTestView(QWidget):
         if not self._valve_map:
             self._config_error = True
             self._config_error_message = (
-                "未找到 20 通道映射，请检查 config/default_config.json 的 valve_mapping.variants[\"20-channel\"]"
+                '未找到 20 通道映射，请检查 config/default_config.json 的 valve_mapping.variants["20-channel"]'
             )
 
     def _set_controls_enabled(self, enabled: bool, *, reason: str = "") -> None:
@@ -762,17 +760,9 @@ class PreTestView(QWidget):
     def _set_led(lbl: QLabel, active: bool, color: str) -> None:
         radius = max(lbl.width(), lbl.height(), 20) // 2
         if active:
-            style = (
-                f"border-radius: {radius}px; "
-                f"background-color: {color}; "
-                "border: 2px solid white;"
-            )
+            style = f"border-radius: {radius}px; " f"background-color: {color}; " "border: 2px solid white;"
         else:
-            style = (
-                f"border-radius: {radius}px; "
-                "background-color: #343a40; "
-                "border: 2px solid #6c757d;"
-            )
+            style = f"border-radius: {radius}px; " "background-color: #343a40; " "border: 2px solid #6c757d;"
         lbl.setStyleSheet(style)
 
     @staticmethod

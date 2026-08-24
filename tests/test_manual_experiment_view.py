@@ -15,6 +15,8 @@ from app.models import (
     VerificationStatus,
 )
 from app.views.manual_experiment_view import (
+    DURATION_STEP_S,
+    FLOW_STEP_ML_MIN,
     ManualExperimentDraft,
     ManualExperimentView,
     ManualExperimentViewSnapshot,
@@ -92,12 +94,8 @@ def test_manual_view_is_fixed_2_by_10_and_unavailable_port_emits_no_intent(
     view.draft_changed.connect(intents.append)
 
     assert len(view.port_buttons) == 20
-    assert view.port_layout.getItemPosition(
-        view.port_layout.indexOf(view.port_buttons[1])
-    )[:2] == (0, 0)
-    assert view.port_layout.getItemPosition(
-        view.port_layout.indexOf(view.port_buttons[20])
-    )[:2] == (1, 9)
+    assert view.port_layout.getItemPosition(view.port_layout.indexOf(view.port_buttons[1]))[:2] == (0, 0)
+    assert view.port_layout.getItemPosition(view.port_layout.indexOf(view.port_buttons[20]))[:2] == (1, 9)
     assert not view.port_buttons[1].isEnabled()
     view.port_buttons[1].click()
     assert intents == []
@@ -118,9 +116,7 @@ def test_direct_domain_snapshot_enables_idle_draft_and_stops_active_run(qtbot) -
 
     view.port_buttons[2].click()
     assert view.release_button.isEnabled()
-    view.render_snapshot(
-        ManualExperimentSnapshot(status=ManualExperimentStatus.STIMULATING)
-    )
+    view.render_snapshot(ManualExperimentSnapshot(status=ManualExperimentStatus.STIMULATING))
     assert not view.port_buttons[2].isEnabled()
     assert view.stop_button.isEnabled()
 
@@ -137,14 +133,37 @@ def test_manual_port_state_has_text_and_visual_distinction(qtbot) -> None:
     )
 
     text = view.port_buttons[2].text()
-    assert all(
-        value in text
-        for value in ("可用", "已选择", "开启回执已确认（非机械确认）", "故障")
-    )
+    assert text == "薄荷\n气口 2"
     assert view.port_buttons[2].property("portState") == "fault"
     assert "故障" in view.port_buttons[2].accessibleDescription()
-    assert "不可用" in view.port_buttons[1].text()
+    assert view.port_buttons[1].text() == "气口 1"
+    assert "不可用" in view.port_buttons[1].accessibleDescription()
     assert view.port_buttons[1].property("portState") == "unavailable"
+
+
+def test_manual_port_alias_fallback_never_duplicates_number(qtbot) -> None:
+    view = ManualExperimentView()
+    qtbot.addWidget(view)
+    ports = list(_port_snapshots())
+    ports[1] = replace(ports[1], display_name="气口 2")
+    view.render_snapshot(ManualExperimentViewSnapshot(controls_enabled=True, ports=tuple(ports)))
+
+    assert view.port_buttons[2].text() == "气口 2"
+    assert view.port_buttons[2].text().count("气口 2") == 1
+
+
+def test_manual_port_long_alias_is_elided_and_keeps_full_tooltip(qtbot) -> None:
+    view = ManualExperimentView()
+    qtbot.addWidget(view)
+    ports = list(_port_snapshots())
+    long_alias = "超长中文薄荷复合香味样品"
+    ports[1] = replace(ports[1], display_name=long_alias)
+    view.render_snapshot(ManualExperimentViewSnapshot(controls_enabled=True, ports=tuple(ports)))
+
+    button = view.port_buttons[2]
+    assert long_alias in button.toolTip()
+    assert button.elided_alias(54).endswith("…")
+    assert button.maximumHeight() <= 62
 
 
 def test_manual_flow_fields_derive_readonly_b_and_emit_domain_intents(qtbot) -> None:
@@ -162,7 +181,7 @@ def test_manual_flow_fields_derive_readonly_b_and_emit_domain_intents(qtbot) -> 
                 total_sccm=1000,
                 sample_a_sccm=200,
                 vacuum_c_sccm=50,
-                duration_s=2.5,
+                duration_s=5,
             ),
         )
     )
@@ -184,7 +203,31 @@ def test_manual_flow_fields_derive_readonly_b_and_emit_domain_intents(qtbot) -> 
     assert supply[-1].total_sccm == 1200
     assert isinstance(releases[-1], ManualExperimentIntent)
     assert releases[-1].external_ports == (2, 4)
-    assert releases[-1].duration_ns == 2_500_000_000
+    assert releases[-1].duration_ns == 5_000_000_000
+    assert view.total_input.singleStep() == FLOW_STEP_ML_MIN
+    assert view.sample_a_input.singleStep() == FLOW_STEP_ML_MIN
+    assert view.duration_input.singleStep() == DURATION_STEP_S
+
+
+def test_custom_stepper_buttons_follow_steps_and_disabled_state(qtbot) -> None:
+    view = ManualExperimentView()
+    qtbot.addWidget(view)
+    view.render_snapshot(
+        ManualExperimentViewSnapshot(
+            controls_enabled=True,
+            draft=ManualExperimentDraft(total_sccm=1000, sample_a_sccm=500),
+        )
+    )
+    total_stepper = view.stepper_frames[view.total_input]
+    buttons = total_stepper.findChildren(type(view.apply_flow_button), "stepButton")
+    minus, plus = buttons
+    plus.click()
+    assert view.total_input.value() == 1500
+    minus.click()
+    assert view.total_input.value() == 1000
+
+    view.render_snapshot(ManualExperimentViewSnapshot(controls_enabled=False))
+    assert all(not button.isEnabled() for button in buttons)
 
 
 def test_manual_timer_only_refreshes_countdown_and_a_wording_is_exact(qtbot) -> None:
@@ -204,17 +247,17 @@ def test_manual_timer_only_refreshes_countdown_and_a_wording_is_exact(qtbot) -> 
         )
     )
 
-    assert view.telemetry_a_label.text() == "A路当前观测：123.4 sccm"
+    assert view.telemetry_a_label.text() == "123"
     assert "总流量" not in view.telemetry_a_label.text()
     assert "稳定" not in view.telemetry_a_label.text()
-    assert view.countdown_label.text() == "剩余：2.0 秒"
+    assert view.countdown_label.text() == "剩余 2.0 秒"
     now[0] = 2_500_000_000
     view.refresh_countdown_display()
-    assert view.countdown_label.text() == "剩余：0.5 秒"
+    assert view.countdown_label.text() == "剩余 0.5 秒"
     assert emitted == []
 
     view.update_a_observation(88.0)
-    assert view.telemetry_a_label.text() == "A路当前观测：88.0 sccm"
+    assert view.telemetry_a_label.text() == "88"
 
 
 def test_manual_view_data_objects_are_frozen() -> None:

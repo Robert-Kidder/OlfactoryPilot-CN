@@ -4,8 +4,6 @@ import json
 import time
 from pathlib import Path
 
-from PySide6.QtWidgets import QMessageBox
-
 from app.controllers.main_controller import MainController
 from app.models import (
     AppState,
@@ -81,7 +79,6 @@ def _controller_and_window(tmp_path: Path):
 
 def test_cleaning_view_has_20_routes_and_only_emits_intents(
     qt_app,
-    monkeypatch,
 ) -> None:
     view = CleaningView()
     candidates = []
@@ -111,11 +108,9 @@ def test_cleaning_view_has_20_routes_and_only_emits_intents(
     assert candidates[-1][0] == (2, 3, 4)
     assert "1.0 分钟" in view.estimate_label.text()
 
-    monkeypatch.setattr(
-        QMessageBox,
-        "question",
-        lambda *_args, **_kwargs: QMessageBox.StandardButton.Yes,
-    )
+    view.start_button.click()
+    assert starts == []
+    assert view.start_button.text() == "再次点击开始清洗"
     view.start_button.click()
     assert starts == [True]
     view.output_button.click()
@@ -155,10 +150,7 @@ def test_controller_saves_only_while_disconnected_and_restores_local_override(
     assert not view.save_button.isEnabled()
     assert not view.start_button.isEnabled()
     assert not controller.handle_cleaning_save_requested((2,), 1200, 2.5, 2)
-    assert all(
-        text in controller._cleaning_display_message
-        for text in ("保存失败", "安全动作", "下一步")
-    )
+    assert all(text in controller._cleaning_display_message for text in ("保存失败", "安全动作", "下一步"))
 
     controller.state.telemetry.connected = False
     controller.state.hardware_ready = False
@@ -197,10 +189,7 @@ def test_controller_cleaning_publishes_complete_maintenance_bundle(
     assert controller.handle_cleaning_start_requested(), controller._cleaning_display_message
 
     deadline = time.monotonic() + 2
-    while (
-        controller._cleaning_runtime.status != CleaningStatus.COMPLETED
-        and time.monotonic() < deadline
-    ):
+    while controller._cleaning_runtime.status != CleaningStatus.COMPLETED and time.monotonic() < deadline:
         time.sleep(0.01)
         controller._drain_cleaning_if_not_running()
         qt_app.processEvents()
@@ -215,9 +204,7 @@ def test_controller_cleaning_publishes_complete_maintenance_bundle(
     )
     assert result.status == CleaningStatus.COMPLETED
     assert controller.device_lease.snapshot.kind == DeviceLeaseKind.IDLE
-    assert controller._cleaning_runtime.close_confirmed >= (
-        controller._cleaning_runtime.close_required
-    )
+    assert controller._cleaning_runtime.close_confirmed >= (controller._cleaning_runtime.close_required)
     assert result.final_dir is not None
     assert (result.final_dir / "manifest.json").is_file()
     assert not list(result.final_dir.glob("*.raw"))

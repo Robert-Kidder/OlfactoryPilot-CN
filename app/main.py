@@ -8,7 +8,7 @@ import sys
 import traceback
 from pathlib import Path
 
-from PySide6.QtWidgets import QApplication, QMessageBox
+from PySide6.QtWidgets import QApplication
 
 # Ensure package imports work when running as a script (python app/main.py).
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -243,7 +243,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument(
         "--simulation",
         action="store_true",
-        help="启用模拟模式：跳过物理硬件检查并使用 Mock HAL",
+        help="启用离线模拟：跳过物理硬件检查并使用测试设备",
     )
     return parser.parse_args(argv)
 
@@ -263,13 +263,7 @@ def report_startup_error(exc: Exception) -> None:
     except Exception:
         pass
     try:
-        app = QApplication.instance() or QApplication(sys.argv)
-        QMessageBox.critical(
-            None,
-            "OlfactoryPilot 启动失败",
-            f"{message}\n\n日志：{log_path}",
-        )
-        app.processEvents()
+        sys.stderr.write(f"{message}\n日志：{log_path}\n")
     except Exception:
         pass
 
@@ -278,16 +272,6 @@ def report_duplicate_instance() -> None:
     message = "OlfactoryPilot 已在运行。为保护活动会话与硬件，本次启动已取消。"
     try:
         sys.stderr.write(message + "\n")
-    except Exception:
-        pass
-    try:
-        app = QApplication.instance() or QApplication(sys.argv)
-        QMessageBox.information(
-            None,
-            "OlfactoryPilot 已在运行",
-            message,
-        )
-        app.processEvents()
     except Exception:
         pass
 

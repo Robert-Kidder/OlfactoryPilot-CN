@@ -403,18 +403,18 @@ def test_mock_verification_failure_does_not_publish_fingerprint(
     rendered = window.hardware_settings_view.draft.to_profile().channels[1]
     assert rendered == controller.state.hardware_profile.channels[1]
     assert rendered.mapping_fingerprint != candidate.channels[1].mapping_fingerprint
-    assert "Mock 验证失败" in window.hardware_settings_view.status_label.text()
+    assert "测试气口失败" in window.hardware_settings_view.status_label.text()
 
 
-def test_product_navigation_exposes_v3_and_hides_legacy_entries(qt_app) -> None:
+def test_product_entry_is_manual_console_and_settings_is_a_dialog(qt_app) -> None:
     _, window = build_application(
         DEFAULT_CONFIG,
         start_worker=False,
         simulation=True,
     )
-    labels = [window.tabs.tabText(index) for index in range(window.tabs.count())]
-
-    assert labels == ["概览", "文件", "手动实验 V3", "硬件设置", "清洗"]
-    assert "预检" not in labels
-    assert "校准" not in labels
-    assert "协议" not in labels
+    assert window.centralWidget().findChild(type(window.manual_experiment_view)) is (
+        window.manual_experiment_view
+    )
+    assert window.settings_button.text() == "设置"
+    assert window.hardware_settings_view.window() is window.settings_dialog
+    assert not window.tabs.isVisibleTo(window)
