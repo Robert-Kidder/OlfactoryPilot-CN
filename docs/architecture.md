@@ -7,7 +7,7 @@
 ## 2. 技术栈
 
 - Python：3.11。
-- GUI：PySide6。
+- GUI：PySide6 6.7.2 + PySide6-Fluent-Widgets / QFluentWidgets；正式窗口基类为 `FluentWindow`。
 - 图形显示：pyqtgraph。
 - NI 设备：nidaqmx。
 - RS232：pyserial。
@@ -43,6 +43,12 @@ tests/                 # 自动化测试
 - Controller 接收界面事件，调用模型和服务，发出状态更新。
 - Worker 在线程中处理硬件读写、协议时序和安全检查，避免阻塞 UI。
 - Qt signal/slot 用于 UI 线程和工作线程之间通信。
+
+### 正式产品 UI
+
+- 第一阶段正式运行树只构造 QFluentWidgets `FluentWindow` 与“手动实验”页；旧页面源码可以保留给显式回归测试，但不得由正式窗口 import、隐藏托管或提供兼容入口。
+- 全局使用 Dark Theme 与 `#E2AD50` 主题色，实时曲线继续使用 pyqtgraph。产品组件优先采用 QFluentWidgets 原生 Card、Label、SpinBox、Button、Badge、ToolTip 和 InfoBar。
+- 气口选择属于 View draft；真实开启和故障来自 immutable Snapshot。UI `QTimer` 只刷新倒计时和显示，不提交自动关闭动作。
 
 ### 低抖动动作与资源所有权
 
@@ -120,13 +126,13 @@ tests/                 # 自动化测试
 - stale/late/conflicting receipt 不推进步骤；失败、超时或不确定状态进入 `RECOVERY_REQUIRED`。
 - 保留现有 owner、lease、epoch、receipt、紧急队列和 handoff，不重写 HAL/Worker 拓扑。
 
-### Story 4.6：新版手动实验纵切片
+### Story 4.6：手动实验执行纵切片
 
 - 使用 Intent → Command → Receipt → immutable Snapshot。View 只保留未提交 draft 和即时视觉反馈，不直接访问 HAL、不持有硬件状态。
 - `FlowSetpoints` 校验 `0 ≤ A ≤ T` 并派生 `B=T-A`；`ChannelRegistry` 负责机外气口 ↔ 内部阀位 ↔ NI target。
 - 手动供气和刺激阶段由 ActuationWorker/协调器持有。刺激持续时间从全部目标成功 open receipt 的共同就绪时刻起算，由 monotonic deadline 自动关闭；UI `QTimer` 只刷新倒计时。
 - 未来自动实验只能生成相同的 typed phase plan，复用 ActuationWorker、FlowWorker、HAL、lease、epoch 和 receipt，不能模拟 UI 点击。
-- 方案 B V3 通过 Mock、UI 与适用 HIL 后，删除旧 `PreTestView`、View 硬件计时、重复状态、无用弹窗和第二条真实硬件入口。
+- 新 QFluentWidgets 手动实验 UI 复用该执行纵切片；正式 runtime 不再构造 `PreTestView`。legacy 源码暂留给 Controller 回归测试，确认新界面后再做源码级清理。
 
 ### 配置、清洗与验证
 

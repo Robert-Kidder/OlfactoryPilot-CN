@@ -12,9 +12,9 @@ from app.controllers.main_controller import MainController, RecoveryScanWorker
 from app.models import AppState, ProtocolDocument, ProtocolTrial, TriggerMode
 from app.models.session import SessionStatus, SessionViewSnapshot
 from app.services.mock_hal import MockHAL
-from app.views.main_window import MainWindow
 from app.views.session_view import SessionView
 from app.workers.hardware_worker import HardwareWorker
+from tests.legacy_ui_harness import build_legacy_test_window as MainWindow
 
 
 def _controller_and_window(tmp_path: Path):

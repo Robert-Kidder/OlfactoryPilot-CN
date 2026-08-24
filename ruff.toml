@@ -7,3 +7,6 @@ ignore = ["E402", "E501"]
 
 [lint.isort]
 known-first-party = ["app"]
+
+[lint.per-file-ignores]
+"pyinstaller.spec" = ["F821", "UP009"]

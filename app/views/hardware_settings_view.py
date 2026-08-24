@@ -28,7 +28,7 @@ from app.models import (
     SelectorConfig,
     VerificationStatus,
 )
-from app.views.manual_experiment_view import ConsolePortButton
+from app.views.manual_experiment_view import PortTile
 from app.views.product_text import user_facing_text
 
 
@@ -160,7 +160,7 @@ class HardwareSettingsView(QWidget):
         self._snapshot: HardwareSettingsSnapshot | None = None
         self._draft: HardwareProfileDraft | None = None
         self._selected_port = 1
-        self.overview_buttons: dict[int, QPushButton] = {}
+        self.overview_buttons: dict[int, PortTile] = {}
         self.name_inputs: dict[int, QLineEdit] = {}
         self.internal_inputs: dict[int, QSpinBox] = {}
         self.target_inputs: dict[int, QLineEdit] = {}
@@ -209,9 +209,9 @@ class HardwareSettingsView(QWidget):
         self.overview_layout.setHorizontalSpacing(6)
         self.overview_layout.setVerticalSpacing(8)
         for port in range(1, 21):
-            button = ConsolePortButton(port)
+            button = PortTile(port)
             button.setObjectName("settingsPortButton")
-            button.clicked.connect(lambda _checked=False, p=port: self.select_port(p))
+            button.clicked.connect(lambda p=port: self.select_port(p))
             self.overview_buttons[port] = button
             self.overview_layout.addWidget(button, (port - 1) // 10, (port - 1) % 10)
         overview_layout.addLayout(self.overview_layout)
@@ -530,7 +530,7 @@ class HardwareSettingsView(QWidget):
 
     def _render_overview_button(self, channel: HardwareChannelDraft) -> None:
         button = self.overview_buttons[channel.external_port]
-        if isinstance(button, ConsolePortButton):
+        if isinstance(button, PortTile):
             button.set_port_content(channel.display_name)
         else:
             button.setText(settings_port_text(channel))

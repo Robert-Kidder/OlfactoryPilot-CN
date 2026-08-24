@@ -32,6 +32,7 @@ def optional_submodules(package_name: str) -> list[str]:
 # Collect optional setuptools dependency trees only when present in the active environment.
 hidden_imports.extend(optional_submodules("jaraco"))
 hidden_imports.extend(optional_submodules("pkg_resources"))
+hidden_imports.extend(optional_submodules("qfluentwidgets"))
 excluded_modules = [
     # Not used: PyQt5 (we use PySide6)
     "PyQt5",
@@ -91,6 +92,7 @@ datas = [
     (str(docs_dir), "docs"),
 ]
 datas += copy_metadata("nidaqmx")
+datas += copy_metadata("PySide6-Fluent-Widgets")
 
 a = Analysis(
     ["app/main.py"],

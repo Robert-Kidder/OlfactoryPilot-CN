@@ -8,6 +8,7 @@
 - [`prd.md`](prd.md)：产品目标、功能需求和非功能需求。
 - [`architecture.md`](architecture.md)：MVC + Worker + HAL 架构、线程所有权、安全与数据边界。
 - [`ux-design.md`](ux-design.md)：界面结构、交互模式和中文 UX 约定。
+- 当前正式 UI 基线：PySide6 6.7.2 + QFluentWidgets `FluentWindow` + pyqtgraph，使用 near-black/deep-green + amber Dark Theme；第一阶段仅开放“手动实验”。
 - [`epics.md`](epics.md)：Epic 与 Story 的需求拆分；具体实施状态不在此维护。
 - [`project-structure.md`](project-structure.md)：目录、工具链、文件放置和 BMAD 工作规则。
 - [`bmm-workflow-status.yaml`](bmm-workflow-status.yaml)：BMAD 规划阶段产物与当前实施状态源的指针。

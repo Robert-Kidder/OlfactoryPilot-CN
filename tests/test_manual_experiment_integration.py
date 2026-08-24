@@ -5,6 +5,8 @@ import time
 from dataclasses import replace
 from pathlib import Path
 
+from qfluentwidgets import FluentWindow
+
 from app.controllers import MainController
 from app.main import DEFAULT_CONFIG, build_application
 from app.models import (
@@ -18,6 +20,7 @@ from app.models import (
 )
 from app.services import MockHAL
 from app.views import MainWindow
+from app.views.hardware_settings_view import HardwareSettingsView
 from app.workers import HardwareWorker
 
 
@@ -151,7 +154,7 @@ def test_pending_manual_start_cancel_releases_exact_owner(tmp_path, monkeypatch)
     assert controller.actuation_worker.manual_snapshot.status is ManualExperimentStatus.IDLE
 
 
-def test_controller_publishes_complete_manual_readiness_and_three_part_reason(
+def test_controller_publishes_concise_manual_readiness_reason(
     tmp_path,
     qtbot,
 ) -> None:
@@ -166,8 +169,9 @@ def test_controller_publishes_complete_manual_readiness_and_three_part_reason(
     assert not snapshot.controls_enabled
     assert not snapshot.can_apply_flow
     assert "当前不可操作" in snapshot.detail_text
-    assert "安全动作" in snapshot.detail_text
-    assert "下一步" in snapshot.detail_text
+    assert "请先连接设备" in snapshot.detail_text
+    assert "intent" not in snapshot.detail_text
+    assert "lease" not in snapshot.detail_text
 
     controller.state.telemetry.connected = True
     controller.state.hardware_ready = True
@@ -186,13 +190,16 @@ def test_controller_publishes_complete_manual_readiness_and_three_part_reason(
     snapshot = window.manual_experiment_view.snapshot
     assert not snapshot.controls_enabled
     assert not snapshot.can_apply_flow
-    assert "lease" in snapshot.detail_text
+    assert "设备正在执行其他操作" in snapshot.detail_text
+    assert "lease" not in snapshot.detail_text
 
 
 def test_hardware_profile_controller_gate_revision_and_rollback(tmp_path, qtbot) -> None:
     controller, _ = _controller(tmp_path)
     window = MainWindow(controller, controller.state)
     qtbot.addWidget(window)
+    window.hardware_settings_view = HardwareSettingsView()
+    qtbot.addWidget(window.hardware_settings_view)
     controller.bind_view(window)
     controller.state.telemetry.connected = False
     controller.state.hardware_ready = False
@@ -363,6 +370,8 @@ def test_mock_verification_requires_isolated_correlated_open_close_receipts(
     controller, _ = _controller(tmp_path)
     window = MainWindow(controller, controller.state)
     qtbot.addWidget(window)
+    window.hardware_settings_view = HardwareSettingsView()
+    qtbot.addWidget(window.hardware_settings_view)
     controller.bind_view(window)
     controller.state.telemetry.connected = False
     controller.state.hardware_ready = False
@@ -388,6 +397,8 @@ def test_mock_verification_failure_does_not_publish_fingerprint(
     controller, _ = _controller(tmp_path)
     window = MainWindow(controller, controller.state)
     qtbot.addWidget(window)
+    window.hardware_settings_view = HardwareSettingsView()
+    qtbot.addWidget(window.hardware_settings_view)
     controller.bind_view(window)
     controller.state.telemetry.connected = False
     controller.state.hardware_ready = False
@@ -406,15 +417,17 @@ def test_mock_verification_failure_does_not_publish_fingerprint(
     assert "测试气口失败" in window.hardware_settings_view.status_label.text()
 
 
-def test_product_entry_is_manual_console_and_settings_is_a_dialog(qt_app) -> None:
+def test_product_entry_is_single_fluent_manual_interface(qt_app) -> None:
     _, window = build_application(
         DEFAULT_CONFIG,
         start_worker=False,
         simulation=True,
     )
-    assert window.centralWidget().findChild(type(window.manual_experiment_view)) is (
+    assert isinstance(window, FluentWindow)
+    assert window._manual_interface.findChild(type(window.manual_experiment_view)) is (
         window.manual_experiment_view
     )
-    assert window.settings_button.text() == "设置"
-    assert window.hardware_settings_view.window() is window.settings_dialog
-    assert not window.tabs.isVisibleTo(window)
+    assert window.stackedWidget.count() == 1
+    assert not hasattr(window, "settings_dialog")
+    assert not hasattr(window, "hardware_settings_view")
+    assert not hasattr(window, "tabs")

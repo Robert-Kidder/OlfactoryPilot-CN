@@ -10,13 +10,20 @@ OlfactoryPilot-CN 是用于嗅觉刺激实验的 Windows 桌面控制软件，�
 
 - 操作系统：Windows 10/11。
 - Python：3.11。开发者可使用 conda、venv 或系统 Python；文档和脚本不依赖某一台电脑的解释器绝对路径。
-- GUI：PySide6。
+- GUI：PySide6 6.7.2 + PySide6-Fluent-Widgets / QFluentWidgets；正式产品窗口使用 `FluentWindow`。
 - 实时图形：pyqtgraph。
 - 硬件接口：nidaqmx、pyserial。
 - 打包：PyInstaller。
 - 测试：pytest、pytest-qt。
 - 代码检查：ruff，目标版本为 `py311`。
 - 依赖管理：使用 `requirements.txt` 和 `requirements-dev.txt`，不使用 Poetry 作为当前项目基线。
+
+### 正式 UI 基线
+
+- 使用 QFluentWidgets Dark Theme：近黑、深墨绿/石墨色，主题强调色为 `#E2AD50`。
+- 当前正式导航只包含“手动实验”；其他页面完成重新设计前不加入运行入口。
+- 产品界面优先使用 QFluentWidgets 原生 Card、Label、数字输入、Button、Badge、ToolTip 和 InfoBar；不使用旧 QWidget/QSS 控制台作为未来标准，不引入 superqt。
+- selected 使用琥珀强调；真实开启使用绿色图标状态；故障使用红色且形态不同的图标状态。重要状态不得只靠颜色或 Tooltip 表达。
 
 ## 架构原则
 

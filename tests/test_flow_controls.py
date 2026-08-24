@@ -6,8 +6,8 @@ from app.controllers import MainController
 from app.main import DEFAULT_CONFIG, load_config
 from app.models import AppState
 from app.services import MockHAL, SafetyManager
-from app.views import MainWindow
 from app.workers import HardwareWorker
+from tests.legacy_ui_harness import build_legacy_test_window as MainWindow
 
 
 def _build_flow_context(low_flow_threshold: float = 0.2):

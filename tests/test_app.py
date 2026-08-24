@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 from PySide6.QtCore import QThread
 from PySide6.QtWidgets import QApplication
+from qfluentwidgets import FluentWindow
 
 import app.main as main_module
 from app.controllers import MainController
@@ -23,8 +24,8 @@ from app.models.session import SessionStatus
 from app.services import MockHAL, SafetyManager, ShutdownService
 from app.services.hardware_check_service import HardwareCheckService, SelfCheckResult
 from app.services.real_hal import RealHAL
-from app.views import MainWindow
 from app.workers import HardwareWorker
+from tests.legacy_ui_harness import build_legacy_test_window as MainWindow
 
 
 @pytest.fixture(scope="session")
@@ -201,7 +202,7 @@ def test_load_config_and_state():
 def test_session_types_are_exported_from_public_packages() -> None:
     from app.models import SessionDescriptor, SessionViewSnapshot
     from app.services import SessionFileService
-    from app.views import SessionView
+    from app.views.session_view import SessionView
     from app.workers import SessionWriterWorker
 
     assert SessionDescriptor
@@ -214,7 +215,9 @@ def test_session_types_are_exported_from_public_packages() -> None:
 def test_main_window_builds(qt_app):
     _, window = build_application(DEFAULT_CONFIG, start_worker=False, hal=MockHAL())
     assert window.windowTitle()
-    assert window.tabs.count() >= 3
+    assert isinstance(window, FluentWindow)
+    assert window.stackedWidget.count() == 1
+    assert not hasattr(window, "tabs")
     assert not hasattr(window, "_recheck_button")
 
 

@@ -13,8 +13,8 @@ from app.models import (
 )
 from app.services.mock_hal import MockHAL
 from app.views.cleaning_view import CleaningView
-from app.views.main_window import MainWindow
 from app.workers.hardware_worker import HardwareWorker
+from tests.legacy_ui_harness import build_legacy_test_window as MainWindow
 
 
 def _config(local_path: Path, *, duration_s: float = 0.01) -> dict:

@@ -9,6 +9,7 @@ import traceback
 from pathlib import Path
 
 from PySide6.QtWidgets import QApplication
+from qfluentwidgets import Theme, setTheme, setThemeColor
 
 # Ensure package imports work when running as a script (python app/main.py).
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -122,6 +123,13 @@ def configure_logging(log_level: str) -> None:
     )
 
 
+def configure_product_theme() -> None:
+    """Apply the product-wide Fluent dark theme without persisting host settings."""
+
+    setTheme(Theme.DARK, save=False, lazy=False)
+    setThemeColor("#E2AD50", save=False, lazy=False)
+
+
 def build_application(
     config_path: Path,
     start_worker: bool = True,
@@ -203,6 +211,7 @@ def build_application(
     if os.name == "nt" and not os.environ.get("QT_QPA_PLATFORM"):
         os.environ.setdefault("QT_QPA_PLATFORM", "windows")
     qt_app = QApplication.instance() or QApplication(sys.argv)
+    configure_product_theme()
     worker = HardwareWorker(
         telemetry_hz=int(config.get("telemetry_hz", 5)),
         ttl_config=config,
@@ -222,7 +231,7 @@ def build_application(
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="OlfactoryPilot 控制台占位应用")
+    parser = argparse.ArgumentParser(description="OlfactoryPilot 嗅觉实验控制软件")
     parser.add_argument(
         "--config",
         type=Path,
@@ -238,7 +247,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument(
         "--no-worker",
         action="store_true",
-        help="跳过占位硬件线程（用于CI/测试）",
+        help="跳过硬件线程（用于 CI/测试）",
     )
     parser.add_argument(
         "--simulation",
