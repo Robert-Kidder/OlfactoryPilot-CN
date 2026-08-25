@@ -1,4 +1,4 @@
-﻿# Story 2.5: Variant-Aware Pre-Test UI
+# Story 2.5: Variant-Aware Pre-Test UI
 
 Status: done
 Epic: 2 - Calibration & Manual Control  
@@ -12,12 +12,12 @@ Story ID: 2.5
 
 ## Acceptance Criteria
 1. **20 通道渲染 (AC1)**：Given 设备配置为 20-channel；When 打开 Pre-test 页面；Then 阀矩阵以 2 行 x 10 列（行优先：第 1 行通道 1-10，第 2 行 11-20）显示 20 个通道且标签顺序与 `config/default_config.json` 中的 20 通道映射一致，未配置的通道隐藏/禁用，流量/状态区可用。[Source: docs/epics.md:257-268, docs/ux-design.md:75-79, config/default_config.json]
-2. **主阀常开与安全阻断 (AC2)**：Given 启动设备并切换刺激/非刺激模式；When 写入硬件/Mock；Then 主阀上电常开（不随单个气味通道切换），刺激时主路通向 20 通道，非刺激时通向补偿路径，仍复用 SafetyManager/low_flow 阻断，LOW_FLOW/DATA_STALE/未自检时全部按钮禁用且不发送写入。[Source: docs/sprint-artifacts/2-3-valve-matrix-manual-control.md, docs/sprint-artifacts/1-2-safe-start-airflow-interlock.md]
+2. **主阀常开与安全阻断 (AC2)**：Given 启动设备并切换刺激/非刺激模式；When 写入硬件/Mock；Then 主阀上电常开（不随单个气味通道切换），刺激时主路通向 20 通道，非刺激时通向补偿路径，仍复用 SafetyManager/low_flow 阻断，LOW_FLOW/DATA_STALE/未自检时全部按钮禁用且不发送写入。[Source: docs/archive/sprint-artifacts/2-3-valve-matrix-manual-control.md, docs/archive/sprint-artifacts/1-2-safe-start-airflow-interlock.md]
 3. **配置持久化 (AC3)**：Given 使用默认或用户配置；When 重启应用或启用 Simulation Mode；Then 继续使用 20 通道映射与主阀配置，Pre-test UI 与 ValveService 一致渲染，Simulation 模式下同样能显示 20 通道并记录事件。[Source: config/default_config.json, docs/project-context.md:18-44]
 
 ## Developer Context (developer_context_section)
 - 业务价值：对齐 UI 与实际 20 通道硬件，避免把指令发送到不存在的通道或错误的主阀映射，减少实验前误操作风险。[Source: docs/epics.md:257-268]
-- 范围关系：继承 Epic 2 手动控制与 Flow Apply 能力，沿用 FR1.2 安全联锁（低流量阻断）。本故事仅覆盖 20 通道映射，不再支持 10 通道切换。[Source: docs/prd.md:48-51, docs/sprint-artifacts/1-2-safe-start-airflow-interlock.md]
+- 范围关系：继承 Epic 2 手动控制与 Flow Apply 能力，沿用 FR1.2 安全联锁（低流量阻断）。本故事仅覆盖 20 通道映射，不再支持 10 通道切换。[Source: docs/prd.md:48-51, docs/archive/sprint-artifacts/1-2-safe-start-airflow-interlock.md]
 - 现状：PreTestView 初始化时读取 `AppState.get_active_valve_map()`，ValveService 构造时固定 `hardware_variant`；默认配置已含 20 通道映射与主阀。[Source: app/views/main_window.py, app/views/pretest_view.py, app/services/valve_service.py, config/default_config.json]
 - 关键风险：映射缺失或与实际布线不符会导致写入失败；低流量或自检未通过时不应触发写入；模拟模式需与真实硬件行为一致；UI 布局（2x10）需要保持现有间距/样式，避免破坏用户已调好的界面；主阀行路需与配置一致（当前默认 master_valve=Dev2/P1.0）。
 
@@ -59,9 +59,9 @@ Story ID: 2.5
 - [x] 测试覆盖（AC1/AC2/AC3）：新增/调整单测覆盖映射缺失阻断、20 通道渲染、主阀常开与模拟模式持久化。
 
 ## Previous Story Intelligence (previous_story_intelligence)
-- **2.3 Valve Matrix**：已将阀映射配置化、引入 master valve 联动与 SafetyManager.guard_command；UI 使用 `get_active_valve_map()` 构建矩阵。[Source: docs/sprint-artifacts/2-3-valve-matrix-manual-control.md, app/services/valve_service.py]
-- **2.4 Flow Rate Controls**：Flow Apply 复用 PreTestView 与 SafetyManager；Apply 按钮在 LOW_FLOW/DATA_STALE 下禁用，需保持该阻断行为。[Source: docs/sprint-artifacts/2-4-flow-rate-controls.md, app/controllers/main_controller.py]
-- **1.2 Safe Start Interlock**：所有 Pre-test/Protocol/Flow Apply 入口必须经统一安全校验，低流量时禁止写入；20 通道写入应延续同一路径。[Source: docs/sprint-artifacts/1-2-safe-start-airflow-interlock.md]
+- **2.3 Valve Matrix**：已将阀映射配置化、引入 master valve 联动与 SafetyManager.guard_command；UI 使用 `get_active_valve_map()` 构建矩阵。[Source: docs/archive/sprint-artifacts/2-3-valve-matrix-manual-control.md, app/services/valve_service.py]
+- **2.4 Flow Rate Controls**：Flow Apply 复用 PreTestView 与 SafetyManager；Apply 按钮在 LOW_FLOW/DATA_STALE 下禁用，需保持该阻断行为。[Source: docs/archive/sprint-artifacts/2-4-flow-rate-controls.md, app/controllers/main_controller.py]
+- **1.2 Safe Start Interlock**：所有 Pre-test/Protocol/Flow Apply 入口必须经统一安全校验，低流量时禁止写入；20 通道写入应延续同一路径。[Source: docs/archive/sprint-artifacts/1-2-safe-start-airflow-interlock.md]
 
 ## Git Intelligence Summary (git_intelligence_summary)
 - 最近提交集中在校准/阈值与 UI 优化（Story 2.2/2.7），并更新了项目上下文与模拟策略；保持现有 MVC + SafetyManager + MockHAL 结构，20 通道映射应复用这些模式。[Source: git log -5]
@@ -109,7 +109,7 @@ Story ID: 2.5
 - app/views/pretest_view.py
 - tests/test_valve_service.py
 - tests/test_pretest_view.py
-- docs/sprint-artifacts/2-5-variant-aware-pre-test-ui.md
+- docs/archive/sprint-artifacts/2-5-variant-aware-pre-test-ui.md
 - docs/sprint-artifacts/sprint-status.yaml
 
 ## Change Log

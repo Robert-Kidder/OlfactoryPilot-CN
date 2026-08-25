@@ -316,10 +316,10 @@ Status: done
 
 ### 必须保留的 Story 3.2–3.4 契约
 
-- 3.2 的事件最少包含 trial、valve、gate/sample/threshold/safety/result，且明确留给 3.5 复用。[Source: docs/sprint-artifacts/3-2-breath-gated-stimulation.md:71-75]
-- 3.3 的 manual/TTL event 保留采集时间、mode/source/reason、epoch/sequence；旧 epoch、持续高电平、模式不匹配不推进 trial。[Source: docs/sprint-artifacts/3-3-manual-vs-ttl-trigger-modes.md:83-88]
-- 3.3 的协议替换、readiness loss、显式 rearm 和关阀失败恢复语义不能被 session UI 绕过。[Source: docs/sprint-artifacts/3-3-manual-vs-ttl-trigger-modes.md:55-71]
-- 3.4 的 receipt/quality 字段已经由结构化对象提供，3.5 直接持久化而非重新计算。[Source: docs/sprint-artifacts/3-4-low-jitter-actuation-20ms.md:114-130]
+- 3.2 的事件最少包含 trial、valve、gate/sample/threshold/safety/result，且明确留给 3.5 复用。[Source: docs/archive/sprint-artifacts/3-2-breath-gated-stimulation.md:71-75]
+- 3.3 的 manual/TTL event 保留采集时间、mode/source/reason、epoch/sequence；旧 epoch、持续高电平、模式不匹配不推进 trial。[Source: docs/archive/sprint-artifacts/3-3-manual-vs-ttl-trigger-modes.md:83-88]
+- 3.3 的协议替换、readiness loss、显式 rearm 和关阀失败恢复语义不能被 session UI 绕过。[Source: docs/archive/sprint-artifacts/3-3-manual-vs-ttl-trigger-modes.md:55-71]
+- 3.4 的 receipt/quality 字段已经由结构化对象提供，3.5 直接持久化而非重新计算。[Source: docs/archive/sprint-artifacts/3-4-low-jitter-actuation-20ms.md:114-130]
 - HardwareWorker 为 AI owner、ActuationWorker 为 DO/executor/metrics owner、FlowWorker 为 serial owner；session writer 是第四个纯 I/O owner，不属于 HAL。[Source: docs/architecture.md:47-54]
 - `daqmx_write_ack` 只表示 HAL write 成功回执，不表示机械阀物理完成。[Source: docs/architecture.md:50]
 
@@ -344,8 +344,8 @@ record_sequence,timestamp,monotonic_ns,ai_epoch,sample_sequence,ai0_raw
 ### 测试与完成门禁
 
 - 纯命名/manifest/recovery 放在 service 单测；writer 线程用 fake filesystem/writer 和 event/barrier；Controller/View 用 pytest-qt；真实 Windows 权限差异用 fault injection，不依赖 POSIX chmod。
-- 性能不能只看平均吞吐。`e401a31` 曾在最终 closure 前再次测到首个 open `35.3069ms/31.3884ms`，修复后才以无 trace 生产路径通过 200+200；3.5 必须验证首动作、rolling p95、final-last-100 和安全场景。[Source: docs/sprint-artifacts/3-4-low-jitter-actuation-20ms.md:336-336]
-- Story 3.4 最终 HIL 没有外接 AI0 呼吸源/AI6 TTL 源，且 ack 不是机械时序。3.5 的 HIL 只证明 session writer 并发负载未破坏已有软件/DAQ write 门禁，不得扩大声明。[Source: docs/sprint-artifacts/3-4-low-jitter-actuation-20ms.md:381-383]
+- 性能不能只看平均吞吐。`e401a31` 曾在最终 closure 前再次测到首个 open `35.3069ms/31.3884ms`，修复后才以无 trace 生产路径通过 200+200；3.5 必须验证首动作、rolling p95、final-last-100 和安全场景。[Source: docs/archive/sprint-artifacts/3-4-low-jitter-actuation-20ms.md:336-336]
+- Story 3.4 最终 HIL 没有外接 AI0 呼吸源/AI6 TTL 源，且 ack 不是机械时序。3.5 的 HIL 只证明 session writer 并发负载未破坏已有软件/DAQ write 门禁，不得扩大声明。[Source: docs/archive/sprint-artifacts/3-4-low-jitter-actuation-20ms.md:381-383]
 - 不使用真实填盘、删除用户数据、拔线或短接做失败测试；破坏性 HIL 仍需单独授权。
 
 ### Latest Technical Notes
@@ -372,9 +372,9 @@ record_sequence,timestamp,monotonic_ns,ai_epoch,sample_sequence,ai0_raw
 - [Source: docs/ux-design.md:60-74]
 - [Source: docs/architecture.md:38-80]
 - [Source: docs/project-structure.md:235-250]
-- [Source: docs/sprint-artifacts/3-2-breath-gated-stimulation.md:71-75]
-- [Source: docs/sprint-artifacts/3-3-manual-vs-ttl-trigger-modes.md:83-88]
-- [Source: docs/sprint-artifacts/3-4-low-jitter-actuation-20ms.md:114-130]
+- [Source: docs/archive/sprint-artifacts/3-2-breath-gated-stimulation.md:71-75]
+- [Source: docs/archive/sprint-artifacts/3-3-manual-vs-ttl-trigger-modes.md:83-88]
+- [Source: docs/archive/sprint-artifacts/3-4-low-jitter-actuation-20ms.md:114-130]
 - [Source: app/services/hal.py:10-49]
 - [Source: app/models/protocol_execution.py:31-92]
 - [Source: app/models/actuation.py:52-146]
@@ -521,7 +521,7 @@ GPT-5 Codex
 
 ### File List
 
-- `docs/sprint-artifacts/3-5-session-file-naming-and-logging.md`（本 Story 新建）
+- `docs/archive/sprint-artifacts/3-5-session-file-naming-and-logging.md`（本 Story 新建）
 - `docs/sprint-artifacts/sprint-status.yaml`
 - `app/models/session.py`
 - `app/models/protocol_execution.py`

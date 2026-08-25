@@ -1,6 +1,6 @@
-﻿# Validation Report
+# Validation Report
 
-**Document:** docs/sprint-artifacts/1-1-device-self-check-and-status-report.md  
+**Document:** docs/archive/sprint-artifacts/1-1-device-self-check-and-status-report.md
 **Checklist:** 当前 BMAD 工具链中的 create-story 检查清单（旧路径已不再使用）。  
 **Date:** 2025-12-08
 

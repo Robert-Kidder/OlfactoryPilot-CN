@@ -1,4 +1,4 @@
-﻿# 故事 1.3: Global Safety Toolbar
+# 故事 1.3: Global Safety Toolbar
 Status: real-hardware-review
 Epic: 1 - Safe Hardware Foundations
 Story Key: 1-3-global-safety-toolbar
@@ -94,7 +94,7 @@ Story ID: 1.3
 
 ## Story Completion Status（story_completion_status）
 - 状态：ready-for-review
-- 产物：docs/sprint-artifacts/1-3-global-safety-toolbar.md
+- 产物：docs/archive/sprint-artifacts/1-3-global-safety-toolbar.md
 - 下一步：提交 code-review；如需复核故事质量，可运行 *validate-create-story。
 - 完成说明：Ultimate context engine analysis completed - comprehensive developer guide created.
 
@@ -128,7 +128,7 @@ Story ID: 1.3
 - 预检区不再显示“安全状态：SAFE”提示框；Reset 会把气道按钮恢复到初始未选/未亮状态，持续时间结束仍保持预选状态不变。
 
 ### File List
-- docs/sprint-artifacts/1-3-global-safety-toolbar.md
+- docs/archive/sprint-artifacts/1-3-global-safety-toolbar.md
 - docs/sprint-artifacts/sprint-status.yaml
 - app/controllers/main_controller.py
 - app/views/main_window.py

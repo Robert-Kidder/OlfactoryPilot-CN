@@ -4,13 +4,13 @@ lastStep: 'step-05-validate-and-complete'
 lastSaved: '2026-07-18'
 storyId: '3.3'
 storyKey: '3-3-manual-vs-ttl-trigger-modes'
-storyFile: 'docs/sprint-artifacts/3-3-manual-vs-ttl-trigger-modes.md'
+storyFile: 'docs/archive/sprint-artifacts/3-3-manual-vs-ttl-trigger-modes.md'
 atddChecklistPath: 'docs/sprint-artifacts/evidence/atdd-checklist-3-3-manual-vs-ttl-trigger-modes.md'
 archivedToProjectDocs: '2026-07-30'
 generatedTestFiles: []
 inputDocuments:
   - 'docs/project-context.md'
-  - 'docs/sprint-artifacts/3-3-manual-vs-ttl-trigger-modes.md'
+  - 'docs/archive/sprint-artifacts/3-3-manual-vs-ttl-trigger-modes.md'
   - '_bmad/tea/config.yaml'
   - 'pytest.ini'
   - 'tests/conftest.py'
@@ -171,12 +171,12 @@ python -m ruff check app tests
 - 不适用：Playwright API/E2E、HTTP mock、`data-testid`、浏览器 session。本项目为 PySide6 + pytest 桌面项目。
 - 按用户范围不执行：测试脚手架落盘、fixture 落盘、`test.skip()` 检查和红灯运行；`generatedTestFiles: []` 准确反映现状。
 - 环境提醒：最终绿色/回归应使用项目目标 Python 3.11；当前检查 shell 为 Python 3.13。
-- 工作区卫生：未启动浏览器、未创建随机 temp artifact；唯一新增交付物位于配置的 `_bmad-output/test-artifacts/`。
+- 工作区卫生：未启动浏览器、未创建随机 temp artifact；本清单现已归档到仓库内的证据目录，不依赖本地临时输出目录。
 
 ### 交接摘要
 
 - Story：`3.3` / `3-3-manual-vs-ttl-trigger-modes`
-- Story 文件：`docs/sprint-artifacts/3-3-manual-vs-ttl-trigger-modes.md`
-- ATDD 清单：`_bmad-output/test-artifacts/atdd-checklist-3-3-manual-vs-ttl-trigger-modes.md`
+- Story 文件：`docs/archive/sprint-artifacts/3-3-manual-vs-ttl-trigger-modes.md`
+- ATDD 清单：当前文件 `docs/sprint-artifacts/evidence/atdd-checklist-3-3-manual-vs-ttl-trigger-modes.md`
 - 已创建测试文件：0（按用户要求仅设计）
 - 下一步：开发实施时按“推荐红灯激活顺序”逐片先写/激活 pytest 红灯，再实现业务代码；建议进入 `bmad-dev-story`，实现完成后再用 `bmad-testarch-automate` 扩大自动化覆盖。

@@ -64,13 +64,13 @@ Baseline commit: `49fd99ecd0b4247555d071e6fd7e0fff8b3205b9`
 
 流程与证据：
 
-- `_bmad-output/implementation-artifacts/epic-4-context.md`
-- `_bmad-output/implementation-artifacts/spec-4-5-safe-stop-selector-order.md`
-- `_bmad-output/implementation-artifacts/spec-4-5-code-review-remediation.md`
-- `_bmad-output/implementation-artifacts/review-4-5-blind-hunter-prompt.md`
-- `_bmad-output/implementation-artifacts/review-4-5-edge-case-hunter-prompt.md`
+- `docs/archive/sprint-artifacts/epic-4-context.md`
+- `docs/archive/sprint-artifacts/spec-4-5-safe-stop-selector-order.md`
+- `docs/archive/sprint-artifacts/spec-4-5-code-review-remediation.md`
+- `docs/archive/sprint-artifacts/review-4-5-blind-hunter-prompt.md`
+- `docs/archive/sprint-artifacts/review-4-5-edge-case-hunter-prompt.md`
 - `docs/sprint-artifacts/sprint-status.yaml`
-- `docs/sprint-artifacts/4-5-code-review.md`
+- `docs/archive/sprint-artifacts/4-5-code-review.md`
 - 本文件
 
 ## 自动化证据
@@ -123,7 +123,7 @@ Story 4.5 的 `normal` 场景已在无气味材料、无受试者、仅使用洁
 - 自动停止严格验证了有效 A=0 receipt 先于 selector 切换至 `compensation`，随后关闭气味阀 1–20、完成 A/B/C 清零与 owner handoff。
 - 最终只读回读为 A/B/C setpoint=`0`、mass flow=`0`、gas=`Air`、无状态码；selector 软件证据为 `compensation`，气味阀 1–20 最后成功请求均为 LOW。
 - `safe_stop_status=completed`、`verification_passed=true`、授权违规 `0`、审计错误 `0`、证据哈希不匹配 `0`；maintenance、DO、lease、AI 与 serial handoff 完整。
-- live runner 候选的离线全仓门禁为 `820 passed in 28.49s`，详见 [`spec-4-5-hil-live-execution.md`](../../_bmad-output/implementation-artifacts/spec-4-5-hil-live-execution.md#actual-results-2026-08-18全部离线-fakemock)。
+- live runner 候选的离线全仓门禁为 `820 passed in 28.49s`，详见 [`spec-4-5-hil-live-execution.md`](spec-4-5-hil-live-execution.md#actual-results-2026-08-18全部离线-fakemock)。
 - 运行结束后操作者已关闭上游 Air；当前不需要继续操作硬件。
 
-归档索引见 [Story 4.5 normal HIL 证据](evidence/story-4-5-hil-normal-20260818/README.md)。本次验收完成了 normal 动作偏序、`odor` 出口气流观察和最终软件/电子收敛验证；`compensation` 物理出口映射仍是明确限制，不以电子 ack 冒充机械确认。失败、超时、stale/late receipt 与 selector 不确定等故障场景继续由确定性离线注入覆盖；除非安全契约、硬件映射或 live runner 发生实质变化，不主动在真实硬件上制造这些故障。
+归档索引见 [Story 4.5 normal HIL 证据](../../sprint-artifacts/evidence/story-4-5-hil-normal-20260818/README.md)。本次验收完成了 normal 动作偏序、`odor` 出口气流观察和最终软件/电子收敛验证；`compensation` 物理出口映射仍是明确限制，不以电子 ack 冒充机械确认。失败、超时、stale/late receipt 与 selector 不确定等故障场景继续由确定性离线注入覆盖；除非安全契约、硬件映射或 live runner 发生实质变化，不主动在真实硬件上制造这些故障。

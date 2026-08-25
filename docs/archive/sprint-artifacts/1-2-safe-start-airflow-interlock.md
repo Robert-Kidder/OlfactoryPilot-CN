@@ -1,4 +1,4 @@
-﻿# 故事 1.2: Safe Alicat Flow Command and Valve Interlock
+# 故事 1.2: Safe Alicat Flow Command and Valve Interlock
 Status: real-hardware-pass
 Epic: 1 - Safe Hardware Foundations
 Story Key: 1-2-safe-start-airflow-interlock
@@ -101,7 +101,7 @@ Story ID: 1.2
 
 ## Story Completion Status（story_completion_status）
 - 状态：fix-applied-pending-real-hardware-retest
-- 产物：docs/sprint-artifacts/1-2-safe-start-airflow-interlock.md
+- 产物：docs/archive/sprint-artifacts/1-2-safe-start-airflow-interlock.md
 - 完成说明：真实硬件复核发现 LOW FLOW 阈值模型与 Alicat 设备语义不匹配，已重定义为 MFC setpoint 与阀门顺序互锁。
 
 ## Dev Agent Record
@@ -146,7 +146,7 @@ Story ID: 1.2
 - Task6（AC3/AC5）：Telemetry 接口与安全状态更新写入日志（flow/hardware/原因/source），记录 last_shutdown_event 含 source，便于追踪阻断事件。
 
 ### File List
-- docs/sprint-artifacts/1-2-safe-start-airflow-interlock.md
+- docs/archive/sprint-artifacts/1-2-safe-start-airflow-interlock.md
 - docs/sprint-artifacts/sprint-status.yaml
 - app/services/safety_manager.py
 - app/models/safety_state.py

@@ -1,4 +1,4 @@
-﻿# 故事 2.1: Real-Time Breath Visualization
+# 故事 2.1: Real-Time Breath Visualization
 Status: done
 Epic: 2 - Calibration & Manual Control
 Story Key: 2-1-real-time-breath-visualization
@@ -88,7 +88,7 @@ Story ID: 2.1
 
 ## Story Completion Status
 - 状态：review
-- 产物：docs/sprint-artifacts/2-1-real-time-breath-visualization.md
+- 产物：docs/archive/sprint-artifacts/2-1-real-time-breath-visualization.md
 - 完成说明：实现校准视图（100Hz 占位流、30FPS 追踪）、FPS 告警/恢复、阈值/LED 同步、安全灰显与数据过期提示；新增单测并完成一轮 pytest。
 
 ## Dev Agent Record
@@ -108,7 +108,7 @@ Story ID: 2.1
 - HardwareWorker 输出占位 100Hz 波形；新增 BreathSampleBuffer/FrameRateTracker 服务与阈值持久化；breath_viz logger 记录 fps_avg/fps_p95/window_s/warning_flag/reason。
 
 ### File List
-- docs/sprint-artifacts/2-1-real-time-breath-visualization.md
+- docs/archive/sprint-artifacts/2-1-real-time-breath-visualization.md
 - docs/sprint-artifacts/sprint-status.yaml
 - app/services/breath_metrics.py
 - app/services/__init__.py

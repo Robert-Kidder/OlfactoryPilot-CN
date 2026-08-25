@@ -21,7 +21,7 @@ OlfactoryPilot-CN 是用于嗅觉刺激实验的 Windows 桌面控制软件，�
 ### 正式 UI 基线
 
 - 使用 QFluentWidgets Dark Theme：近黑、深墨绿/石墨色，主题强调色为 `#E2AD50`。
-- 当前正式导航只包含“手动实验”；其他页面完成重新设计前不加入运行入口。
+- 当前正式导航只包含“手动实验”；未验收能力不加入运行树或占位导航。
 - 产品界面优先使用 QFluentWidgets 原生 Card、Label、数字输入、Button、Badge、ToolTip 和 InfoBar；不使用旧 QWidget/QSS 控制台作为未来标准，不引入 superqt。
 - selected 使用琥珀强调；真实开启使用绿色图标状态；故障使用红色且形态不同的图标状态。重要状态不得只靠颜色或 Tooltip 表达。
 
@@ -34,6 +34,12 @@ OlfactoryPilot-CN 是用于嗅觉刺激实验的 Windows 桌面控制软件，�
 - `services/` 放置硬件抽象、配置、日志、协议解析等可复用服务。
 - `models/` 保存配置、会话、硬件状态和协议等结构化数据。
 - 所有真实硬件访问必须经过 HAL，便于模拟、测试和安全降级。
+
+### 执行域边界
+
+- Protocol、Manual、Maintenance 是三个互斥执行域；每个域只接受能够由 lease、command category/identity、executor context 或 safe-transition identity 明确归属本域的证据。
+- Protocol lease 是 Protocol ownership 的最强证据。仅加载文档、非零 epoch、任意 non-idle lease、普通 flow ready、active valve 或 possibly-open 状态都不能单独证明 Protocol 正在执行。
+- Manual/Maintenance 的 lease、pending command、valve、possibly-open 和 readiness 不得触发 Protocol invalidation；真正 active Protocol 的 readiness 丢失仍按现有 fail-closed 路径处理。
 
 ## 目标用户
 
@@ -81,6 +87,14 @@ OlfactoryPilot-CN 是用于嗅觉刺激实验的 Windows 桌面控制软件，�
 ## 项目进度来源
 
 Epic/Story 的当前状态只维护在 `docs/sprint-artifacts/sprint-status.yaml`。本文档只说明项目背景、技术基线和长期规则，不重复写动态进度，避免与 sprint 状态文件不同步。
+
+## 文档层级
+
+- 当前权威：`project-context.md`、`prd.md`、`architecture.md`、`ux-design.md`、`project-structure.md`。
+- 动态状态：`sprint-artifacts/sprint-status.yaml`。
+- 活动执行工件：`sprint-artifacts/spec-*.md` 及尚未终结的 Story。
+- 审计证据：`sprint-artifacts/evidence/`；不得因整理文档而删除安全、HIL、极性或发布证据。
+- 历史资料：`archive/`；用于追溯，不覆盖当前权威。
 
 ## 文档语言规范
 

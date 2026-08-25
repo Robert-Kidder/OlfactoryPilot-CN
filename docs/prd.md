@@ -4,7 +4,7 @@
 
 OlfactoryPilot-CN 用于替代原有法国软件 **ProgOlfactoTao**，服务本地嗅觉刺激实验。旧软件依赖 LabView 生态和法文说明，维护、培训和本地化成本较高。新软件需要用 Python 3.11 和 PySide6 实现中文桌面应用，保留旧系统的核心实验能力，并提高安全性、可测试性和可维护性。
 
-当前交付重点是让实验人员在 Windows 电脑上完成设备连接、硬件方案配置、新版手动实验、数据记录和清洗。自动实验属于后续范围；当前不提供呼吸传感器操作界面，只有在硬件和需求明确后才重新规划。
+产品应让实验人员在 Windows 电脑上安全完成设备连接、硬件方案配置、手动实验和数据记录。未进入正式运行树的能力不在本文预设页面位置；增加入口前必须重新确认用户任务、硬件证据和验收边界。
 
 ## 2. 用户与场景
 
@@ -32,9 +32,9 @@ OlfactoryPilot-CN 用于替代原有法国软件 **ProgOlfactoTao**，服务本�
 - FR3.1：既有呼吸采集、门控和 TTL 底层能力可以保留，但当前产品不提供呼吸传感器操作页面或占位入口。
 - FR3.2：只有在呼吸硬件与实验需求明确后，才重新定义校准、阈值、波形和门控 UX，并另行评估验收与 HIL。
 
-### FR4：新版手动实验与硬件方案
+### FR4：手动实验与硬件方案
 
-- FR4.1：方案 B V3 固定显示机外气口 1–20；未接入位置变灰，可用性不得写死，必须来自当前持久化 HardwareProfile。
+- FR4.1：手动实验固定显示机外气口 1–20；未接入位置变灰，可用性不得写死，必须来自当前持久化 HardwareProfile。
 - FR4.2：HardwareProfile 可视化配置“机外气口 → 内部控制阀位 → NI 线路”，支持显示名称、气口验证、自然验证状态和跨启动保存。当前初始化映射为机外 2/4/6/8/12/14/16/18 对应内部阀位 2–9。
 - FR4.3：`Dev2/P1.0` 作为 A 路三通选择阀独立建模，不占用机外气口编号，也不作为第 21 只普通阀。
 - FR4.4：手动实验支持一个或多个气口选择、T/A/B/C 流量设置和指定刺激时长；`B=T-A` 由领域规则计算和校验。
@@ -42,7 +42,7 @@ OlfactoryPilot-CN 用于替代原有法国软件 **ProgOlfactoTao**，服务本�
 
 ### FR5：实验执行边界
 
-- FR5.1：当前产品交付新版手动实验；既有协议、TTL 和呼吸门控代码不作为当前主界面入口。
+- FR5.1：Protocol、Manual 和 Maintenance 各自持有明确 ownership；一个域的 lease、command、valve 或 readiness 不得触发另一个域的失效或安全停止。
 - FR5.2：未来自动实验必须复用与手动实验相同的 Worker/HAL、lease、epoch、receipt 和动作计划执行核心，不得模拟按钮点击或复制硬件控制链。
 - FR5.3：阀门动作继续记录 expected、actual 和 jitter；真实硬件性能结论必须来自适用 HIL。
 
@@ -65,13 +65,6 @@ OlfactoryPilot-CN 用于替代原有法国软件 **ProgOlfactoTao**，服务本�
 - NFR5 分发：使用 PyInstaller 生成 Windows 可执行产物。
 - NFR6 技术基线：固定当前 Python 3.11、PySide6、pyqtgraph 和现有依赖版本，不在本轮安排版本或技术栈迁移。
 
-## 5. 里程碑
+## 5. 状态边界
 
-- Epic 1：安全硬件基础。
-- Epic 2：校准与手动控制。
-- Epic 3：协议执行与数据记录。
-- Epic 4：运行安全、新版手动实验与交付收口。
-
-当前 Epic 4 只新增两个必要实施单元：Story 4.5 修复全局停止与三通阀模型；Story 4.6 以一个纵向 Story 完成方案 B V3、HardwareProfile、receipt 起算和旧界面删除。自动实验和呼吸传感器 UI 不进入当前 backlog。
-
-具体 Epic/Story 开发进度不在 PRD 中维护，统一以 `docs/sprint-artifacts/sprint-status.yaml` 为准。
+本文只维护产品需求，不记录 Epic/Story 当前进度、推荐实施顺序或下一页面。动态状态统一以 `docs/sprint-artifacts/sprint-status.yaml` 为准，历史决策与证据分别进入 `docs/archive/` 和 `docs/sprint-artifacts/evidence/`。

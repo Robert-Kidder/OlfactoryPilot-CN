@@ -386,6 +386,14 @@ class ActuationWorker(QThread):
     """Single owner for protocol actuation state, quality metrics and DO scheduling."""
 
     _NORMAL_DEADLINE_RESERVE_NS = 5_000_000
+    _PROTOCOL_ACTIVE_STATUSES = frozenset(
+        {
+            ProtocolExecutionStatus.WAITING_TRIGGER,
+            ProtocolExecutionStatus.WAITING_EXHALE,
+            ProtocolExecutionStatus.TRIGGERED,
+            ProtocolExecutionStatus.PAUSED,
+        }
+    )
 
     receipt_ready = Signal(object)
     snapshot_ready = Signal(object)
@@ -3084,8 +3092,9 @@ class ActuationWorker(QThread):
             self._begin_emergency_close_all()
             return
         if kind == "interlock_changed" and self.protocol_executor is None:
-            reason = self.interlock.read()[1].unsafe_reason()
-            if reason:
+            interlock_snapshot = self.interlock.read()[1]
+            reason = interlock_snapshot.unsafe_reason()
+            if reason and self._has_protocol_execution_context(interlock_snapshot):
                 self.invalidate_execution(reason=reason)
             return
         if self.protocol_executor is None:
@@ -3233,19 +3242,8 @@ class ActuationWorker(QThread):
             )
             generation = self.interlock.read()[0]
             interlock_snapshot = self.interlock.read()[1]
-            convergence_required = bool(
-                interlock_snapshot.has_protocol
-                or interlock_snapshot.device_lease != "idle"
-                or (
-                    interlock_snapshot.flow_setpoints_ready
-                    and (
-                        not interlock_snapshot.connected
-                        or not interlock_snapshot.hardware_ready
-                        or interlock_snapshot.safety_state != "SAFE"
-                    )
-                )
-                or self.protocol_state.active_valve is not None
-                or self.protocol_state.possibly_open_valves
+            convergence_required = self._has_protocol_execution_context(
+                interlock_snapshot
             )
             if (
                 reason
@@ -3380,6 +3378,39 @@ class ActuationWorker(QThread):
             )
         self._emit_executor_result(result)
         self._emit_snapshot()
+
+    def _has_protocol_execution_context(
+        self,
+        interlock_snapshot: InterlockSnapshot,
+    ) -> bool:
+        """只接受明确归属于 Protocol 的运行证据。"""
+
+        if interlock_snapshot.device_lease == DeviceLeaseKind.PROTOCOL.value:
+            return True
+        if self.protocol_state.status in self._PROTOCOL_ACTIVE_STATUSES:
+            return True
+
+        pending_ids = {
+            command_id
+            for command_id in (
+                self.protocol_state.pending_open_command_id,
+                self.protocol_state.pending_close_command_id,
+            )
+            if command_id
+        }
+        for command_id in pending_ids:
+            command = self._commands_by_id.get(command_id)
+            if (
+                command is not None
+                and command.category is ActuationCategory.NORMAL
+                and command.execution_epoch == self.protocol_state.execution_epoch
+            ):
+                return True
+
+        return bool(
+            self._pending_safe_transition is not None
+            and self._pending_safe_transition[0] in {"load", "stop", "pause", "mode"}
+        )
 
     def _begin_safe_transition(self, kind: str, payload: dict[str, Any]) -> None:
         if self.protocol_executor is None:

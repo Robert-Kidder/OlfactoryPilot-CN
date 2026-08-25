@@ -6,7 +6,7 @@ status: 'done'
 review_loop_iteration: 0
 baseline_commit: '927e93a28193f136be3bf7c4c7ba39b08c21f39e'
 context:
-  - '{project-root}/docs/sprint-artifacts/1-2-safe-start-airflow-interlock.md'
+  - '{project-root}/docs/archive/sprint-artifacts/1-2-safe-start-airflow-interlock.md'
   - '{project-root}/docs/architecture.md'
   - '{project-root}/docs/ux-design.md'
 ---
@@ -87,64 +87,64 @@ context:
 **安全监视生命周期**
 
 - 闲置零流量明确撤防。
-  [`safety_manager.py:167`](../../app/services/safety_manager.py#L167)
+  [`safety_manager.py:167`](../../../app/services/safety_manager.py#L167)
 
 - owner 统一 armed 生命周期。
-  [`actuation_worker.py:183`](../../app/workers/actuation_worker.py#L183)
+  [`actuation_worker.py:183`](../../../app/workers/actuation_worker.py#L183)
 
 - 新鲜样本门禁危险动作。
-  [`actuation_worker.py:270`](../../app/workers/actuation_worker.py#L270)
+  [`actuation_worker.py:270`](../../../app/workers/actuation_worker.py#L270)
 
 - 应用安全态独立发布。
-  [`hardware_worker.py:434`](../../app/workers/hardware_worker.py#L434)
+  [`hardware_worker.py:434`](../../../app/workers/hardware_worker.py#L434)
 
 **状态消费与审计**
 
 - 过期载荷不回滚安全态。
-  [`main_controller.py:740`](../../app/controllers/main_controller.py#L740)
+  [`main_controller.py:740`](../../../app/controllers/main_controller.py#L740)
 
 - 稳态 DEBUG，转换 INFO。
-  [`main_controller.py:5115`](../../app/controllers/main_controller.py#L5115)
+  [`main_controller.py:5115`](../../../app/controllers/main_controller.py#L5115)
 
 - stop 明确结束预检等待。
-  [`main_controller.py:660`](../../app/controllers/main_controller.py#L660)
+  [`main_controller.py:660`](../../../app/controllers/main_controller.py#L660)
 
 - STOPPED 重启保持触发语义。
-  [`protocol_executor.py:151`](../../app/services/protocol_executor.py#L151)
+  [`protocol_executor.py:151`](../../../app/services/protocol_executor.py#L151)
 
 **常驻状态与转换提示**
 
 - 状态区持续呈现异常。
-  [`main_window.py:203`](../../app/views/main_window.py#L203)
+  [`main_window.py:203`](../../../app/views/main_window.py#L203)
 
 - 转换键控制提示生命周期。
-  [`main_window.py:219`](../../app/views/main_window.py#L219)
+  [`main_window.py:219`](../../../app/views/main_window.py#L219)
 
 - dismissed 同态不重建。
-  [`manual_experiment_view.py:841`](../../app/views/manual_experiment_view.py#L841)
+  [`manual_experiment_view.py:841`](../../../app/views/manual_experiment_view.py#L841)
 
 - snapshot 不覆盖安全提示。
-  [`manual_experiment_view.py:763`](../../app/views/manual_experiment_view.py#L763)
+  [`manual_experiment_view.py:763`](../../../app/views/manual_experiment_view.py#L763)
 
 **回归验证**
 
 - armed 与样本时序覆盖。
-  [`test_actuation_worker.py:1198`](../../tests/test_actuation_worker.py#L1198)
+  [`test_actuation_worker.py:1198`](../../../tests/test_actuation_worker.py#L1198)
 
 - LOW_FLOW 消费者均 fail-closed。
-  [`test_cleaning_state_machine.py:299`](../../tests/test_cleaning_state_machine.py#L299)
+  [`test_cleaning_state_machine.py:299`](../../../tests/test_cleaning_state_machine.py#L299)
 
 - 手动危险路径保持关闭。
-  [`test_manual_experiment.py:163`](../../tests/test_manual_experiment.py#L163)
+  [`test_manual_experiment.py:163`](../../../tests/test_manual_experiment.py#L163)
 
 - 预检停止正确收尾。
-  [`test_flow_controls.py:290`](../../tests/test_flow_controls.py#L290)
+  [`test_flow_controls.py:290`](../../../tests/test_flow_controls.py#L290)
 
 - 转换提示支持恢复重入。
-  [`test_product_ui.py:151`](../../tests/test_product_ui.py#L151)
+  [`test_product_ui.py:151`](../../../tests/test_product_ui.py#L151)
 
 - 日志与过期载荷覆盖。
-  [`test_app.py:1660`](../../tests/test_app.py#L1660)
+  [`test_app.py:1660`](../../../tests/test_app.py#L1660)
 
 - 旧 writer 不污染新代。
-  [`test_protocol_trigger_integration.py:746`](../../tests/test_protocol_trigger_integration.py#L746)
+  [`test_protocol_trigger_integration.py:746`](../../../tests/test_protocol_trigger_integration.py#L746)

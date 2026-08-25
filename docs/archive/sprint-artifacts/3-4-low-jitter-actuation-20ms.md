@@ -275,8 +275,8 @@ Depends On: Story 3.3 review patch（已由提交 `3983c58`、`8b8c126` 完成�
 - [Source: docs/architecture.md#分层结构]
 - [Source: docs/architecture.md#HAL-硬件抽象]
 - [Source: docs/project-structure.md#核心代码-app]
-- [Source: docs/sprint-artifacts/3-2-breath-gated-stimulation.md]
-- [Source: docs/sprint-artifacts/3-3-manual-vs-ttl-trigger-modes.md]
+- [Source: docs/archive/sprint-artifacts/3-2-breath-gated-stimulation.md]
+- [Source: docs/archive/sprint-artifacts/3-3-manual-vs-ttl-trigger-modes.md]
 - [Source: app/models/protocol_execution.py]
 - [Source: app/services/protocol_executor.py]
 - [Source: app/services/valve_service.py]
@@ -314,7 +314,7 @@ Depends On: Story 3.3 review patch（已由提交 `3983c58`、`8b8c126` 完成�
 - [x] [Review][Patch] [Medium] RealHAL `flush_logs()` 改为 no-op 后，自检仍依赖它释放 serial handle；FlowWorker 持有 COM 时 HardwareCheckService 可能无法重新打开同一端口。 [app/workers/hardware_worker.py:266]
 - [x] [Review][Patch] [Medium] 嵌套 `_result_with_events()` 的结果再次 extend/提交会重复持久化同一结构化事件，造成重复日志与状态事件。 [app/services/protocol_executor.py:259]
 - [x] [Review][Patch] [Medium] AC11 所列的 stop/open、mode/queued、duplicate close、wall-clock、UI delay、flow/start、TTL 多 trial、timeout token/retry、AI shutdown 等并发失败路径没有自动化覆盖；全绿门禁不能证明这些契约。 [tests/test_actuation_worker.py:212]
-- [x] [Review][Patch] [Low] Story 勾选修改/扩展的 `app/main.py`、`tests/test_protocol_executor.py`、`tests/test_flow_service.py` 不在 diff 中，HIL raw 目录也未进入提交，任务与可复核证据描述需校正。任务清单已校正；live/mock raw 均为本机忽略文件，不声称已进入提交。 [docs/sprint-artifacts/3-4-low-jitter-actuation-20ms.md:188]
+- [x] [Review][Patch] [Low] Story 勾选修改/扩展的 `app/main.py`、`tests/test_protocol_executor.py`、`tests/test_flow_service.py` 不在 diff 中，HIL raw 目录也未进入提交，任务与可复核证据描述需校正。任务清单已校正；live/mock raw 均为本机忽略文件，不声称已进入提交。 [docs/archive/sprint-artifacts/3-4-low-jitter-actuation-20ms.md:188]
 - [x] [Review][Patch] [High] active executor snapshot 的 epoch 前进曾只更新 Controller token、未转移 FlowWorker 的 exact lease，之后 stop 可用错 token 并把 FlowWorker 永久留在 protocol owner；现保持真实 held token，terminal snapshot 精确释放，失败时保守阻断。 [app/controllers/main_controller.py:1420]
 - [x] [Review][Patch] [High] 生产协议现在先通过 ActuationWorker 提交独立 `master_prepare` 计划，只有主阀 SUCCESS receipt 后才获取 flow lease 并布防；失败保持 BLOCKED。 [app/controllers/main_controller.py:876]
 - [x] [Review][Patch] [High] LOW_FLOW/readiness loss、stop、severe 与安全转换现在按 configured targets 和 executor 保守 active/possibly-open 并集全关并等待独立回执。 [app/workers/actuation_worker.py:547]
@@ -329,9 +329,9 @@ Depends On: Story 3.3 review patch（已由提交 `3983c58`、`8b8c126` 完成�
 - [x] [Review][Patch] [Medium] generation race 下 manual/pretest plan 会把写入置为 UNCERTAIN、进入关联 rollback 并发出失败 plan result，UI pending 可收敛。 [app/workers/actuation_worker.py:1645]
 - [x] [Review][Patch] [Medium] protocol load 保留 metrics snapshot，成功 start/restart 原子 reset metrics 与 state quality。 [app/workers/actuation_worker.py:1053]
 - [x] [Review][Patch] [Medium] HIL 性能循环现在由 HardwareWorker 获取 HAL frame，仅软件覆盖 AI0 值并保留 HAL monotonic/epoch/sequence，再经 GatingService→ProtocolExecutor→ActuationWorker。 [scripts/hil_actuation_benchmark.py:802]
-- [x] [Review][Patch] [Medium] HIL Tasks 已回退为未完成并明确只接受当前代码的新 live 证据，与 Story `in-progress` 一致。 [docs/sprint-artifacts/3-4-low-jitter-actuation-20ms.md:204]
+- [x] [Review][Patch] [Medium] HIL Tasks 已回退为未完成并明确只接受当前代码的新 live 证据，与 Story `in-progress` 一致。 [docs/archive/sprint-artifacts/3-4-low-jitter-actuation-20ms.md:204]
 - [x] [Review][Patch] [Low] command payload 在 terminal receipt 后 retire，duplicate receipt identity 使用有界精确窗口。 [app/workers/actuation_worker.py:1917]
-- [x] [Review][Patch] [Low] Story File List 已补齐 safety_manager、flow/calibration/parser regression tests 与 HIL benchmark tests。 [docs/sprint-artifacts/3-4-low-jitter-actuation-20ms.md:375]
+- [x] [Review][Patch] [Low] Story File List 已补齐 safety_manager、flow/calibration/parser regression tests 与 HIL benchmark tests。 [docs/archive/sprint-artifacts/3-4-low-jitter-actuation-20ms.md:375]
 - [x] [Review][Patch] [Low] ShutdownService 使用 ActuationWorker 成功完成全关与 ownership handoff 时不再误输出 `Shutdown guard blocked: 允许执行`；该问题仅为误导性日志，不是安全门禁失败，失败门禁日志仍保留。 [app/services/shutdown_service.py:144]
 - [x] [Review][Patch] [High] 最终 closure 复验在后续代码上再次捕获首个正式 open=`35.3069ms` 与 `31.3884ms`，DAQ write ack 分别仅约 `0.48ms/0.45ms`，证明单纯提高 Windows 线程优先级不足；根因是协议启动/安全全关期间产生的历史 AI batch 排在 manual trigger 与有效呼吸 batch 前。`start/manual_trigger` 现可越过历史 AI 消息，相邻且 readiness 相同的 AI batch 在消费时合并，但全部样本、顺序、HAL monotonic/epoch/sequence 与首个正式动作均保留；最终无 trace 运行 `story-3-4-20260727-175246-live` 完成 200 open + 200 close、400/400 success，open/close/combined p95=`9.75465/10.1801/9.90185ms`，最大 rolling p95=`9.78205/10.4723/10.3366ms`，final-last-100 p95=`9.77855/10.1076/9.8634ms`，首个正式样本=`8.98805ms`，stop、LOW_FLOW、severe、shutdown 均 21/21 全关。 [app/workers/actuation_worker.py:991]
 
@@ -430,7 +430,7 @@ OpenAI Codex（GPT-5）
 - tests/test_valve_service.py
 - docs/architecture.md
 - docs/project-structure.md
-- docs/sprint-artifacts/3-4-low-jitter-actuation-20ms.md
+- docs/archive/sprint-artifacts/3-4-low-jitter-actuation-20ms.md
 - docs/sprint-artifacts/sprint-status.yaml
 - scripts/hil_actuation_benchmark.py
 

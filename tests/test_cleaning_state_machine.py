@@ -14,10 +14,13 @@ from app.models import (
     CleaningStatus,
     DeviceLeaseKind,
     ExclusiveDeviceLease,
+    ProtocolExecutionReadiness,
     ProtocolExecutionState,
     SelectorRoute,
 )
 from app.services.flow_service import FlowApplyResult
+from app.services.gating_service import GatingService
+from app.services.protocol_executor import ProtocolExecutor
 from app.services.safety_manager import SafetyManager
 from app.services.valve_service import ValvePlanStep, ValveService
 from app.workers.actuation_worker import (
@@ -263,6 +266,76 @@ def test_cleaning_owner_enforces_flow_zero_before_selector_safe_route() -> None:
         receipt.operation_id == "clean-1"
         for _, receipt in recorder.receipts
     )
+
+
+def test_maintenance_safe_readiness_is_protocol_isolated_across_lifecycle_windows() -> None:
+    worker, clock, _calls, flows, recorder, token = _worker()
+    executor = ProtocolExecutor(
+        gating_service=GatingService(),
+        valve_writer=lambda *_: (True, "ok"),
+        deferred_actuation=True,
+    )
+    worker.protocol_executor = executor
+    worker.protocol_state = executor.state
+    safe_readiness = ProtocolExecutionReadiness(True, True, True, "SAFE", True)
+    baseline = (
+        worker.protocol_state.execution_epoch,
+        tuple(event for event in worker.protocol_state.events if event.event == "blocked"),
+        worker._background_safe_stop_plan,
+    )
+
+    def assert_protocol_unchanged() -> None:
+        assert (
+            worker.protocol_state.execution_epoch,
+            tuple(event for event in worker.protocol_state.events if event.event == "blocked"),
+            worker._background_safe_stop_plan,
+        ) == baseline
+
+    worker.post_readiness_update(readiness=safe_readiness)
+    assert worker.post_cleaning_start(
+        _plan(),
+        lease_token=token,
+        recorder=recorder,
+    )
+    worker.process_ready(max_items=1)
+    assert worker.cleaning_snapshot.status is CleaningStatus.IDLE
+    assert worker.interlock.read()[1].device_lease == DeviceLeaseKind.MAINTENANCE.value
+    assert worker._pending_safe_transition is None
+    assert_protocol_unchanged()
+
+    worker.process_ready()
+    worker.post_flow_result(
+        FlowCommandResult(
+            command=flows.pop(),
+            result=FlowApplyResult(True, "ok", 1500, 0, 0, 1500),
+        )
+    )
+    _publish_fresh_airflow(worker)
+    worker.process_ready()
+    assert worker.cleaning_snapshot.status is CleaningStatus.RUNNING
+    assert_protocol_unchanged()
+
+    worker.post_readiness_update(readiness=safe_readiness)
+    worker.process_ready()
+    assert worker.cleaning_snapshot.status is CleaningStatus.RUNNING
+    assert_protocol_unchanged()
+
+    clock.advance(_plan().open_duration_ns + 100)
+    worker.process_ready()
+    worker.post_flow_result(
+        FlowCommandResult(
+            command=flows.pop(),
+            result=FlowApplyResult(True, "ok", 0, 0, 0, 0),
+        )
+    )
+    worker.process_ready()
+    assert worker.cleaning_snapshot.status is CleaningStatus.COMPLETED
+    assert worker.interlock.read()[1].device_lease == DeviceLeaseKind.MAINTENANCE.value
+
+    worker.post_readiness_update(readiness=safe_readiness)
+    worker.process_ready()
+    assert_protocol_unchanged()
+    assert worker.interlock.read()[1].device_lease == DeviceLeaseKind.MAINTENANCE.value
 
 
 def test_cleaning_can_recover_from_idle_low_flow_before_any_open() -> None:

@@ -141,6 +141,7 @@ def test_connected_but_unsafe_device_is_not_shown_as_success(qt_app) -> None:
         qt_app.processEvents()
 
         assert window._connection_badge.text() == "设备状态异常"
+        assert window._connection_action_label.text() == "请检查设备状态"
         assert window._connection_badge.level == InfoLevel.ERROR
         assert window.manual_experiment_view.current_notice_severity == "error"
         assert "当前状态不允许操作" in window.manual_experiment_view.current_notice_title
@@ -167,13 +168,21 @@ def test_safety_notice_is_transition_driven_and_reentry_can_notify_again(qt_app)
         assert first is not None
         first.close()
         qt_app.processEvents()
-        assert window.manual_experiment_view.notice_frame is None
-        assert "LOW_FLOW" in window._safety_reason_label.text()
+        notice = window.manual_experiment_view.notice_frame
+        assert notice is None or not notice.isVisibleTo(window)
+        visible = "\n".join(_visible_texts(window))
+        assert "LOW_FLOW" not in visible
+        assert "SAFE" not in visible
+        assert "气流不足" in visible
+        assert "请检查供气和管路" in visible
 
         window.controller._render_manual_snapshot()
         window.render_telemetry(telemetry)
         qt_app.processEvents()
         assert window.manual_experiment_view.notice_frame is None
+        visible = "\n".join(_visible_texts(window))
+        assert "气流不足" in visible
+        assert "请检查供气和管路" in visible
 
         telemetry.safety_state = "SAFE"
         telemetry.safety_reason = "Alicat 气流正常"
@@ -185,6 +194,35 @@ def test_safety_notice_is_transition_driven_and_reentry_can_notify_again(qt_app)
 
         assert window.manual_experiment_view.notice_frame is not None
         assert "气流不足" in window.manual_experiment_view.current_notice_title
+    finally:
+        window.close()
+
+
+def test_connected_normal_header_has_no_internal_safety_code_or_success_notice(qt_app) -> None:
+    _, window = build_application(
+        DEFAULT_CONFIG,
+        start_worker=False,
+        simulation=True,
+    )
+    try:
+        window.show()
+        window.manual_experiment_view.clear_notice()
+        telemetry = window.state.telemetry
+        telemetry.connected = True
+        telemetry.safety_state = "SAFE"
+        telemetry.safety_reason = "Alicat 气流正常"
+        window.render_telemetry(telemetry)
+        window.render_self_check([], True)
+        qt_app.processEvents()
+
+        visible = "\n".join(_visible_texts(window))
+        assert "设备已连接" in visible
+        assert "连接设备" not in visible
+        assert "SAFE" not in visible
+        assert "安全正常" not in visible
+        assert "系统正常" not in visible
+        notice = window.manual_experiment_view.notice_frame
+        assert notice is None or not notice.isVisibleTo(window)
     finally:
         window.close()
 
@@ -211,5 +249,34 @@ def test_connected_data_stale_episode_notifies_after_disconnected_idle(qt_app) -
 
         assert window.manual_experiment_view.notice_frame is not None
         assert "设备数据中断" in window.manual_experiment_view.current_notice_title
+        assert window._connection_badge.text() == "设备通信中断"
+        assert window._connection_action_label.text() == "请检查设备连接"
+        visible = "\n".join(_visible_texts(window))
+        assert "DATA_STALE" not in visible
+    finally:
+        window.close()
+
+
+def test_unknown_connected_safety_code_uses_natural_persistent_header_text(qt_app) -> None:
+    _, window = build_application(
+        DEFAULT_CONFIG,
+        start_worker=False,
+        simulation=True,
+    )
+    try:
+        window.show()
+        telemetry = window.state.telemetry
+        telemetry.connected = True
+        telemetry.safety_state = "INTERNAL_STATE_42"
+        telemetry.safety_reason = "epoch=7 owner=manual"
+        window.render_telemetry(telemetry)
+        qt_app.processEvents()
+
+        assert window._connection_badge.text() == "设备状态异常"
+        assert window._connection_action_label.text() == "请检查设备状态"
+        visible = "\n".join(_visible_texts(window))
+        assert "INTERNAL_STATE_42" not in visible
+        assert "epoch=7" not in visible
+        assert "owner=manual" not in visible
     finally:
         window.close()

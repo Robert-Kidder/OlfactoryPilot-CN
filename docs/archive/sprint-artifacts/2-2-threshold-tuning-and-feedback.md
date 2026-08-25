@@ -1,4 +1,4 @@
-﻿# 故事 2.2: Threshold Tuning and Feedback
+# 故事 2.2: Threshold Tuning and Feedback
 Status: done
 Epic: 2 - Calibration & Manual Control
 Story Key: 2-2-threshold-tuning-and-feedback
@@ -88,11 +88,11 @@ Story ID: 2.2
 - docs/ux-design.md（阈值颜色、LED/状态标签、100Hz/30FPS）  
 - docs/architecture.md（MVC+Worker、telemetry 节奏、安全封锁）  
 - docs/project-context.md（性能/安全/本地化目标）  
-- docs/sprint-artifacts/2-1-real-time-breath-visualization.md（上一故事实现与日志格式）
+- docs/archive/sprint-artifacts/2-1-real-time-breath-visualization.md（上一故事实现与日志格式）
 
 ## Story Completion Status
 - 状态：ready-for-dev
-- 产物：docs/sprint-artifacts/2-2-threshold-tuning-and-feedback.md
+- 产物：docs/archive/sprint-artifacts/2-2-threshold-tuning-and-feedback.md
 - 完成说明：Ultimate context engine analysis completed - comprehensive developer guide created.
 
 ## Dev Agent Record

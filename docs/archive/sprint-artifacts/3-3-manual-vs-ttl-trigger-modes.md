@@ -352,8 +352,8 @@ Story ID: 3.3
 - [Source: docs/project-structure.md#新增文件放置规则]
 - [Source: docs/ux-design.md#协议页]
 - [Source: docs/ux-design.md#文案规范]
-- [Source: docs/sprint-artifacts/3-1-protocol-file-parsing-txtcsv.md]
-- [Source: docs/sprint-artifacts/3-2-breath-gated-stimulation.md]
+- [Source: docs/archive/sprint-artifacts/3-1-protocol-file-parsing-txtcsv.md]
+- [Source: docs/archive/sprint-artifacts/3-2-breath-gated-stimulation.md]
 - [Source: app/models/protocol.py]
 - [Source: app/models/protocol_execution.py]
 - [Source: app/services/protocol_executor.py]
@@ -444,7 +444,7 @@ OpenAI Codex（GPT-5）
 - app/workers/hardware_worker.py
 - config/default_config.json
 - config/local_config.example.json
-- docs/sprint-artifacts/3-3-manual-vs-ttl-trigger-modes.md
+- docs/archive/sprint-artifacts/3-3-manual-vs-ttl-trigger-modes.md
 - docs/sprint-artifacts/sprint-status.yaml
 - tests/test_integration_gating.py
 - tests/test_app.py

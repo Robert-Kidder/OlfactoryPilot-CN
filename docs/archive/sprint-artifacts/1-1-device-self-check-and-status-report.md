@@ -1,4 +1,4 @@
-﻿# 故事 1.1: Device Self-Check and Status Report
+# 故事 1.1: Device Self-Check and Status Report
 Status: real-hardware-pass
 Epic: 1 - Safe Hardware Foundations
 Story Key: 1-1-device-self-check-and-status-report
@@ -123,7 +123,7 @@ Story ID: 1.1
 
 ## Story Completion Status（story_completion_status）
 - 状态：Ready for Review
-- 产物：docs/sprint-artifacts/1-1-device-self-check-and-status-report.md
+- 产物：docs/archive/sprint-artifacts/1-1-device-self-check-and-status-report.md
 - 下一步：可直接运行 dev-story 开发；建议完成后执行 *validate-create-story 复核质量。
 - 完成说明：Ultimate context engine analysis completed - comprehensive developer guide created.
 
@@ -157,6 +157,6 @@ Story ID: 1.1
 - app/workers/hardware_worker.py
 - config/default_config.json
 - docs/sprint-artifacts/sprint-status.yaml
-- docs/sprint-artifacts/1-1-device-self-check-and-status-report.md
+- docs/archive/sprint-artifacts/1-1-device-self-check-and-status-report.md
 - tests/test_app.py
 

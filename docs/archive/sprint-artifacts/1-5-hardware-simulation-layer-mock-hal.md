@@ -1,4 +1,4 @@
-﻿# Story 1.5: Hardware Simulation Layer (Mock HAL)
+# Story 1.5: Hardware Simulation Layer (Mock HAL)
 
 Status: real-hardware-review
 
@@ -81,13 +81,13 @@ so that I can verify UI, safety logic, and protocols without physical devices.
 - `app/main.py`: Update entry point.
 
 ### References
-- [Proposal]: `docs/sprint-artifacts/sprint-change-proposal-2025-12-10.md`
+- [Proposal]: `docs/archive/sprint-artifacts/sprint-change-proposal-2025-12-10.md`
 - [Epics]: `docs/epics.md` Story 1.5
 
 ## Dev Agent Record
 
 ### Context Reference
-`docs/epics.md`, `docs/architecture.md`, `docs/sprint-artifacts/sprint-change-proposal-2025-12-10.md`
+`docs/epics.md`, `docs/architecture.md`, `docs/archive/sprint-artifacts/sprint-change-proposal-2025-12-10.md`
 
 ### Agent Model Used
 Gemini 2.0 Flash
@@ -110,7 +110,7 @@ Gemini 2.0 Flash
 - `app/services/mock_hal.py`
 - `app/workers/hardware_worker.py`
 - `tests/test_simulation_mode.py`
-- `docs/sprint-artifacts/1-5-hardware-simulation-layer-mock-hal.md`
+- `docs/archive/sprint-artifacts/1-5-hardware-simulation-layer-mock-hal.md`
 
 ## Change Log
 - 2025-12-11: 支持模拟模式 CLI 开关，接入 Mock HAL（波形/气流/数字输出），Worker 自检与状态更新走 HAL 接口，并补充全量测试通过。

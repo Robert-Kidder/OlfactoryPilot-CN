@@ -48,9 +48,10 @@ def test_controller_wires_gating_service(controller):
     # Assert: Logger called for transitions
     # Transition 1: Neutral -> Inhale (at 0.6)
     # Transition 2: Inhale -> Neutral (at 0.1)
-    assert controller._breath_logger.info.call_count == 2
+    assert controller._breath_logger.debug.call_count == 2
+    assert controller._breath_logger.info.call_count == 0
 
-    call_args_list = controller._breath_logger.info.call_args_list
+    call_args_list = controller._breath_logger.debug.call_args_list
 
     # Verify first transition log
     payload1 = call_args_list[0][0][0]
@@ -81,7 +82,7 @@ def test_controller_safety_blocks_gating(controller):
     assert controller.state.telemetry.gating_state == GatingState.BLOCKED
 
     # Verify log contains BLOCKED state
-    call_args = controller._breath_logger.info.call_args
+    call_args = controller._breath_logger.debug.call_args
     log_payload = call_args[0][0]
     assert log_payload["event"] == "threshold_cross"
     assert log_payload["gate_state"] == GatingState.BLOCKED

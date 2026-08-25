@@ -15,6 +15,7 @@ from app.models import (
     ManualExperimentIntent,
     ManualExperimentStatus,
     ManualSupplyIntent,
+    ProtocolExecutionReadiness,
     VerificationStatus,
     normalize_digital_target,
 )
@@ -53,9 +54,13 @@ def _controller(tmp_path: Path) -> tuple[MainController, FakeClock]:
     return controller, clock
 
 
-def _intent(*, duration_ns: int = 1_000_000_000) -> ManualExperimentIntent:
+def _intent(
+    *,
+    external_ports: tuple[int, ...] = (2, 4),
+    duration_ns: int = 1_000_000_000,
+) -> ManualExperimentIntent:
     return ManualExperimentIntent(
-        external_ports=(2, 4),
+        external_ports=external_ports,
         total_sccm=1000,
         sample_a_sccm=250,
         vacuum_c_sccm=100,
@@ -92,6 +97,164 @@ def test_mock_controller_runs_manual_owner_and_releases_matching_lease(tmp_path,
     assert snapshot.supply_restored
     assert snapshot.supply_enabled
     assert window.manual_experiment_view.snapshot.supply_enabled
+    assert controller.device_lease.snapshot.kind is DeviceLeaseKind.IDLE
+
+
+def test_supplied_mock_runs_ports_04_06_for_five_seconds_without_protocol_crosstalk(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    controller, clock = _controller(tmp_path)
+    assert controller.handle_manual_supply_requested(
+        ManualSupplyIntent(
+            enabled=True,
+            total_sccm=1000,
+            sample_a_sccm=250,
+            vacuum_c_sccm=100,
+        )
+    )
+    assert controller.actuation_worker.manual_snapshot.supply_enabled
+    original_epoch = controller.actuation_worker.protocol_state.execution_epoch
+    original_event_count = len(controller.actuation_worker.protocol_state.events)
+
+    assert controller.handle_manual_release_requested(
+        _intent(external_ports=(4, 6), duration_ns=5_000_000_000)
+    )
+    controller.actuation_interlock.publish_airflow(
+        airflow=250.0,
+        timestamp=time.time(),
+        hardware_state="SAFE",
+    )
+    controller.actuation_worker.post_interlock_changed(timestamp=time.time())
+    controller._drain_actuation_if_not_running()
+    stimulating = controller.actuation_worker.manual_snapshot
+    assert stimulating.status is ManualExperimentStatus.STIMULATING
+    assert stimulating.open_confirmed == (4, 6)
+    assert stimulating.deadline_ns - stimulating.ready_ns == 5_000_000_000
+
+    completion_events: list[tuple[str, object]] = []
+    expected_token = controller._manual_lease_token
+    assert expected_token is not None
+    controller.actuation_worker.receipt_ready.connect(
+        lambda receipt: completion_events.append(("do_receipt", receipt.step_id))
+    )
+    controller.flow_worker.result_ready.connect(
+        lambda wrapped: completion_events.append(("flow_receipt", wrapped.command.mode))
+    )
+    controller.actuation_worker.manual_snapshot_ready.connect(
+        lambda snapshot: (
+            completion_events.append(("snapshot", snapshot.status.value))
+            if snapshot.status is ManualExperimentStatus.COMPLETED
+            else None
+        )
+    )
+    release_lease = controller.flow_worker.release_lease
+
+    def record_exact_manual_release(token):
+        assert token == expected_token
+        released = release_lease(token)
+        assert released
+        completion_events.append(("lease_release", token.token))
+        return released
+
+    monkeypatch.setattr(controller.flow_worker, "release_lease", record_exact_manual_release)
+
+    clock.value = stimulating.deadline_ns
+    controller._drain_actuation_if_not_running()
+
+    completed = controller.actuation_worker.manual_snapshot
+    assert completed.status is ManualExperimentStatus.COMPLETED
+    assert completed.close_confirmed == (4, 6)
+    assert completed.possibly_open == ()
+    assert completed.flow_zero_confirmed
+    assert completed.selector_compensation_confirmed
+    assert completed.supply_restored
+    assert completed.supply_enabled
+    assert controller.actuation_worker.protocol_state.possibly_open_valves == set()
+    assert controller.actuation_worker.protocol_state.execution_epoch == original_epoch
+    assert len(controller.actuation_worker.protocol_state.events) == original_event_count
+    assert controller.actuation_worker._background_safe_stop_plan is None
+    assert controller.device_lease.snapshot.kind is DeviceLeaseKind.IDLE
+    assert completion_events == [
+        ("do_receipt", "manual-close:4"),
+        ("do_receipt", "manual-close:6"),
+        ("flow_receipt", "manual_post_close_a_zero"),
+        ("do_receipt", "selector_compensation"),
+        ("flow_receipt", "manual_restore_supply"),
+        ("snapshot", ManualExperimentStatus.COMPLETED.value),
+        ("lease_release", expected_token.token),
+    ]
+
+
+def test_manual_safe_readiness_is_protocol_isolated_across_lifecycle_windows(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    controller, clock = _controller(tmp_path)
+    worker = controller.actuation_worker
+    safe_readiness = ProtocolExecutionReadiness(True, True, True, "SAFE", True)
+    baseline = (
+        worker.protocol_state.execution_epoch,
+        tuple(event for event in worker.protocol_state.events if event.event == "blocked"),
+        worker._background_safe_stop_plan,
+    )
+
+    def assert_protocol_unchanged() -> None:
+        assert (
+            worker.protocol_state.execution_epoch,
+            tuple(event for event in worker.protocol_state.events if event.event == "blocked"),
+            worker._background_safe_stop_plan,
+        ) == baseline
+
+    drain = controller._drain_actuation_if_not_running
+    post_manual_start = worker.post_manual_start
+
+    def queue_readiness_before_start(plan, *, lease_token):
+        worker.post_readiness_update(readiness=safe_readiness)
+        return post_manual_start(plan, lease_token=lease_token)
+
+    monkeypatch.setattr(worker, "post_manual_start", queue_readiness_before_start)
+    monkeypatch.setattr(controller, "_drain_actuation_if_not_running", lambda: None)
+
+    assert controller.handle_manual_release_requested(_intent())
+    assert controller.device_lease.snapshot.kind is DeviceLeaseKind.MANUAL
+    assert worker._manual_start_pending
+    worker.process_ready(max_items=1)
+    assert worker.manual_snapshot.status is ManualExperimentStatus.IDLE
+    assert worker._manual_start_pending
+    assert_protocol_unchanged()
+
+    drain()
+    controller.actuation_interlock.publish_airflow(
+        airflow=250.0,
+        timestamp=time.time(),
+        hardware_state="SAFE",
+    )
+    worker.post_interlock_changed(timestamp=time.time())
+    drain()
+    assert worker.manual_snapshot.status is ManualExperimentStatus.STIMULATING
+    assert_protocol_unchanged()
+
+    worker.post_readiness_update(readiness=safe_readiness)
+    drain()
+    assert worker.manual_snapshot.status is ManualExperimentStatus.STIMULATING
+    assert_protocol_unchanged()
+
+    terminal_results = []
+    worker.manual_result_ready.disconnect(controller._handle_manual_result)
+    worker.manual_result_ready.connect(terminal_results.append)
+    clock.value = worker.manual_snapshot.deadline_ns
+    drain()
+    assert worker.manual_snapshot.status is ManualExperimentStatus.COMPLETED
+    assert terminal_results[-1].completed
+    assert controller.device_lease.snapshot.kind is DeviceLeaseKind.MANUAL
+
+    worker.post_readiness_update(readiness=safe_readiness)
+    drain()
+    assert_protocol_unchanged()
+    assert controller.device_lease.snapshot.kind is DeviceLeaseKind.MANUAL
+
+    controller._handle_manual_result(terminal_results[-1])
     assert controller.device_lease.snapshot.kind is DeviceLeaseKind.IDLE
 
 

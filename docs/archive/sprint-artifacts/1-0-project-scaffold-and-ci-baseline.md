@@ -1,4 +1,4 @@
-﻿# 故事 1.0：Project Scaffold and CI Baseline
+# 故事 1.0：Project Scaffold and CI Baseline
 Status: real-hardware-pass
 Epic: 1 - Safe Hardware Foundations
 Story Key: 1-0-project-scaffold-and-ci-baseline
@@ -91,7 +91,7 @@ Story Key: 1-0-project-scaffold-and-ci-baseline
 
 ## Story Completion Status
 - 状态：review
-- 产物：docs/sprint-artifacts/1-0-project-scaffold-and-ci-baseline.md
+- 产物：docs/archive/sprint-artifacts/1-0-project-scaffold-and-ci-baseline.md
 - 下一步：可运行脚手架与 CI pipeline 实作后严格对标本故事；完成后可运行 `*validate-create-story` 做质量竞赛复核。
 
 ## Dev Agent Record
@@ -133,7 +133,7 @@ Story Key: 1-0-project-scaffold-and-ci-baseline
 - tests/test_app.py
 - pyinstaller.spec
 - scripts/run-ci.ps1
-- docs/sprint-artifacts/1-0-project-scaffold-and-ci-baseline.md
+- docs/archive/sprint-artifacts/1-0-project-scaffold-and-ci-baseline.md
 - docs/sprint-artifacts/sprint-status.yaml
 
 ## Change Log

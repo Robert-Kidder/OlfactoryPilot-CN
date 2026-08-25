@@ -21,5 +21,5 @@ workflow_status:
   create-epics-and-stories: docs/epics.md
   test-design: recommended
   validate-architecture: optional
-  implementation-readiness: docs/implementation-readiness-report-2025-12-08.md
+  implementation-readiness: docs/archive/sprint-artifacts/implementation-readiness-report-2025-12-08.md
   sprint-planning: docs/sprint-artifacts/sprint-status.yaml

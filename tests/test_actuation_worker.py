@@ -17,6 +17,7 @@ from app.models import (
     ActuationStreamSnapshot,
     AppState,
     AZeroReceipt,
+    DeviceLeaseKind,
     ProtocolDocument,
     ProtocolExecutionReadiness,
     ProtocolExecutionState,
@@ -2726,7 +2727,7 @@ def test_readiness_loss_without_flow_owner_never_routes_selector_and_requires_re
         )
 
     ingress = ActuationInterlockIngress(
-        _safe_snapshot(has_protocol=False, device_lease="idle")
+        _safe_snapshot(has_protocol=True, device_lease="protocol")
     )
     worker = ActuationWorker(
         protocol_executor=executor,
@@ -2749,6 +2750,142 @@ def test_readiness_loss_without_flow_owner_never_routes_selector_and_requires_re
     assert executor.state.status == ProtocolExecutionStatus.BLOCKED
     assert "RECOVERY_REQUIRED" in executor.state.quality_block_reason
     assert valve_service.selector_route == SelectorRoute.UNKNOWN
+
+
+@pytest.mark.parametrize(
+    ("lease_kind", "command_category"),
+    [
+        (DeviceLeaseKind.MANUAL, ActuationCategory.MANUAL),
+        (DeviceLeaseKind.MAINTENANCE, ActuationCategory.CLEANING),
+    ],
+)
+def test_non_protocol_ownership_never_invalidates_protocol_on_readiness_loss(
+    lease_kind: DeviceLeaseKind,
+    command_category: ActuationCategory,
+) -> None:
+    clock = FakeClock()
+    executor = ProtocolExecutor(
+        gating_service=GatingService(),
+        valve_writer=lambda *_: (True, "ok"),
+        deferred_actuation=True,
+    )
+    executor.state.execution_epoch = 7
+    executor.state.active_valve = 1
+    executor.state.possibly_open_valves.add(1)
+    executor.state.pending_open_command_id = "domain-pending"
+    ingress = ActuationInterlockIngress(
+        _safe_snapshot(has_protocol=False, device_lease=lease_kind.value)
+    )
+    worker = ActuationWorker(
+        protocol_executor=executor,
+        writer=lambda command: (_ for _ in ()).throw(AssertionError(command)),
+        interlock=ingress,
+        monotonic_ns_clock=clock,
+    )
+    pending = ActuationCommand(
+        command_id="domain-pending",
+        execution_epoch=7,
+        arm_epoch=2,
+        sequence=1,
+        trial_id=None,
+        trial_index=None,
+        valve=1,
+        action=ActuationAction.OPEN,
+        category=command_category,
+        expected_ns=clock.value,
+        duration_ns=100_000_000,
+        wall_timestamp=10.0,
+        safety_generation=1,
+        operation_id="domain-operation",
+        generation=3,
+        step_id="domain-step",
+        action_kind=ActuationAction.OPEN,
+    )
+    worker._commands_by_id[pending.command_id] = pending
+    original_events = tuple(executor.state.events)
+    assert worker._pending_safe_transition is None
+    assert not worker._has_protocol_execution_context(ingress.read()[1])
+
+    ingress.update(
+        connected=False,
+        hardware_ready=False,
+        flow_setpoints_ready=True,
+        safety_state="LOW_FLOW",
+    )
+    worker.post_readiness_update(
+        readiness=ProtocolExecutionReadiness(False, False, True, "LOW_FLOW", False)
+    )
+    worker.process_ready()
+
+    assert executor.state.execution_epoch == 7
+    assert tuple(executor.state.events) == original_events
+    assert worker._background_safe_stop_plan is None
+    assert worker.emergency_queue_size == 0
+
+
+@pytest.mark.parametrize("protocol_context", ["lease", "active", "pending", "load"])
+def test_explicit_protocol_context_remains_fail_closed_on_readiness_loss(
+    protocol_context: str,
+) -> None:
+    clock = FakeClock()
+    document = ProtocolDocument(
+        Path("owned.csv"),
+        "owned.csv",
+        [ProtocolTrial("owned", 0, 100, 1, TriggerMode.MANUAL)],
+    )
+    executor = ProtocolExecutor(
+        gating_service=GatingService(),
+        valve_writer=lambda *_: (True, "ok"),
+        deferred_actuation=True,
+    )
+    executor.reset(document)
+    executor.state.execution_epoch = 9
+    ingress = ActuationInterlockIngress(
+        _safe_snapshot(
+            has_protocol=True,
+            device_lease=("protocol" if protocol_context == "lease" else "idle"),
+        )
+    )
+    worker = ActuationWorker(
+        protocol_executor=executor,
+        writer=lambda command: ActuationReceipt.from_write(
+            command=command,
+            started_ns=command.expected_ns,
+            actual_ns=command.expected_ns,
+            wall_timestamp=10.0,
+            result=ActuationResult.SUCCESS,
+        ),
+        interlock=ingress,
+        valve_service=_configured_valve_service(),
+        monotonic_ns_clock=clock,
+        flow_submitter=lambda _command: True,
+    )
+    if protocol_context == "active":
+        executor.state.status = ProtocolExecutionStatus.WAITING_TRIGGER
+    elif protocol_context == "pending":
+        command = _command(
+            command_id="protocol-pending",
+            sequence=2,
+            expected_ns=clock.value + 100,
+            execution_epoch=9,
+        )
+        assert worker.submit(command)
+    elif protocol_context == "load":
+        worker._pending_safe_transition = ("load", {"document": document})
+        assert ingress.read()[1].device_lease == DeviceLeaseKind.IDLE.value
+        assert worker._has_protocol_execution_context(ingress.read()[1])
+
+    original_epoch = executor.state.execution_epoch
+    ingress.update(safety_state="LOW_FLOW")
+    worker.post_readiness_update(
+        readiness=ProtocolExecutionReadiness(True, True, True, "LOW_FLOW", True)
+    )
+    worker.process_ready(max_items=1)
+
+    assert executor.state.execution_epoch > original_epoch
+    assert executor.state.status is ProtocolExecutionStatus.BLOCKED
+    assert any(event.event == "blocked" for event in executor.state.events)
+    assert worker._background_safe_stop_plan is not None
 
 
 def test_protocol_stop_uses_a_zero_before_selector_then_odors_and_final_zero() -> None:

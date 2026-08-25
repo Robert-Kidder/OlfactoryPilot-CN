@@ -1,11 +1,12 @@
 # Sprint 状态文件
-# 生成时间: 2026-07-09 16:54
+# 唯一动态 Epic/Story 状态源；历史行动项见归档快照。
 generated: 2026-07-09 16:54
-last_updated: 2026-08-19
+last_updated: 2026-08-25
 project: OlfactoryPilot-CN
 project_key: OLFACTORY
 tracking_system: file-system
 story_location: docs/sprint-artifacts
+archive_snapshot: docs/archive/sprint-artifacts/sprint-status-2026-08-25-before-alignment.yaml
 
 development_status:
   epic-1: real-hardware-verification
@@ -44,102 +45,25 @@ development_status:
   4-6-manual-experiment-v3-replacement: review
   epic-4-retrospective: optional
 
-epic_boundaries:
-  epic-4:
-    status: rebaselined
-    rebaselined_on: 2026-08-17
-    approved_by: Jing
-    supersedes:
-      - "docs/sprint-artifacts/epic-4-technical-boundary-2026-07-31.md"
-      - "docs/sprint-artifacts/sprint-change-proposal-2026-07-31.md"
-    change_proposal: "_bmad-output/planning-artifacts/sprint-change-proposal-2026-08-17.md"
-    recommended_implementation_order:
-      - 4-5-safe-stop-selector-order
-      - 4-6-manual-experiment-v3-replacement
-      - decide-4-1-cleaning-automation-resumption
-    change_control: "只有产品范围、硬件事实或安全不变量发生实质变化时运行 Correct Course；普通 UI、明确 bug 和局部重构默认使用 Quick Dev。"
+active_specs:
+  - docs/sprint-artifacts/spec-manual-protocol-domain-boundary-docs-alignment.md
 
-workflow_policy:
-  default: bmad-quick-dev
-  standard_feature: "Quick Dev + automated tests + one user acceptance"
-  safety_critical_hardware: "compact story/spec + Quick Dev + one independent code review + separately authorized HIL"
-  optional_by_default:
-    - validate-story
-    - standalone-code-review-for-noncritical-work
-    - retrospective
-
-action_items:
-  - epic: 4
-    action: "暂停旧 Story 4.1，停止基于 21-target 语义的旧 HIL；保护当前未提交实现和证据。"
+current_gates:
+  - scope: 4-6-manual-experiment-v3-replacement
+    status: review
+    action: "接入真实硬件前，独立验证 selector compensation 物理出口映射；不得以 DAQ ack 或软件终态代替机械/气路观察。"
     owner: "Jing + Developer"
-    status: done
-    completed: 2026-08-17
-    evidence: "_bmad-output/planning-artifacts/sprint-change-proposal-2026-08-17.md"
-  - epic: 4
-    action: "实施 Story 4.5：确认 A 清零成功 receipt 后才切换三通阀安全路线。"
-    owner: "Developer + Jing"
-    status: done
-    completed: 2026-08-18
-    completion_note: "独立复审 R-01–R-10 已全部整改；最终全仓 820 项测试通过。2026-08-18 normal 动作偏序 HIL 通过：A=2500 sccm 稳定 20 秒、停止前 odor 路线阀 2 持续气流、safe-stop completed、终态 A/B/C=0、selector 软件/电子终态=compensation、气味阀 1–20 LOW、owner handoff 完整；compensation 物理出口未作机械确认。"
-    evidence: "docs/sprint-artifacts/evidence/story-4-5-hil-normal-20260818/README.md"
-  - epic: 4
-    action: "Story 4.6 接入真实硬件前，独立验证 selector compensation 物理出口映射；不得以 DAQ ack 或 normal 终态软件状态代替机械/气路观察。"
-    owner: "Jing + Developer"
-    status: backlog
-    evidence: "docs/sprint-artifacts/evidence/story-4-5-hil-normal-20260818/README.md#证据边界与字段解释"
-  - epic: 3
-    action: "对齐 BMM artifact 配置与项目权威 docs/sprint-artifacts 状态源。"
-    owner: "Jing + Amelia"
-    status: done
-    completed: 2026-07-30
-    evidence: "_bmad/custom/config.toml + docs/bmm-workflow-status.yaml"
-  - epic: 3
-    action: "在 Story 4.2 定义冻结前更新 PRD/Epics 的 Dev1/Dev2 必需、Dev3 可选硬件基线。"
-    owner: "John + Winston"
-    status: done
-    completed: 2026-07-30
-    evidence: "docs/prd.md + docs/epics.md + docs/sprint-artifacts/evidence/spec-update-dev3-hardware-inventory-20260730.md"
-  - epic: 3
-    action: "在 Story 4.1 开发前固定 CLEANING category、设备租约、记录和恢复矩阵。"
-    owner: "Winston + Amelia + Murat"
-    status: done
-    completed: 2026-07-31
-    evidence: "docs/sprint-artifacts/epic-4-technical-boundary-2026-07-31.md#3-story-41--cleaning-状态机冻结"
-  - epic: 3
-    action: "在 Story 4.4 开发前固定 flow→master→odor 状态机和 receipt identity。"
-    owner: "Winston + Amelia"
-    status: done
-    completed: 2026-07-31
-    evidence: "docs/sprint-artifacts/epic-4-technical-boundary-2026-07-31.md#6-story-44--flow--master--odor-状态机冻结"
-  - epic: 3
-    action: "为 Epic 4 建立 Event/Barrier/fake-clock/fault-injection 确定性并发测试清单。"
-    owner: "Murat + Amelia"
-    status: done
-    completed: 2026-07-31
-    evidence: "docs/sprint-artifacts/epic-4-technical-boundary-2026-07-31.md#7-确定性并发测试清单"
-  - epic: 3
-    action: "在首个 Epic 4 硬件 Story 开发前建立变更触发式真实 Windows/NI HIL 矩阵。"
-    owner: "Murat + Jing"
-    status: done
-    completed: 2026-07-31
-    evidence: "docs/sprint-artifacts/epic-4-technical-boundary-2026-07-31.md#8-真实-windowsni-hil-触发矩阵"
-  - epic: 3
-    action: "在实验室发布候选确认前完成 PyInstaller 干跑、资源审计与产物留证。"
-    owner: "Amelia + Paige"
-    status: done
-    completed: 2026-07-30
-    evidence: "docs/sprint-artifacts/evidence/release-packaging-gate-20260730.md"
-  - epic: 3
+    evidence: docs/sprint-artifacts/evidence/story-4-5-hil-normal-20260818/README.md#证据边界与字段解释
+  - scope: release-documentation
+    status: open
     action: "在实验室发布候选确认前补全协议、session、安全与 recovery 中文操作指引。"
     owner: "Paige + Murat"
+  - scope: user-language-audit
     status: open
-  - epic: 3
-    action: "在 Story 4.2 开发前完成断开态配置事务、回滚和 owner handoff 测试设计。"
-    owner: "Amelia + Murat"
-    status: done
-    completed: 2026-07-31
-    evidence: "docs/sprint-artifacts/epic-4-technical-boundary-2026-07-31.md#4-story-42--断开态配置事务冻结"
-  - epic: 3
-    action: "在 Story 4.3 验收前增加用户可见中文与乱码自动化审计。"
+    action: "继续维护用户可见中文与乱码自动化审计。"
     owner: "Paige + Amelia"
-    status: open
+
+# 状态说明：
+# - done/completed/real-hardware-*：已终结历史状态，工件位于 docs/archive/sprint-artifacts/。
+# - in-progress/review/paused：仍可能影响当前工作，工件保留在 docs/sprint-artifacts/。
+# - superseded-by-*：由所指 Story 取代，不应恢复旧边界。

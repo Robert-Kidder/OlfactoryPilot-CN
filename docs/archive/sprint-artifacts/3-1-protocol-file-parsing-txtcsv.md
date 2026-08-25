@@ -97,7 +97,7 @@ Story ID: 3.1
 
 - PRD FR2.2 要解析旧系统兼容的 `.txt` 和 `.csv` 实验协议文件；FR2.1 自动会话文件命名和 FR2.3 `.raw/.log` 输出属于后续 story，不要在 3.1 中提前实现。来源：`docs/prd.md#FR2：文件与会话`
 - Epic 3 覆盖 FR2.1、FR2.2、FR2.3、FR5.1、FR5.2、FR5.3；Story 3.1 只负责协议文件解析、错误定位和加载反馈。来源：`docs/epics.md#Epic-3-协议执行与数据记录`
-- 实施就绪报告建议从 Story 3.1 开始，并提示旧法国软件协议格式仍需通过 PDF、样例文件或真实实验文件继续确认。因此实现应保守、可扩展，用 fixture 驱动兼容，不要把未确认格式写死成唯一格式。来源：`docs/implementation-readiness-report-2025-12-08.md#主要风险`
+- 实施就绪报告建议从 Story 3.1 开始，并提示旧法国软件协议格式仍需通过 PDF、样例文件或真实实验文件继续确认。因此实现应保守、可扩展，用 fixture 驱动兼容，不要把未确认格式写死成唯一格式。来源：`docs/archive/sprint-artifacts/implementation-readiness-report-2025-12-08.md#主要风险`
 
 ### 架构约束
 
@@ -155,7 +155,7 @@ Story ID: 3.1
 
 ### Previous Story Intelligence
 
-- Story 2.7 已完成校准 UI 优化，经验是只在需要处更新 View 和 Controller，保留已有业务服务不动，并补专门测试文件。来源：`docs/sprint-artifacts/2-7-calibration-ui-optimization.md`
+- Story 2.7 已完成校准 UI 优化，经验是只在需要处更新 View 和 Controller，保留已有业务服务不动，并补专门测试文件。来源：`docs/archive/sprint-artifacts/2-7-calibration-ui-optimization.md`
 - Epic 2 中预检和校准已建立中文状态反馈、按钮禁用和轻量 Qt 测试模式。Story 3.1 应复用这些风格。
 
 ### Git Intelligence
@@ -179,7 +179,7 @@ Story ID: 3.1
 - `docs/ux-design.md#协议页`
 - `docs/project-structure.md#新增文件放置规则`
 - `docs/project-context.md#架构原则`
-- `docs/implementation-readiness-report-2025-12-08.md#建议下一步`
+- `docs/archive/sprint-artifacts/implementation-readiness-report-2025-12-08.md#建议下一步`
 - `app/views/main_window.py`
 - `app/controllers/main_controller.py`
 - `app/models/app_state.py`
@@ -226,7 +226,7 @@ GPT-5 Codex
 - `app/views/__init__.py`
 - `app/views/main_window.py`
 - `app/views/protocol_view.py`
-- `docs/sprint-artifacts/3-1-protocol-file-parsing-txtcsv.md`
+- `docs/archive/sprint-artifacts/3-1-protocol-file-parsing-txtcsv.md`
 - `docs/sprint-artifacts/sprint-status.yaml`
 - `tests/fixtures/protocols/empty_protocol.csv`
 - `tests/fixtures/protocols/invalid_number.csv`

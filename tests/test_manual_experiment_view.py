@@ -396,7 +396,7 @@ def test_plain_snapshot_detail_replaces_stale_notice(qtbot) -> None:
 def test_manual_recovery_replaces_transition_safety_notice(qtbot) -> None:
     view = ManualExperimentView()
     qtbot.addWidget(view)
-    view.set_persistent_safety_state("LOW_FLOW")
+    view.set_header_safety_state("LOW_FLOW")
     view.show_notice(
         "气流不足",
         "请检查供气。",
@@ -412,7 +412,9 @@ def test_manual_recovery_replaces_transition_safety_notice(qtbot) -> None:
     )
 
     assert view.current_notice_title == "需要立即处理"
-    assert "关阀回执不确定" in view.detail_label.text()
+    assert "本次操作未能确认安全完成" in view.detail_label.text()
+    assert "回执" not in view.detail_label.text()
+    assert "RECOVERY_REQUIRED" not in view.detail_label.text()
 
 
 def test_one_second_snapshot_duration_is_not_silently_clamped(qtbot) -> None:

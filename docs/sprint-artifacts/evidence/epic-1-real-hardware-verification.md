@@ -1,4 +1,4 @@
-﻿# Epic 1 真实硬件复核清单
+# Epic 1 真实硬件复核清单
 
 Status: Historical Record — Epic 1 Verification Still Open
 Epic: 1 - Safe Hardware Foundations
@@ -185,7 +185,7 @@ Status: In Field Analysis
 - 需要澄清：Flow Rate Apply 是否属于应被完全阻断的危险动作，还是应允许一个受限的“启动供气/建立安全气流”动作绕过低流量阻断。
 - 需求澄清：真实设备语义下不存在独立的 LOW FLOW 状态；Alicat 流量计设定多少气流就应是多少。默认无气流是正常 idle 状态，不应被解释为故障或全局阻断条件。
 - 产品影响：Story 1.2 的原始“气流低于阈值阻断所有指令”模型与真实硬件不匹配，需要重定义为“硬件自检通过 + MFC 设定/反馈一致性 + 危险动作顺序保护”。
-- 文档更新：`docs/sprint-artifacts/1-2-safe-start-airflow-interlock.md` 已重定义为 “Safe Alicat Flow Command and Valve Interlock”。
+- 文档更新：`docs/archive/sprint-artifacts/1-2-safe-start-airflow-interlock.md` 已重定义为 “Safe Alicat Flow Command and Valve Interlock”。
 - 新验收重点：自检前阻断、idle 合法、MFC 设定/反馈追踪、阀门顺序互锁、安全恢复、统一接口守卫。
 - 实现更新：
   - idle/0 flow 不再触发 LOW_FLOW。

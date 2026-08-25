@@ -263,10 +263,10 @@ Status: in-progress
 - 架构与冻结摘要：[Source: docs/architecture.md#Epic-4-冻结技术边界]
 - 清洗 UX：[Source: docs/ux-design.md#清洗页]
 - 旧版软件清洗行为：[Source: docs/ManuelUtilisation_ProgOlfacto.pdf，第 34 页，Onglet Rinçage]
-- 权威冻结边界：[Source: docs/sprint-artifacts/epic-4-technical-boundary-2026-07-31.md#3-Story-41--CLEANING-状态机冻结]
-- 并发测试与 HIL：[Source: docs/sprint-artifacts/epic-4-technical-boundary-2026-07-31.md#7-确定性并发测试清单] [Source: docs/sprint-artifacts/epic-4-technical-boundary-2026-07-31.md#8-真实-WindowsNI-HIL-触发矩阵]
-- Epic 3 经验：[Source: docs/sprint-artifacts/epic-3-retro-2026-07-30.md#第二部分Epic-4-Preparation]
-- 变更批准：[Source: docs/sprint-artifacts/sprint-change-proposal-2026-07-31.md#Detailed-Change-Proposals]
+- 权威冻结边界：[Source: docs/archive/sprint-artifacts/epic-4-technical-boundary-2026-07-31.md#3-Story-41--CLEANING-状态机冻结]
+- 并发测试与 HIL：[Source: docs/archive/sprint-artifacts/epic-4-technical-boundary-2026-07-31.md#7-确定性并发测试清单] [Source: docs/archive/sprint-artifacts/epic-4-technical-boundary-2026-07-31.md#8-真实-WindowsNI-HIL-触发矩阵]
+- Epic 3 经验：[Source: docs/archive/sprint-artifacts/epic-3-retro-2026-07-30.md#第二部分Epic-4-Preparation]
+- 变更批准：[Source: docs/archive/sprint-artifacts/sprint-change-proposal-2026-07-31.md#Detailed-Change-Proposals]
 
 ### 开发前人工决定（已确认）
 

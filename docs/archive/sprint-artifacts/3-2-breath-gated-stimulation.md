@@ -1,7 +1,7 @@
 ---
 baseline_commit: 3cfb87e
 depends_on:
-  - docs/sprint-artifacts/3-1-protocol-file-parsing-txtcsv.md
+  - docs/archive/sprint-artifacts/3-1-protocol-file-parsing-txtcsv.md
 ---
 
 # Story 3.2: 呼吸门控刺激
@@ -236,7 +236,7 @@ Story ID: 3.2
 - `docs/ux-design.md#协议页`
 - `docs/project-context.md#架构原则`
 - `docs/project-structure.md#新增文件放置规则`
-- `docs/sprint-artifacts/3-1-protocol-file-parsing-txtcsv.md`
+- `docs/archive/sprint-artifacts/3-1-protocol-file-parsing-txtcsv.md`
 - `app/models/protocol.py`
 - `app/models/app_state.py`
 - `app/services/gating_service.py`
@@ -298,7 +298,7 @@ GPT-5 Codex
 - `tests/test_protocol_executor.py`
 - `tests/test_valve_service.py`
 - `tests/test_protocol_view.py`
-- `docs/sprint-artifacts/3-2-breath-gated-stimulation.md`
+- `docs/archive/sprint-artifacts/3-2-breath-gated-stimulation.md`
 - `docs/sprint-artifacts/sprint-status.yaml`
 
 ## Change Log

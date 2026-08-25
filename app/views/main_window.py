@@ -124,14 +124,12 @@ class MainWindow(FluentWindow):
 
         self._connection_badge = InfoBadge.error("设备未连接", parent=header)
         self._connection_badge.setAccessibleName("设备连接状态")
-        self._safety_reason_label = CaptionLabel("安全状态：SAFE", header)
-        self._safety_reason_label.setMaximumWidth(300)
-        self._safety_reason_label.setWordWrap(True)
-        self._safety_badge = InfoBadge.success("SAFE", parent=header)
-        self._safety_badge.setAccessibleName("气流安全状态")
-        header_layout.addWidget(self._safety_reason_label)
-        header_layout.addWidget(self._safety_badge, 0, Qt.AlignmentFlag.AlignVCenter)
+        self._connection_action_label = CaptionLabel("", header)
+        self._connection_action_label.setStyleSheet("color: #FF9A92;")
+        self._connection_action_label.setMaximumWidth(220)
+        self._connection_action_label.setVisible(False)
         header_layout.addWidget(self._connection_badge, 0, Qt.AlignmentFlag.AlignVCenter)
+        header_layout.addWidget(self._connection_action_label)
         header_layout.addWidget(self._connect_button)
         header_layout.addWidget(self._stop_button)
         layout.addWidget(header)
@@ -169,11 +167,24 @@ class MainWindow(FluentWindow):
     def _connection_summary(telemetry: Telemetry) -> str:
         if not telemetry.connected:
             return "设备未连接"
-        if telemetry.safety_state == "DATA_STALE":
-            return "连接异常"
-        if telemetry.safety_state != "SAFE":
-            return "设备状态异常"
-        return "设备已连接"
+        return {
+            "SAFE": "设备已连接",
+            "LOW_FLOW": "气流不足",
+            "DATA_STALE": "设备通信中断",
+            "RECOVERY_REQUIRED": "需要安全恢复",
+            "FAULT": "设备状态异常",
+            "UNKNOWN": "设备状态待确认",
+        }.get(telemetry.safety_state, "设备状态异常")
+
+    @staticmethod
+    def _connection_action(telemetry: Telemetry) -> str:
+        if not telemetry.connected or telemetry.safety_state == "SAFE":
+            return ""
+        return {
+            "LOW_FLOW": "请检查供气和管路",
+            "DATA_STALE": "请检查设备连接",
+            "RECOVERY_REQUIRED": "请执行全局停止并检查设备",
+        }.get(telemetry.safety_state, "请检查设备状态")
 
     def _format_telemetry(self, telemetry: Telemetry) -> str:
         stale_hint = "（数据过期）" if telemetry.safety_state == "DATA_STALE" else ""
@@ -192,30 +203,22 @@ class MainWindow(FluentWindow):
 
     def render_telemetry(self, telemetry: Telemetry) -> None:
         connected = bool(telemetry.connected)
+        self._connect_button.setVisible(not connected)
         summary = self._connection_summary(telemetry)
         self._telemetry_label.setText(self._format_telemetry(telemetry))
         self._connection_badge.setText(summary)
+        connection_action = self._connection_action(telemetry)
+        self._connection_action_label.setText(connection_action)
+        self._connection_action_label.setVisible(bool(connection_action))
         self._connection_badge.setLevel(
             InfoLevel.SUCCESS
             if connected and telemetry.safety_state == "SAFE"
             else InfoLevel.ERROR
         )
         current_state = telemetry.safety_state if connected else "DATA_STALE"
-        reason = user_facing_text(telemetry.safety_reason).strip()
-        if not connected and not reason:
-            reason = "设备未连接"
-        self.manual_experiment_view.set_persistent_safety_state(
+        self.manual_experiment_view.set_header_safety_state(
             current_state
         )
-        self._safety_badge.setText(current_state)
-        self._safety_badge.setLevel(
-            InfoLevel.SUCCESS if current_state == "SAFE" else InfoLevel.ERROR
-        )
-        self._safety_reason_label.setText(
-            f"安全状态：{current_state}"
-            + (f" · {reason}" if reason else "")
-        )
-
         previous_state = self._last_safety_notice_state
         entered_connected_abnormal = bool(
             connected
@@ -250,7 +253,7 @@ class MainWindow(FluentWindow):
         elif connected and current_state != "SAFE":
             self.manual_experiment_view.show_notice(
                 "当前状态不允许操作",
-                reason or "请检查设备状态，确认正常后再继续。",
+                self._connection_action(telemetry) + "，确认正常后再继续。",
                 severity="error",
                 notice_key=transition_key,
             )
@@ -326,9 +329,9 @@ class MainWindow(FluentWindow):
             prefix
             + ("\n" + "\n".join(diagnostic_summary) if diagnostic_summary else "")
         )
-        detail = "；".join(summary) if summary else "设备检查通过"
-        self.manual_experiment_view.show_notice(
-            "连接成功" if effective_ready else "连接失败",
-            detail,
-            severity="success" if effective_ready else "error",
-        )
+        if not effective_ready:
+            self.manual_experiment_view.show_notice(
+                "连接失败",
+                "；".join(summary) or "设备检查未通过，请检查连接后重试。",
+                severity="error",
+            )

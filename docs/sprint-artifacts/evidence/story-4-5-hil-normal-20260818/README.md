@@ -22,7 +22,7 @@
 - 气味阀 1–20 最后成功请求均为 LOW。
 - runner 报告的 maintenance、DO、device lease、AI、serial owner handoff 全部完成；这是生产 owner 调用与软件时间线证据，不是独立机械传感器证据。
 - 授权违规 `0`，审计错误 `0`，归档前原始证据哈希不匹配 `0`。
-- 候选的离线软件门禁为全仓 `820 passed in 28.49s`；命令和结果记录在 [`spec-4-5-hil-live-execution.md`](../../../../_bmad-output/implementation-artifacts/spec-4-5-hil-live-execution.md#actual-results-2026-08-18全部离线-fakemock)，不属于本次机器运行原始 payload。
+- 候选的离线软件门禁为全仓 `820 passed in 28.49s`；命令和结果记录在 [`spec-4-5-hil-live-execution.md`](../../../archive/sprint-artifacts/spec-4-5-hil-live-execution.md#actual-results-2026-08-18全部离线-fakemock)，不属于本次机器运行原始 payload。
 
 ## 证据边界与字段解释
 

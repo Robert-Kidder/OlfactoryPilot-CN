@@ -1,4 +1,4 @@
-﻿# 故事 1.4: Safe Shutdown and Valve Reset
+# 故事 1.4: Safe Shutdown and Valve Reset
 Status: real-hardware-review
 Epic: 1 - Safe Hardware Foundations
 Story Key: 1-4-safe-shutdown-and-valve-reset
@@ -91,7 +91,7 @@ Story ID: 1.4
 
 ## Story Completion Status
 - 状态：Ready for Review
-- 产物：docs/sprint-artifacts/1-4-safe-shutdown-and-valve-reset.md
+- 产物：docs/archive/sprint-artifacts/1-4-safe-shutdown-and-valve-reset.md
 - 完成说明：统一安全关闭/重试/持久化与 UI 提示已实现，测试通过等待代码审核。
 
 ## Dev Agent Record
@@ -110,7 +110,7 @@ Story ID: 1.4
 - 补充 shutdown 成功/失败重试/持久化/重启禁用的单测，运行 python -m pytest 全量通过。
 
 ### File List
-- docs/sprint-artifacts/1-4-safe-shutdown-and-valve-reset.md
+- docs/archive/sprint-artifacts/1-4-safe-shutdown-and-valve-reset.md
 - docs/sprint-artifacts/sprint-status.yaml
 - app/services/shutdown_service.py
 - app/services/__init__.py

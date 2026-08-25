@@ -4,12 +4,14 @@ OlfactoryPilot-CN 是一个面向嗅觉刺激实验的 Windows 桌面软件，�
 
 当前项目使用 **Python 3.11**、PySide6、pyqtgraph、NI-DAQmx、pyserial 和 PyInstaller。代码采用 MVC + Worker + HAL 的组织方式：界面负责显示和交互，控制器负责编排业务逻辑，硬件线程负责安全、低抖动地访问 NI 采集卡和 Alicat 质量流量控制器。
 
+动作执行分为 Protocol、Manual 和 Maintenance 三个互斥域。每个域只消费归属于自己的 lease、command、receipt 和状态证据；一个域的就绪变化不得失效另一个域。所有真实写入仍由 Worker/HAL 单写者完成，UI 不参与 deadline 或安全判定。
+
 ## 目录概览
 
 - `app/`：应用主代码，包含 `controllers/`、`models/`、`views/`、`workers/`、`services/`。
 - `config/default_config.json`：仓库内通用默认配置，默认使用 Mock HAL，可在没有真实硬件的电脑上启动。
 - `config/local_config.example.json`：本机真实硬件配置模板。
-- `docs/`：产品需求、架构、UX、项目结构、开发故事、真实硬件记录和 sprint 状态文档；入口见 `docs/index.md`。这些是项目知识，应提交到 Git。
+- `docs/`：当前权威文档、活动执行工件、状态、证据和历史归档；层级与入口见 `docs/index.md`。
 - `scripts/`：本地 CI、NI HIL 基准和 Alicat 串口探测等辅助脚本。
 - `tests/`：pytest 自动化测试。
 - `.github/workflows/ci.yml`：GitHub Actions 持续集成流程。
@@ -87,11 +89,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run-ci.ps1 ci
 
 `ci` 会依次执行代码检查、测试和 PyInstaller 打包。打包产物位于 `dist/OlfactoryPilot/`。
 
-## BMAD 项目文档
+## 项目文档
 
-需要同步到 Git 的 BMAD 项目知识已经放在 `docs/` 下，包括 PRD、架构、UX、epics、sprint artifacts、workflow/status 文档和真实硬件验证记录。
+`docs/project-context.md`、`docs/prd.md`、`docs/architecture.md`、`docs/ux-design.md` 和 `docs/project-structure.md` 描述当前长期规则；`docs/sprint-artifacts/sprint-status.yaml` 是唯一动态 Epic/Story 状态源；`docs/sprint-artifacts/evidence/` 保存安全、HIL、极性和发布证据；`docs/archive/` 保存不再维护但仍需审计的历史资料。历史 Story 不覆盖当前权威文档。
 
-`.agents/` 和 `_bmad/` 主要是本机 BMAD/Codex 工具安装目录；唯一例外是团队共享的 `_bmad/custom/config.toml`，它把 BMAD 的长期规划与实施工件路由到仓库内的 `docs/`。`_bmad-output/` 是本地临时输出工作区，不作为长期资料的权威来源；需要长期保存、协作和追踪的资料应整理进 `docs/` 或 `docs/sprint-artifacts/` 后再提交。
+`.agents/` 和 `_bmad/` 主要是本机 BMAD/Codex 工具安装目录；团队共享的 `_bmad/custom/config.toml` 把长期规划与实施工件路由到仓库内的 `docs/`。`_bmad-output/` 只是本地临时工作区，权威文档、状态或证据不得依赖其中的文件。
 
 在另一台电脑克隆代码后，可以重新安装 BMAD 工具链，例如：
 

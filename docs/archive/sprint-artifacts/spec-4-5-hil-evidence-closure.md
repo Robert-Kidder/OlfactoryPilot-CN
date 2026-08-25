@@ -6,7 +6,7 @@ status: 'done'
 review_loop_iteration: 2
 context:
   - 'docs/project-context.md'
-  - 'docs/sprint-artifacts/epic-4-context.md'
+  - 'docs/archive/sprint-artifacts/epic-4-context.md'
 ---
 
 <frozen-after-approval reason="human-owned intent — do not modify unless human renegotiates">
@@ -30,10 +30,10 @@ context:
 ## Code Map
 
 - `docs/sprint-artifacts/evidence/story-4-5-hil-normal-20260818/` -- 原始 HIL 证据与验收索引
-- `docs/sprint-artifacts/4-5-safe-stop-selector-order.md` -- Story 4.5 验收补充
+- `docs/archive/sprint-artifacts/4-5-safe-stop-selector-order.md` -- Story 4.5 验收补充
 - `docs/sprint-artifacts/evidence/story-4-5-hil-runbook.md` -- 当前现场状态与复跑边界
 - `docs/sprint-artifacts/sprint-status.yaml` -- Sprint 完成状态与证据入口
-- `docs/sprint-artifacts/epic-4-context.md` -- Epic 4 后续 Story 的精简上下文
+- `docs/archive/sprint-artifacts/epic-4-context.md` -- Epic 4 后续 Story 的精简上下文
 
 ## Tasks & Acceptance
 
@@ -63,8 +63,8 @@ context:
 
 ## 建议复审顺序
 
-1. [证据索引](evidence/story-4-5-hil-normal-20260818/README.md)
+1. [证据索引](../../sprint-artifacts/evidence/story-4-5-hil-normal-20260818/README.md)
 2. [Story 4.5 验收补充](4-5-safe-stop-selector-order.md)
-3. [现场运行手册](evidence/story-4-5-hil-runbook.md)
-4. [Sprint 状态](sprint-status.yaml)
+3. [现场运行手册](../../sprint-artifacts/evidence/story-4-5-hil-runbook.md)
+4. [Sprint 状态](../../sprint-artifacts/sprint-status.yaml)
 5. [Epic 4 上下文](epic-4-context.md)

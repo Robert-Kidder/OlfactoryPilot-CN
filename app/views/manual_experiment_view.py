@@ -77,8 +77,10 @@ def _operator_detail_text(value: object) -> str:
             return "当前不可操作：设备正在执行其他操作。"
         return text.rstrip("。") + "。"
     if text.startswith("手动实验需要恢复："):
-        reason = text.split("；", 1)[0].removeprefix("手动实验需要恢复：")
-        return f"需要安全恢复：{reason}。请执行全局停止，完成后重新连接。"
+        return (
+            "需要安全恢复：本次操作未能确认安全完成。"
+            "请执行全局停止，完成后重新连接并检查设备。"
+        )
     return text
 
 
@@ -423,7 +425,7 @@ class ManualExperimentView(QWidget):
         self._notice_key: object | None = None
         self._dismissed_notice_key: object | None = None
         self._notice_severity: str | None = None
-        self._persistent_safety_state = "SAFE"
+        self._header_safety_state = "SAFE"
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -707,7 +709,11 @@ class ManualExperimentView(QWidget):
                 supply_enabled=snapshot.supply_enabled,
                 supply_transitioning=snapshot.supply_transitioning,
                 status_text=self._status_text(snapshot),
-                detail_text=(snapshot.recovery_reason or self._snapshot.detail_text),
+                detail_text=(
+                    f"手动实验需要恢复：{snapshot.recovery_reason}"
+                    if snapshot.status is ManualExperimentStatus.RECOVERY_REQUIRED
+                    else self._snapshot.detail_text
+                ),
             )
         if not isinstance(snapshot, ManualExperimentViewSnapshot):
             raise TypeError("手动实验只能显示有效状态。")
@@ -771,10 +777,10 @@ class ManualExperimentView(QWidget):
                     snapshot.experiment.recovery_reason,
                 ),
             )
-        elif self._persistent_safety_state != "SAFE":
-            # Persistent safety state belongs to MainWindow's always-visible
-            # status region.  Snapshot rendering must not replace (or recreate)
-            # a dismissed transition-driven safety InfoBar.
+        elif self._header_safety_state != "SAFE":
+            # MainWindow already keeps the current abnormal state and next
+            # action visible in the header. Snapshot rendering must not
+            # recreate a dismissed transition-driven safety InfoBar.
             pass
         elif status_text or detail_text:
             severity = "error" if self._is_actionable_notice(status_text, detail_text) else "info"
@@ -789,10 +795,10 @@ class ManualExperimentView(QWidget):
         self._render_ports()
         self.refresh_countdown_display()
 
-    def set_persistent_safety_state(self, state: str) -> None:
-        """Tell snapshot rendering which safety state is shown persistently."""
+    def set_header_safety_state(self, state: str) -> None:
+        """Keep snapshot notices consistent with MainWindow's durable header state."""
 
-        self._persistent_safety_state = str(state or "UNKNOWN")
+        self._header_safety_state = str(state or "UNKNOWN")
 
     def _render_supply_badge(self, snapshot: ManualExperimentViewSnapshot) -> None:
         if snapshot.supply_transitioning:

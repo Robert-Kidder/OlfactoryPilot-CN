@@ -46,7 +46,7 @@ tests/                 # 自动化测试
 
 ### 正式产品 UI
 
-- 第一阶段正式运行树只构造 QFluentWidgets `FluentWindow` 与“手动实验”页；旧页面源码可以保留给显式回归测试，但不得由正式窗口 import、隐藏托管或提供兼容入口。
+- 正式运行树只构造已验收的 QFluentWidgets `FluentWindow` 产品页面；不得 import、隐藏托管或提供旧 UI 兼容入口。未验收能力不预设页面或占位导航。
 - 全局使用 Dark Theme 与 `#E2AD50` 主题色，实时曲线继续使用 pyqtgraph。产品组件优先采用 QFluentWidgets 原生 Card、Label、SpinBox、Button、Badge、ToolTip 和 InfoBar。
 - 气口选择属于 View draft；真实开启和故障来自 immutable Snapshot。UI `QTimer` 只刷新倒计时和显示，不提交自动关闭动作。
 
@@ -58,6 +58,13 @@ tests/                 # 自动化测试
 - `ActuationInterlockIngress` 是 producer-safe 的 immutable readiness store。AI/telemetry/serial producer 先更新 generation 和 unsafe latch，再发 UI 消息；只有动作 owner 在 readiness 恢复且阀门已确认关闭后才能清除 latch。
 - shutdown 的强制安全偏序为：停止新提交与失效 normal epoch → 请求 MFC A 清零并等待匹配成功 receipt → 才允许把 A 路三通选择阀切换到定义的安全路线。气味阀 1–20、B/C、ActuationWorker/DO、HardwareWorker/AI 与 FlowWorker/serial 的其余收敛顺序由 `SafeStopPlan` 明确定义；关键回执失败或状态不确定时进入 `RECOVERY_REQUIRED`。DO owner 未交还时禁止跨线程复用旧 task 做兜底写入。
 - RealHAL 按 device/port 建立持久 DO task，deadline 路径只更新端口状态向量并调用 on-demand `Task.write(auto_start=False)`；最终资源分组及 `<20ms` 性能仍必须由真实 Windows/NI HIL 证据确认。
+
+### 执行域隔离
+
+- Protocol、Manual、Maintenance 分别持有明确 lease、command identity/category、receipt 和生命周期。Protocol lease 是 Protocol context 的最强证据。
+- Protocol readiness 失效只在 Protocol lease、active Protocol executor state、当前 NORMAL command identity 或 Protocol safe-transition identity 存在时触发 Protocol invalidation。
+- 文档已加载、非零 epoch、普通 flow ready、任意非 idle lease、active valve 或 possibly-open 状态都不是充分的 Protocol ownership 证据。Manual/Maintenance 的对应状态不得污染 Protocol epoch、blocked event 或 background safe stop。
+- 正常 Manual completion 严格按目标 close receipts → A=0 receipt → selector compensation receipt → 恢复既定供气 receipt → COMPLETED → 精确释放 MANUAL lease；异常 `SafeStopPlan` 是独立 fail-closed 路径，不与正常链混写。
 
 ### HAL 硬件抽象
 
@@ -78,7 +85,7 @@ tests/                 # 自动化测试
 
 ### 协议与数据
 
-协议文件解析、TTL 和呼吸门控能力已由 Epic 3 建立；当前产品 UI 不暴露呼吸传感器操作入口，自动实验也属于后续范围，但既有底层能力和证据不回滚。后续变更仍以 `docs/sprint-artifacts/sprint-status.yaml` 为状态依据。相关模块包括：
+协议文件解析、TTL 和呼吸门控底层能力继续保留；当前产品 UI 不暴露这些入口，既有底层契约和证据不得因入口收敛而回滚。相关模块包括：
 
 - 协议模型：保存 trial、timing、valve、trigger、metadata。
 - 协议解析服务：负责 `.txt`、`.csv` 解析和错误定位。
@@ -102,7 +109,7 @@ tests/                 # 自动化测试
 
 本机真实硬件、端口和校准参数通过 `config/local_config.json` 覆盖默认配置。该文件不提交到 Git；仓库只提交 `config/local_config.example.json` 作为模板。运行时按“默认配置 + 本机覆盖”的顺序合并，嵌套字典递归合并，因此本机可以只覆盖 `serial_port`、`ni_devices`、`ai0_channel`、`hal_mode`、校准值等差异项。
 
-当前实验台的 NI 生产基线为两台 USB-6001：`Dev1` 与 `Dev2`。现场未安装 USB-6501，`Dev3` 不属于当前启动自检或 Story 3.5 HIL 的必需设备。硬件清单以设备铭牌与 NI MAX/NI-DAQmx 在线枚举共同确认；若日后新增扩展设备，只在对应电脑的本机覆盖配置中显式登记，不据此改变既有阀门映射。
+当前实验台的 NI 生产基线为两台 USB-6001：`Dev1` 与 `Dev2`。现场未安装 USB-6501，`Dev3` 不属于当前启动自检或生产 HIL 的必需设备。硬件清单以设备铭牌与 NI MAX/NI-DAQmx 在线枚举共同确认；若日后新增扩展设备，只在对应电脑的本机覆盖配置中显式登记，不据此改变既有阀门映射。
 
 硬件方案使用 versioned `HardwareProfile` 表达机外气口、内部控制阀位、NI target、显示名称、启用状态、极性和验证指纹。机外气口固定为 1–20；当前初始化映射为机外 2/4/6/8/12/14/16/18 对应内部阀位 2–9，三通选择阀单独建模。通用项目约定优先放入 `default_config.json`；只与某台电脑或某次现场校准有关的值放入本机覆盖配置。硬件配置必须经过 schema/交叉校验、同目录原子替换和显式回滚，不能存入 View 私有状态或 QSettings。
 
@@ -115,24 +122,24 @@ tests/                 # 自动化测试
 
 真实硬件验证结果应记录到 sprint artifact 或专门的测试记录中，不应替代自动化测试。
 
-## 7. Epic 4 当前技术边界
+## 7. 当前执行不变量
 
-2026-07-31 的 Epic 4 冻结文档保留为历史证据，但其中“master valve / 21-target 全关”语义已被 2026-08-17 批准的 Correct Course 取代。当前只实施 Story 4.5 和 Story 4.6。
+历史 Epic/Story 决策保存在 `docs/archive/`，不作为当前状态源。以下是从已验收实现中保留的长期不变量。
 
-### Story 4.5：SafeStopPlan
+### SafeStopPlan
 
 - `Dev2/P1.0` 使用 selector 专用模型，不占用气味气口或普通阀身份。
 - 全局停止、故障停止和 shutdown 共享同一 `SafeStopPlan`；A 清零 receipt 是 selector 切换的硬前置条件。
 - stale/late/conflicting receipt 不推进步骤；失败、超时或不确定状态进入 `RECOVERY_REQUIRED`。
 - 保留现有 owner、lease、epoch、receipt、紧急队列和 handoff，不重写 HAL/Worker 拓扑。
 
-### Story 4.6：手动实验执行纵切片
+### 手动实验执行纵切片
 
 - 使用 Intent → Command → Receipt → immutable Snapshot。View 只保留未提交 draft 和即时视觉反馈，不直接访问 HAL、不持有硬件状态。
 - `FlowSetpoints` 校验 `0 ≤ A ≤ T` 并派生 `B=T-A`；`ChannelRegistry` 负责机外气口 ↔ 内部阀位 ↔ NI target。
 - 手动供气和刺激阶段由 ActuationWorker/协调器持有。刺激持续时间从全部目标成功 open receipt 的共同就绪时刻起算，由 monotonic deadline 自动关闭；UI `QTimer` 只刷新倒计时。
 - 未来自动实验只能生成相同的 typed phase plan，复用 ActuationWorker、FlowWorker、HAL、lease、epoch 和 receipt，不能模拟 UI 点击。
-- 新 QFluentWidgets 手动实验 UI 复用该执行纵切片；正式 runtime 不再构造 `PreTestView`。legacy 源码暂留给 Controller 回归测试，确认新界面后再做源码级清理。
+- QFluentWidgets 手动实验 UI 复用该执行纵切片；正式 runtime 不构造 legacy View。
 
 ### 配置、清洗与验证
 

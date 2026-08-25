@@ -18,7 +18,7 @@ OlfactoryPilot-CN 是 Windows 桌面嗅觉刺激实验控制软件，目标是�
 OlfactoryPilot-CN/
   app/                    # 应用主代码
   config/                 # 通用默认配置和本机配置模板
-  docs/                   # 项目文档、需求、架构、UX、story 和参考资料
+  docs/                   # 当前权威、状态、证据、活动工件与历史归档
   scripts/                # 工程脚本和辅助工具
   tests/                  # 自动化测试
   .github/workflows/      # GitHub Actions 持续集成配置
@@ -32,7 +32,7 @@ OlfactoryPilot-CN/
 
 - 业务代码只放在 `app/`。
 - 可配置参数放在 `config/`，不要硬编码在 UI 或控制器里。
-- 长期文档、需求、story、验证记录放在 `docs/`。
+- 当前权威、活动工件、状态、证据和历史资料按 `docs/index.md` 的层级放置。
 - 可复用脚本放在 `scripts/`。
 - 自动化测试放在 `tests/`。
 - 临时文件不要长期保留在根目录或 `tmp/`。
@@ -58,7 +58,7 @@ app/
 - `app/services/`：服务层，包含 HAL、硬件自检、安全联锁、阀门、流量、校准等业务逻辑。
 - `app/workers/`：后台线程层，负责硬件轮询、状态推送和低抖动执行。
 
-Story 3.5 的会话记录文件：
+会话记录文件：
 
 - `app/models/session.py`：不可变 session descriptor/path/envelope/fence、受控状态机和文件页 snapshot。
 - `app/services/session_file_service.py`：Windows 命名、staging bundle 预留、ownership marker、可取消的流式 manifest/bundle 验证和 recovery quarantine。
@@ -80,7 +80,7 @@ Story 3.5 的会话记录文件：
 - `config/local_config.example.json`：提交到 Git，作为真实硬件电脑的本机覆盖配置模板。
 - `config/local_config.json`：不提交到 Git，用于保存某台电脑自己的真实 COM 端口、NI 设备名、Alicat 配置和现场校准值。
 
-应用启动时按“默认配置 + 本机覆盖”的顺序合并配置。后续如果做“选项”页面，现场或个人机器特有的值应写入本机覆盖配置，通用项目约定才进入 `default_config.json`。
+应用启动时按“默认配置 + 本机覆盖”的顺序合并配置。现场或个人机器特有的值写入本机覆盖配置，通用项目约定才进入 `default_config.json`；这条边界不依赖未来页面设计。
 
 ## 5. docs 目录
 
@@ -90,16 +90,17 @@ Story 3.5 的会话记录文件：
 - `docs/prd.md`：产品需求文档，说明软件要做什么。
 - `docs/architecture.md`：架构文档，说明软件如何组织。
 - `docs/ux-design.md`：UX 设计说明，说明界面结构和交互规则。
-- `docs/epics.md`：Epic 和 Story 拆分。
+- `docs/epics.md`：产品拆分历史与需求映射，不维护当前进度。
 - `docs/index.md`：项目文档索引与归档入口。
-- `docs/archive/FeatureList-legacy.md`：已停止维护的历史功能清单快照。
+- `docs/archive/`：不再维护但需审计的旧 Story、评审、复盘、规划状态和历史资料。
 - `docs/project-structure.md`：本文档。
-- `docs/bmm-workflow-status.yaml`：BMAD 规划阶段状态。
-- `docs/sprint-artifacts/`：开发 story、sprint 状态、回顾、验证报告。
+- `docs/sprint-artifacts/sprint-status.yaml`：唯一动态 Epic/Story 状态源。
+- `docs/sprint-artifacts/spec-*.md`：活动 execution spec；已完成工件转入归档。
+- `docs/sprint-artifacts/evidence/`：安全、HIL、极性和发布证据。
 - `docs/ALICAT-MANUAL.md`：Alicat 相关说明。
 - `docs/ManuelUtilisation_ProgOlfacto.pdf`：原法国软件说明书。
 
-项目文档默认使用简体中文。历史 sprint artifact 中如果包含旧英文或旧事实，应优先在后续相关 story 更新时修正；主线文档必须保持当前准确。
+项目文档默认使用简体中文。历史资料不原地改写结论；当前权威文档必须保持准确，并在必要时显式指出被取代的历史假设。
 
 ## 6. scripts 目录
 
@@ -131,7 +132,7 @@ Story 3.5 的会话记录文件：
 python -m pytest
 ```
 
-测试的意义是防止后续开发破坏 Epic 1–3 已建立的硬件安全、校准、协议执行和 session 记录能力，并允许无真实硬件的 CI 环境验证核心逻辑。真实 NI 时序结论仍须由 HIL Gate 证明。
+测试用于防止后续开发破坏硬件安全、执行域隔离、校准、协议执行和 session 记录能力，并允许无真实硬件的 CI 环境验证核心逻辑。真实 NI 时序结论仍须由 HIL Gate 证明。
 
 ## 8. requirements.txt 与 requirements-dev.txt
 
@@ -238,7 +239,7 @@ python -m PyInstaller pyinstaller.spec
 
 - `docs/sprint-artifacts/sprint-status.yaml`
 
-其他主线文档不重复写具体进度或“下一 story”，避免状态在多个位置漂移。需要判断下一步开发任务时，先读取 sprint 状态文件，再查看对应 `docs/sprint-artifacts/` story。
+其他主线文档不重复写具体进度或推荐实施顺序，避免状态在多个位置漂移。需要判断当前工作时，先读取 sprint 状态文件，再查看它指向的活动工件。
 
 ## 12. 新增文件放置规则
 
@@ -269,13 +270,8 @@ python -m ruff check .
 python -m PyInstaller pyinstaller.spec
 ```
 
-## 14. 推荐下一步 BMAD 流程
+## 14. 文档维护门禁
 
-建议每个 BMAD 技能使用新的对话窗口，以减少旧上下文干扰。
-
-1. 使用 `docs/sprint-artifacts/sprint-status.yaml` 或 `bmad-sprint-status` 确认 sprint 状态。
-2. 若上一 Epic 复盘要求修改下一 Epic 的边界，先运行 `bmad-correct-course`，再创建下一条 story。
-3. 使用 `bmad-create-story` 创建并校验 story；随后在新窗口使用 `bmad-dev-story` 实施。
-4. 开发前阅读对应 story、`docs/architecture.md`、`docs/project-context.md` 和相关测试。
-
-每次准备新开窗口前，应让当前窗口更新“下一步应该找哪个智能体、要说什么、目的是什么”的说明。
+- 当前事实只写入权威层；动态进度只写入 `sprint-status.yaml`。
+- 旧 Story、评审和复盘完成后转入 `docs/archive/`，不要继续占用活动工件目录。
+- 安全/HIL/极性/发布证据保留在 evidence 层。删除任何资料前先做全仓引用与独有事实检查；不确定时归档而不是删除。

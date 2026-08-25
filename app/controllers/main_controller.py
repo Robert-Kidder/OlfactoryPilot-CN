@@ -4016,7 +4016,7 @@ class MainController(QObject):
             if self.view:
                 self.view.update_gating_state(last_transition.state)
             for transition in result.transitions:
-                self._breath_logger.info(
+                self._breath_logger.debug(
                     {
                         "event": "threshold_cross",
                         "ts": transition.timestamp,

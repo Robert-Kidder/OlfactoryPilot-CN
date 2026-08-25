@@ -22,7 +22,10 @@ try {
     }
 
     function Invoke-Build {
-        python -m PyInstaller pyinstaller.spec
+        python -m PyInstaller --noconfirm pyinstaller.spec
+        if ($LASTEXITCODE -ne 0) {
+            throw "PyInstaller build failed with exit code $LASTEXITCODE"
+        }
         $files = Get-ChildItem -Path "$repoRoot/dist" -Recurse | Where-Object { -not $_.PSIsContainer }
         $files | Select-Object FullName, Length | Sort-Object Length -Descending | Select-Object -First 5
         $exe = $files | Where-Object { $_.Extension -eq ".exe" } | Select-Object -First 1
