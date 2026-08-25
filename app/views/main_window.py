@@ -49,6 +49,9 @@ class MainWindow(FluentWindow):
         super().__init__()
         self.controller = controller
         self.state = state
+        self._last_safety_notice_state = "SAFE"
+        self._last_safety_notice_connected = False
+        self._safety_transition_sequence = 0
         self.setWindowTitle(state.window_title)
         self.setMinimumSize(1180, 720)
         self.resize(1360, 820)
@@ -121,6 +124,13 @@ class MainWindow(FluentWindow):
 
         self._connection_badge = InfoBadge.error("设备未连接", parent=header)
         self._connection_badge.setAccessibleName("设备连接状态")
+        self._safety_reason_label = CaptionLabel("安全状态：SAFE", header)
+        self._safety_reason_label.setMaximumWidth(300)
+        self._safety_reason_label.setWordWrap(True)
+        self._safety_badge = InfoBadge.success("SAFE", parent=header)
+        self._safety_badge.setAccessibleName("气流安全状态")
+        header_layout.addWidget(self._safety_reason_label)
+        header_layout.addWidget(self._safety_badge, 0, Qt.AlignmentFlag.AlignVCenter)
         header_layout.addWidget(self._connection_badge, 0, Qt.AlignmentFlag.AlignVCenter)
         header_layout.addWidget(self._connect_button)
         header_layout.addWidget(self._stop_button)
@@ -190,36 +200,69 @@ class MainWindow(FluentWindow):
             if connected and telemetry.safety_state == "SAFE"
             else InfoLevel.ERROR
         )
-        if telemetry.safety_state == "LOW_FLOW":
+        current_state = telemetry.safety_state if connected else "DATA_STALE"
+        reason = user_facing_text(telemetry.safety_reason).strip()
+        if not connected and not reason:
+            reason = "设备未连接"
+        self.manual_experiment_view.set_persistent_safety_state(
+            current_state
+        )
+        self._safety_badge.setText(current_state)
+        self._safety_badge.setLevel(
+            InfoLevel.SUCCESS if current_state == "SAFE" else InfoLevel.ERROR
+        )
+        self._safety_reason_label.setText(
+            f"安全状态：{current_state}"
+            + (f" · {reason}" if reason else "")
+        )
+
+        previous_state = self._last_safety_notice_state
+        entered_connected_abnormal = bool(
+            connected
+            and not self._last_safety_notice_connected
+            and current_state != "SAFE"
+        )
+        self._last_safety_notice_connected = connected
+        if current_state == previous_state and not entered_connected_abnormal:
+            return
+        self._last_safety_notice_state = current_state
+        self._safety_transition_sequence += 1
+        transition_key = (
+            "safety",
+            self._safety_transition_sequence,
+            previous_state,
+            current_state,
+        )
+        if current_state == "LOW_FLOW":
             self.manual_experiment_view.show_notice(
                 "气流不足",
                 "已停止相关操作，请检查供气、管路和流量设置。",
                 severity="error",
+                notice_key=transition_key,
             )
-        elif telemetry.safety_state == "DATA_STALE" and connected:
+        elif current_state == "DATA_STALE" and connected:
             self.manual_experiment_view.show_notice(
                 "设备数据中断",
                 "请检查设备连接和通信线路。",
                 severity="error",
+                notice_key=transition_key,
             )
-        elif connected and telemetry.safety_state != "SAFE":
-            detail = user_facing_text(telemetry.safety_reason)
+        elif connected and current_state != "SAFE":
             self.manual_experiment_view.show_notice(
                 "当前状态不允许操作",
-                detail or "请检查设备状态，确认正常后再继续。",
+                reason or "请检查设备状态，确认正常后再继续。",
                 severity="error",
+                notice_key=transition_key,
             )
-        elif self.manual_experiment_view.current_notice_title in {
-            "气流不足",
-            "设备数据中断",
-            "当前状态不允许操作",
-        }:
-            self.manual_experiment_view.clear_notice()
+        elif current_state == "SAFE":
+            self.manual_experiment_view.clear_safety_notice()
 
     def update_status(self, message: str) -> None:
         friendly = user_facing_text(message)
         self._status_label.setText(friendly)
         if not friendly or any(term in friendly for term in _INTERNAL_UI_TERMS):
+            return
+        if self.state.telemetry.connected and self.state.telemetry.safety_state != "SAFE":
             return
         severity = "error" if self.manual_experiment_view._is_actionable_notice("", friendly) else "info"
         if (

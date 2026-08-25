@@ -67,6 +67,14 @@ def test_mock_controller_runs_manual_owner_and_releases_matching_lease(tmp_path,
     controller, clock = _controller(tmp_path)
 
     assert controller.handle_manual_release_requested(_intent())
+    assert controller.actuation_worker.manual_snapshot.status is ManualExperimentStatus.FLOW_PENDING
+    controller.actuation_interlock.publish_airflow(
+        airflow=250.0,
+        timestamp=time.time(),
+        hardware_state="SAFE",
+    )
+    controller.actuation_worker.post_interlock_changed(timestamp=time.time())
+    controller._drain_actuation_if_not_running()
     assert controller.actuation_worker.manual_snapshot.status is ManualExperimentStatus.STIMULATING
     assert controller.device_lease.snapshot.kind is DeviceLeaseKind.MANUAL
     assert not controller.handle_manual_release_requested(_intent())

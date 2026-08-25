@@ -22,7 +22,7 @@ from app.services.hal import AnalogInputFrame
 from app.services.mock_hal import MockHAL
 from app.services.ttl_trigger_service import TtlPulse
 from app.workers import HardwareWorker
-from app.workers.session_writer import SessionWriterWorker
+from app.workers.session_writer import SessionWriterFailure, SessionWriterWorker
 
 
 def _document(mode: TriggerMode = TriggerMode.MANUAL) -> ProtocolDocument:
@@ -739,6 +739,40 @@ def test_stale_finalizer_cannot_overwrite_new_generation_state(
     assert controller._session_finalize_result is None
     assert not controller._session_finalize_event.is_set()
     assert controller.actuation_interlock.read()[1].recording_ready
+    assert controller.handle_session_end_requested("cleanup")
+    assert controller.wait_for_session_finalization(2.0).complete
+
+
+def test_stale_writer_failure_cannot_poison_new_generation(
+    tmp_path: Path,
+) -> None:
+    controller = _controller()
+    assert controller.handle_session_start_requested("S01", "A", tmp_path)
+    first_descriptor = controller.session_state.descriptor
+    assert first_descriptor is not None
+    assert controller.handle_session_end_requested("first")
+    assert controller.wait_for_session_finalization(2.0).complete
+
+    assert controller.handle_session_start_requested("S02", "B", tmp_path)
+    second_descriptor = controller.session_state.descriptor
+    assert second_descriptor is not None
+    controller._wake_actuation_for_recorder_failure(
+        SessionWriterFailure(
+            session_id=first_descriptor.session_id,
+            session_generation=first_descriptor.generation,
+            stage="late-old-writer",
+            path="old.jsonl",
+            message="late old writer failure",
+            timestamp="2026-08-25T00:00:00+08:00",
+        )
+    )
+    controller._drain_actuation_if_not_running()
+
+    snapshot = controller.actuation_interlock.read()[1]
+    assert controller.session_state.status == SessionStatus.RECORDING
+    assert snapshot.recorder_generation == second_descriptor.generation
+    assert snapshot.recording_ready
+    assert not snapshot.recorder_failed
     assert controller.handle_session_end_requested("cleanup")
     assert controller.wait_for_session_finalization(2.0).complete
 

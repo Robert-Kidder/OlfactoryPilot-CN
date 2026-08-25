@@ -78,7 +78,11 @@ class InterlockSnapshot:
     connected: bool = False
     hardware_ready: bool = False
     flow_setpoints_ready: bool = False
+    airflow_armed: bool = False
+    airflow_fresh_after_arm: bool = False
+    airflow_sample_timestamp: float = 0.0
     safety_state: str = "UNKNOWN"
+    safety_reason: str = ""
     ttl_input_ready: bool = False
     has_protocol: bool = False
     device_lease: str = "idle"
@@ -94,6 +98,8 @@ class InterlockSnapshot:
             return "硬件自检状态已失效，已取消阀门动作。"
         if not self.flow_setpoints_ready:
             return "MFC 流量 readiness 已失效，已取消阀门动作。"
+        if self.airflow_armed and not self.airflow_fresh_after_arm:
+            return "供气已确认，正在等待新的气流遥测，已取消阀门动作。"
         if self.safety_state != "SAFE":
             return f"安全状态为 {self.safety_state}，已取消阀门动作。"
         return ""
@@ -174,6 +180,65 @@ class ActuationInterlockIngress:
         self._unsafe_latched = bool(self._snapshot.unsafe_reason())
         self._safety_manager = safety_manager or SafetyManager()
 
+    def arm_airflow_monitor(self) -> int:
+        """供气回执确认后布防；危险动作必须等待布防后的新鲜 SAFE 样本。"""
+        with self._lock:
+            candidate = replace(
+                self._snapshot,
+                flow_setpoints_ready=True,
+                airflow_armed=True,
+                airflow_fresh_after_arm=False,
+            )
+            if candidate != self._snapshot:
+                self._snapshot = candidate
+                self._generation += 1
+            if candidate.unsafe_reason():
+                self._unsafe_latched = True
+            return self._generation
+
+    def disarm_airflow_monitor(self, *, flow_setpoints_ready: bool = False) -> int:
+        """startup/final zero 后撤防；合法零流量保持 idle/SAFE。"""
+        with self._lock:
+            candidate = replace(
+                self._snapshot,
+                flow_setpoints_ready=bool(flow_setpoints_ready),
+                airflow_armed=False,
+                airflow_fresh_after_arm=False,
+            )
+            if candidate != self._snapshot:
+                self._snapshot = candidate
+                self._generation += 1
+            if candidate.unsafe_reason():
+                self._unsafe_latched = True
+            return self._generation
+
+    def _evaluate_application_safety(
+        self,
+        *,
+        airflow: float,
+        timestamp: float,
+        hardware_state: str | None,
+    ):
+        from app.models import SafetyState
+
+        previous = None
+        if self._snapshot.airflow_sample_timestamp > 0:
+            previous = SafetyState(
+                state=self._snapshot.safety_state,
+                airflow=0.0,
+                threshold=self._safety_manager.low_flow_threshold,
+                updated_at=self._snapshot.airflow_sample_timestamp,
+                reason=self._snapshot.safety_reason,
+            )
+
+        return self._safety_manager.evaluate_application_state(
+            airflow=airflow,
+            timestamp=timestamp,
+            armed=self._snapshot.airflow_armed,
+            previous=previous,
+            hardware_state=hardware_state,
+        )
+
     def publish(self, snapshot: InterlockSnapshot) -> int:
         with self._lock:
             if snapshot != self._snapshot:
@@ -207,10 +272,12 @@ class ActuationInterlockIngress:
         device_lease: str,
     ) -> int:
         with self._lock:
-            safety_state = self._safety_manager.evaluate(
-                airflow,
+            if timestamp < self._snapshot.airflow_sample_timestamp:
+                return self._generation
+            is_new_sample = timestamp > self._snapshot.airflow_sample_timestamp
+            safety_state = self._evaluate_application_safety(
+                airflow=airflow,
                 timestamp=timestamp,
-                previous_state=self._snapshot.safety_state,
                 hardware_state=hardware_state,
             )
             candidate = replace(
@@ -221,7 +288,13 @@ class ActuationInterlockIngress:
                 # their latest values even if the telemetry caller read an
                 # older snapshot before entering this atomic publication.
                 flow_setpoints_ready=self._snapshot.flow_setpoints_ready,
-                safety_state=safety_state,
+                airflow_fresh_after_arm=bool(
+                    self._snapshot.airflow_fresh_after_arm
+                    or (self._snapshot.airflow_armed and is_new_sample)
+                ),
+                airflow_sample_timestamp=timestamp,
+                safety_state=safety_state.state,
+                safety_reason=safety_state.reason,
                 ttl_input_ready=bool(ttl_input_ready),
                 has_protocol=self._snapshot.has_protocol,
                 device_lease=self._snapshot.device_lease,
@@ -242,13 +315,24 @@ class ActuationInterlockIngress:
     ) -> int:
         """Atomically update only airflow-derived safety, preserving other owners."""
         with self._lock:
-            safety_state = self._safety_manager.evaluate(
-                airflow,
+            if timestamp < self._snapshot.airflow_sample_timestamp:
+                return self._generation
+            is_new_sample = timestamp > self._snapshot.airflow_sample_timestamp
+            safety_state = self._evaluate_application_safety(
+                airflow=airflow,
                 timestamp=timestamp,
-                previous_state=self._snapshot.safety_state,
                 hardware_state=hardware_state,
             )
-            candidate = replace(self._snapshot, safety_state=safety_state)
+            candidate = replace(
+                self._snapshot,
+                airflow_fresh_after_arm=bool(
+                    self._snapshot.airflow_fresh_after_arm
+                    or (self._snapshot.airflow_armed and is_new_sample)
+                ),
+                airflow_sample_timestamp=timestamp,
+                safety_state=safety_state.state,
+                safety_reason=safety_state.reason,
+            )
             if candidate != self._snapshot:
                 self._snapshot = candidate
                 self._generation += 1
@@ -274,7 +358,11 @@ class ActuationInterlockIngress:
                 or self._snapshot.recorder_generation != int(generation)
             ):
                 return False
-            if self._snapshot.unsafe_reason():
+            if (
+                not self._snapshot.connected
+                or not self._snapshot.hardware_ready
+                or self._snapshot.safety_state != "SAFE"
+            ):
                 return False
             self._snapshot = replace(self._snapshot, recorder_failed=False)
             self._generation += 1
@@ -442,6 +530,7 @@ class ActuationWorker(QThread):
         self._manual_pending_flow_role = ""
         self._manual_flow_result: FlowCommandResult | None = None
         self._manual_flow_deadline_ns: int | None = None
+        self._manual_waiting_for_safe_flow = False
         self._manual_start_pending = False
 
     def set_session_recorder(self, recorder) -> bool:
@@ -664,12 +753,28 @@ class ActuationWorker(QThread):
                     ack.set()
         return bool(result.get("accepted"))
 
-    def post_recorder_failed(self, message: str) -> None:
+    def post_recorder_failed(
+        self,
+        message: str,
+        *,
+        generation: int | None = None,
+    ) -> None:
         with self._condition:
+            if (
+                generation is not None
+                and int(generation) != self._session_recorder_generation
+            ):
+                return
             if self._recorder_failure_notified:
                 return
             self._recorder_failure_notified = True
-        self._post_message("recorder_failed", {"message": str(message)})
+        self._post_message(
+            "recorder_failed",
+            {
+                "message": str(message),
+                "generation": None if generation is None else int(generation),
+            },
+        )
 
     def post_recorder_ready(
         self,
@@ -1692,6 +1797,7 @@ class ActuationWorker(QThread):
                     supply_restored=False,
                 )
             else:
+                self.interlock.disarm_airflow_monitor()
                 self._publish_manual(
                     supply_enabled=False,
                     supply_transitioning=False,
@@ -1757,6 +1863,7 @@ class ActuationWorker(QThread):
             if not commands:
                 self._submit_background_safe_stop_final_zero(plan)
             return
+        self.interlock.disarm_airflow_monitor()
         if plan.selector is None:
             plan.require_recovery("selector 配置不可用，A=0 后保持原路线并等待恢复。")
             self.protocol_state.quality_block_reason = (
@@ -2722,6 +2829,22 @@ class ActuationWorker(QThread):
                 self._fail_manual(payload.get("message", "输入 owner 已失效。"))
                 return
             if kind in {"interlock_changed", "readiness"}:
+                if self._manual_waiting_for_safe_flow:
+                    interlock = self.interlock.read()[1]
+                    if not interlock.connected or not interlock.hardware_ready:
+                        self._fail_manual(
+                            "供气确认后连接或硬件 readiness 丢失，已进入安全收敛。"
+                        )
+                    elif not interlock.airflow_fresh_after_arm:
+                        return
+                    elif interlock.safety_state != "SAFE":
+                        self._fail_manual(
+                            "供气布防后的新鲜气流状态为 "
+                            f"{interlock.safety_state}，已进入安全收敛。"
+                        )
+                    else:
+                        self._continue_manual_after_safe_flow()
+                    return
                 reason = self._manual_runtime_rejection_reason()
                 if reason:
                     self._fail_manual(reason)
@@ -2801,7 +2924,10 @@ class ActuationWorker(QThread):
             if kind in {"interlock_changed", "readiness"}:
                 _, interlock, _unsafe_latched = self.interlock.read()
                 if self._cleaning_phase == "flow_wait_safe":
-                    if interlock.safety_state == "SAFE":
+                    if (
+                        interlock.safety_state == "SAFE"
+                        and interlock.airflow_fresh_after_arm
+                    ):
                         unsafe = interlock.unsafe_reason()
                         if unsafe:
                             self._begin_cleaning_stop(
@@ -2824,12 +2950,16 @@ class ActuationWorker(QThread):
                         )
                         self._submit_cleaning_master(ActuationAction.OPEN)
                         return
-                    if (
-                        interlock.safety_state in {"LOW_FLOW", "DATA_STALE"}
-                        and interlock.connected
-                        and interlock.hardware_ready
-                        and interlock.flow_setpoints_ready
-                    ):
+                    if not interlock.airflow_fresh_after_arm:
+                        return
+                    if interlock.safety_state != "SAFE":
+                        self._begin_cleaning_stop(
+                            reason=(
+                                "供气布防后的新鲜气流状态为 "
+                                f"{interlock.safety_state}，已请求安全收敛。"
+                            ),
+                            aborted=False,
+                        )
                         return
                 unsafe = interlock.unsafe_reason()
                 if (
@@ -2896,6 +3026,12 @@ class ActuationWorker(QThread):
             return
         if kind == "recorder_failed":
             current = self.interlock.read()[1]
+            failure_generation = payload.get("generation")
+            if (
+                failure_generation is not None
+                and current.recorder_generation != int(failure_generation)
+            ):
+                return
             self.interlock.update(
                 recording_ready=False,
                 recorder_failed=True,
@@ -3083,7 +3219,11 @@ class ActuationWorker(QThread):
             for command in result.action_requests:
                 self.submit(command)
         elif kind == "readiness":
-            readiness = payload["readiness"]
+            # A queued wake-up may have captured readiness before a flow
+            # receipt armed the monitor.  Re-read the owner snapshot here so
+            # stale producer payloads cannot roll readiness backward and
+            # trigger a false convergence.
+            readiness = self._current_readiness()
             reason = readiness.rejection_reason(
                 has_protocol=bool(executor.state.document),
                 require_ttl=(
@@ -3096,7 +3236,14 @@ class ActuationWorker(QThread):
             convergence_required = bool(
                 interlock_snapshot.has_protocol
                 or interlock_snapshot.device_lease != "idle"
-                or interlock_snapshot.flow_setpoints_ready
+                or (
+                    interlock_snapshot.flow_setpoints_ready
+                    and (
+                        not interlock_snapshot.connected
+                        or not interlock_snapshot.hardware_ready
+                        or interlock_snapshot.safety_state != "SAFE"
+                    )
+                )
                 or self.protocol_state.active_valve is not None
                 or self.protocol_state.possibly_open_valves
             )
@@ -3803,8 +3950,9 @@ class ActuationWorker(QThread):
                 )
             return
         if self._cleaning_phase == "flow_start":
+            self.interlock.arm_airflow_monitor()
             _, interlock, _unsafe_latched = self.interlock.read()
-            if interlock.safety_state == "SAFE":
+            if interlock.safety_state == "SAFE" and interlock.airflow_fresh_after_arm:
                 if not self.interlock.clear_unsafe_latch():
                     self._begin_cleaning_stop(
                         reason="清洗流量回执成功，但安全锁存无法清除。",
@@ -3813,7 +3961,7 @@ class ActuationWorker(QThread):
                     return
                 self._cleaning_phase = "master_open"
                 self._submit_cleaning_master(ActuationAction.OPEN)
-            elif interlock.safety_state in {"LOW_FLOW", "DATA_STALE"}:
+            elif not interlock.airflow_fresh_after_arm:
                 self._cleaning_phase = "flow_wait_safe"
                 self._sequence += 1
                 heapq.heappush(
@@ -3841,6 +3989,7 @@ class ActuationWorker(QThread):
                 )
             return
         if self._cleaning_phase == "flow_zero":
+            self.interlock.disarm_airflow_monitor()
             self._publish_cleaning_snapshot(flow_zero_confirmed=True)
             self._cleaning_phase = "selector_safe"
             self._submit_cleaning_master(ActuationAction.CLOSE)
@@ -4566,6 +4715,7 @@ class ActuationWorker(QThread):
             return
         self._manual_flow_result = wrapped
         if role == "post_close_zero":
+            self.interlock.disarm_airflow_monitor()
             self._publish_manual(
                 status=ManualExperimentStatus.SELECTOR_COMPENSATION,
                 flow_zero_confirmed=True,
@@ -4575,6 +4725,7 @@ class ActuationWorker(QThread):
             self._submit_manual_selector_compensation()
             return
         if role == "restore_supply":
+            self.interlock.arm_airflow_monitor()
             self._publish_manual(
                 supply_restored=True,
                 supply_enabled=True,
@@ -4582,7 +4733,15 @@ class ActuationWorker(QThread):
             )
             self._complete_manual()
             return
-        self.interlock.update(flow_setpoints_ready=True)
+        self.interlock.arm_airflow_monitor()
+        self._manual_waiting_for_safe_flow = True
+        self._schedule_manual_receipt_timeout("flow_safe", ("airflow-safe",))
+
+    def _continue_manual_after_safe_flow(self) -> None:
+        plan = self._manual_plan
+        if plan is None or not self._manual_waiting_for_safe_flow:
+            return
+        self._manual_waiting_for_safe_flow = False
         if not self.interlock.clear_unsafe_latch():
             self._fail_manual("手动流量确认后安全锁存无法清除。")
             return
@@ -5034,6 +5193,8 @@ class ActuationWorker(QThread):
             return
         if phase in {"flow", "flow_zero", "restore_supply"}:
             pending = self._manual_pending_flow_id in command_ids
+        elif phase == "flow_safe":
+            pending = self._manual_waiting_for_safe_flow
         else:
             pending = any(command_id not in self._manual_receipts for command_id in command_ids)
         if pending:
@@ -5094,6 +5255,7 @@ class ActuationWorker(QThread):
         self._manual_pending_flow_command = None
         self._manual_pending_flow_role = ""
         self._manual_flow_deadline_ns = None
+        self._manual_waiting_for_safe_flow = False
         self._deadline_heap = [
             item
             for item in self._deadline_heap
@@ -5188,7 +5350,17 @@ class ActuationWorker(QThread):
             # current epoch's interlock or readiness.
             self.flow_result_ready.emit(replace(wrapped, stale=True))
             return
-        self.interlock.update(flow_setpoints_ready=bool(wrapped.result.success))
+        if wrapped.result.success:
+            if wrapped.command.mode in {
+                "zero",
+                "safe_stop_a_zero",
+                "manual_post_close_a_zero",
+            }:
+                self.interlock.disarm_airflow_monitor()
+            else:
+                self.interlock.arm_airflow_monitor()
+        else:
+            self.interlock.update(flow_setpoints_ready=False)
         if not wrapped.result.success:
             self.invalidate_execution(reason=wrapped.result.message)
         elif self.protocol_state.active_valve is None and not self.protocol_state.possibly_open_valves:

@@ -351,6 +351,7 @@ def test_worker_publishes_low_flow_to_actuation_before_ui_signal(qtbot) -> None:
             device_lease="protocol",
         )
     )
+    ingress.arm_airflow_monitor()
     events = []
 
     class Sink:

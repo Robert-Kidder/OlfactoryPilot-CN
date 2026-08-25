@@ -393,6 +393,28 @@ def test_plain_snapshot_detail_replaces_stale_notice(qtbot) -> None:
     assert view.detail_label.text() == "当前不可操作：请先连接设备。"
 
 
+def test_manual_recovery_replaces_transition_safety_notice(qtbot) -> None:
+    view = ManualExperimentView()
+    qtbot.addWidget(view)
+    view.set_persistent_safety_state("LOW_FLOW")
+    view.show_notice(
+        "气流不足",
+        "请检查供气。",
+        severity="error",
+        notice_key=("safety", 1, "SAFE", "LOW_FLOW"),
+    )
+
+    view.render_snapshot(
+        ManualExperimentSnapshot(
+            status=ManualExperimentStatus.RECOVERY_REQUIRED,
+            recovery_reason="关阀回执不确定，请人工检查。",
+        )
+    )
+
+    assert view.current_notice_title == "需要立即处理"
+    assert "关阀回执不确定" in view.detail_label.text()
+
+
 def test_one_second_snapshot_duration_is_not_silently_clamped(qtbot) -> None:
     view = ManualExperimentView()
     qtbot.addWidget(view)

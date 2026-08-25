@@ -1188,10 +1188,61 @@ def test_airflow_publish_preserves_other_producer_owned_interlock_fields() -> No
     ingress.publish_airflow(airflow=0.0, timestamp=10.0, hardware_state="SAFE")
     snapshot = ingress.read()[1]
 
-    assert snapshot.safety_state == "LOW_FLOW"
+    assert snapshot.safety_state == "SAFE"
+    assert snapshot.airflow_armed is False
     assert snapshot.flow_setpoints_ready is False
     assert snapshot.has_protocol is False
     assert snapshot.device_lease == "idle"
+
+
+def test_armed_airflow_requires_fresh_safe_sample_and_keeps_low_flow_fail_closed() -> None:
+    ingress = ActuationInterlockIngress(
+        _safe_snapshot(flow_setpoints_ready=False, device_lease="idle"),
+        safety_manager=SafetyManager(low_flow_threshold=0.2),
+    )
+
+    ingress.publish_airflow(airflow=0.0, timestamp=10.0, hardware_state="SAFE")
+    ingress.arm_airflow_monitor()
+    armed = ingress.read()[1]
+    assert armed.airflow_armed is True
+    assert armed.airflow_fresh_after_arm is False
+    assert "等待新的气流遥测" in armed.unsafe_reason()
+
+    ingress.publish_airflow(airflow=0.0, timestamp=10.1, hardware_state="SAFE")
+    low = ingress.read()[1]
+    assert low.airflow_fresh_after_arm is True
+    assert low.safety_state == "LOW_FLOW"
+    assert ingress.read()[2] is True
+
+
+def test_armed_airflow_rejects_cached_and_out_of_order_safe_samples() -> None:
+    ingress = ActuationInterlockIngress(
+        _safe_snapshot(flow_setpoints_ready=False, device_lease="idle"),
+        safety_manager=SafetyManager(low_flow_threshold=0.2),
+    )
+    ingress.publish_airflow(airflow=1.0, timestamp=10.0, hardware_state="SAFE")
+    ingress.arm_airflow_monitor()
+
+    ingress.publish_airflow(airflow=1.0, timestamp=10.0, hardware_state="SAFE")
+    assert ingress.read()[1].airflow_fresh_after_arm is False
+
+    ingress.publish_airflow(airflow=0.0, timestamp=10.1, hardware_state="SAFE")
+    ingress.publish_airflow(airflow=1.0, timestamp=9.9, hardware_state="SAFE")
+    snapshot = ingress.read()[1]
+    assert snapshot.airflow_fresh_after_arm is True
+    assert snapshot.airflow_sample_timestamp == 10.1
+    assert snapshot.safety_state == "LOW_FLOW"
+
+
+def test_disarmed_invalid_airflow_remains_fail_closed() -> None:
+    ingress = ActuationInterlockIngress(
+        _safe_snapshot(flow_setpoints_ready=False, device_lease="idle"),
+        safety_manager=SafetyManager(low_flow_threshold=0.2),
+    )
+
+    ingress.publish_airflow(airflow=float("nan"), timestamp=10.0)
+
+    assert ingress.read()[1].safety_state == "DATA_STALE"
 
 
 def test_worker_owns_deferred_executor_and_processes_ai_to_close_deadline() -> None:

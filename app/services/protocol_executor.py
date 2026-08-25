@@ -201,6 +201,15 @@ class ProtocolExecutor:
                 safety_state=readiness.safety_state,
                 message="触发来源无效，已拒绝该事件。",
             )
+        if self.state.status == ProtocolExecutionStatus.STOPPED:
+            return self._rejected(
+                "trigger_ignored",
+                now,
+                safety_state=readiness.safety_state,
+                trigger_source=trigger_source.value,
+                result="ignored",
+                message="当前不在等待触发状态，已忽略重复或过期触发。",
+            )
         reason = readiness.rejection_reason(
             has_protocol=bool(self.state.document and self.state.document.trials),
             require_ttl=trigger_source == TriggerMode.TTL,

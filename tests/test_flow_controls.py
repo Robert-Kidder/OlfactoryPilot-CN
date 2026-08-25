@@ -40,9 +40,11 @@ def _build_flow_context(low_flow_threshold: float = 0.2):
     return state, controller, window, hal
 
 
-def _wait_until(qt_app, predicate, timeout: float = 1.0) -> None:
+def _wait_until(qt_app, predicate, timeout: float = 1.0, on_poll=None) -> None:
     deadline = time.time() + timeout
     while time.time() < deadline:
+        if on_poll is not None:
+            on_poll()
         qt_app.processEvents()
         if predicate():
             return
@@ -164,7 +166,17 @@ def test_start_opens_staged_valves(qt_app):
     window.pretest_view._handle_click(1)
     window.pretest_view._toggle_manual_mode(True)
     window.pretest_view._handle_start_clicked(True)
-    _wait_until(qt_app, lambda: hal.get_line_state("Dev1/P0.0") is True)
+    _wait_until(
+        qt_app,
+        lambda: hal.get_line_state("Dev1/P0.0") is True,
+        on_poll=lambda: controller.handle_telemetry(
+            {
+                "airflow": 1.0,
+                "connected": True,
+                "timestamp": controller.state.telemetry.timestamp + 0.1,
+            }
+        ),
+    )
 
     assert hal.flow_commands[:3] == [
         ("B", 1000.0, False),
@@ -194,6 +206,11 @@ def test_start_returns_immediately_with_slow_flow_hardware(qt_app):
     worker._connected = True
     worker.consume_airflow_sample(1.0, 1.0, None)
     controller.handle_telemetry({"airflow": 1.0, "connected": True, "timestamp": 1.0})
+    controller.actuation_interlock.update(
+        connected=True,
+        hardware_ready=True,
+        safety_state="SAFE",
+    )
 
     window.pretest_view._handle_click(1)
     window.pretest_view._toggle_manual_mode(True)
@@ -203,9 +220,88 @@ def test_start_returns_immediately_with_slow_flow_hardware(qt_app):
 
     assert elapsed < 0.05
     assert controller._pretest_sequence_in_progress is True
-    _wait_until(qt_app, lambda: hal.get_line_state("Dev1/P0.0") is True, timeout=1.5)
+    sample_timestamp = [1.0]
+
+    def publish_new_flow_sample() -> None:
+        sample_timestamp[0] += 0.1
+        timestamp = sample_timestamp[0]
+        controller.actuation_interlock.publish_airflow(
+            airflow=1.0,
+            timestamp=timestamp,
+            hardware_state="SAFE",
+        )
+        controller.actuation_worker.post_interlock_changed(timestamp=timestamp)
+        controller.handle_protocol_executor_tick()
+
+    _wait_until(
+        qt_app,
+        lambda: hal.get_line_state("Dev1/P0.0") is True,
+        timeout=1.5,
+        on_poll=publish_new_flow_sample,
+    )
     assert controller.actuation_worker.shutdown(1000)
     assert controller.flow_worker.shutdown(1000)
+
+
+def test_pretest_fresh_low_flow_never_opens_valves(qt_app) -> None:
+    _, controller, window, hal = _build_flow_context(low_flow_threshold=0.2)
+    controller.handle_telemetry({"airflow": 1.0, "connected": True, "timestamp": 1.0})
+    window.pretest_view._handle_click(1)
+    window.pretest_view._toggle_manual_mode(True)
+    window.pretest_view._handle_start_clicked(True)
+    _wait_until(qt_app, lambda: controller._pending_pretest_flow is not None)
+
+    controller.actuation_interlock.publish_airflow(
+        airflow=0.0,
+        timestamp=2.0,
+        hardware_state="SAFE",
+    )
+    controller.handle_protocol_executor_tick()
+    qt_app.processEvents()
+
+    assert controller._pending_pretest_flow is None
+    assert controller._pretest_sequence_in_progress is False
+    assert hal.get_line_state("Dev1/P0.0") is not True
+    assert hal.get_line_state("Dev2/P1.0") is not True
+    assert "LOW_FLOW" in window.pretest_view._flow_message_label.text()
+
+
+def test_pretest_fresh_flow_timeout_finishes_pending_ui(qt_app) -> None:
+    _, controller, window, hal = _build_flow_context(low_flow_threshold=0.2)
+    controller.config.setdefault("cleaning", {})["flow_ready_timeout_ms"] = 1
+    controller.handle_telemetry({"airflow": 1.0, "connected": True, "timestamp": 1.0})
+    window.pretest_view._handle_click(1)
+    window.pretest_view._toggle_manual_mode(True)
+    window.pretest_view._handle_start_clicked(True)
+    _wait_until(qt_app, lambda: controller._pending_pretest_flow is not None)
+
+    controller._pretest_flow_ready_deadline = time.monotonic() - 0.001
+    controller.handle_protocol_executor_tick()
+    qt_app.processEvents()
+
+    assert controller._pending_pretest_flow is None
+    assert controller._pretest_sequence_in_progress is False
+    assert window.pretest_view.is_apply_enabled()
+    assert hal.get_line_state("Dev1/P0.0") is not True
+    assert hal.get_line_state("Dev2/P1.0") is not True
+    assert "未在时限内" in window.pretest_view._flow_message_label.text()
+
+
+def test_global_stop_cancels_pending_pretest_and_finishes_ui(qt_app) -> None:
+    _, controller, window, _hal = _build_flow_context(low_flow_threshold=0.2)
+    controller.handle_telemetry({"airflow": 1.0, "connected": True, "timestamp": 1.0})
+    window.pretest_view._handle_click(1)
+    window.pretest_view._toggle_manual_mode(True)
+    window.pretest_view._handle_start_clicked(True)
+    _wait_until(qt_app, lambda: controller._pending_pretest_flow is not None)
+
+    controller._prepare_session_for_global_stop("test-stop")
+    qt_app.processEvents()
+
+    assert controller._pending_pretest_flow is None
+    assert controller._pretest_sequence_in_progress is False
+    assert window.pretest_view.is_apply_enabled()
+    assert "全局停止" in window.pretest_view._flow_message_label.text()
 
 
 def test_start_does_not_open_valves_when_flow_setpoint_fails(qt_app):
@@ -262,7 +358,17 @@ def test_finish_closes_valve_but_keeps_channel_selected(qt_app):
     window.pretest_view._handle_click(1)
     window.pretest_view._toggle_manual_mode(True)
     window.pretest_view._handle_start_clicked(True)
-    _wait_until(qt_app, lambda: hal.get_line_state("Dev1/P0.0") is True)
+    _wait_until(
+        qt_app,
+        lambda: hal.get_line_state("Dev1/P0.0") is True,
+        on_poll=lambda: controller.handle_telemetry(
+            {
+                "airflow": 1.0,
+                "connected": True,
+                "timestamp": controller.state.telemetry.timestamp + 0.1,
+            }
+        ),
+    )
     window.pretest_view._finish_delivery()
     _wait_until(qt_app, lambda: hal.get_line_state("Dev1/P0.0") is False)
 

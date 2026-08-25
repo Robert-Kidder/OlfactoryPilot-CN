@@ -263,11 +263,14 @@ class MainController(QObject):
         self._has_seen_connection = False
         self._connect_in_progress = False
         self._pretest_sequence_in_progress = False
+        self._pending_pretest_flow: tuple[str, list[int], FlowApplyResult] | None = None
+        self._pretest_flow_ready_deadline = 0.0
         self._actuation_request_sequence = 0
         self._pending_plan_ui: dict[str, dict] = {}
         self._pending_flow_context: dict[str, dict] = {}
         self._last_flow_result: FlowApplyResult | None = None
         self._startup_zero_confirmed = False
+        self._telemetry_terminal_stopped = False
         self._pending_protocol_load = None
         self._last_document_load_success: bool | None = None
         self._protocol_lease_epoch: int | None = None
@@ -655,6 +658,19 @@ class MainController(QObject):
         )
 
     def _prepare_session_for_global_stop(self, reason: str) -> bool:
+        pending_pretest = self._pending_pretest_flow
+        self._pending_pretest_flow = None
+        if pending_pretest is not None:
+            mode, channels, result = pending_pretest
+            self._pretest_sequence_completed.emit(
+                mode,
+                channels,
+                result,
+                False,
+                "全局停止已取消等待气流确认的预检序列，阀门保持关闭。",
+            )
+        else:
+            self._pretest_sequence_in_progress = False
         if self.session_state.status == SessionStatus.RECORDING:
             if not self.session_state.begin_close(reason):
                 return False
@@ -723,8 +739,37 @@ class MainController(QObject):
 
     @Slot(dict)
     def handle_telemetry(self, payload: dict) -> None:
+        if self._telemetry_terminal_stopped:
+            LOG.debug(
+                "Ignoring telemetry after terminal global stop | ts=%s | connected=%s",
+                payload.get("timestamp"),
+                payload.get("connected"),
+            )
+            return
         previous_safety_state = self.state.telemetry.safety_state
-        hardware_safety = payload.get("safety_state")
+        application_safety = payload.get("application_safety_state")
+        application_reason = payload.get("application_safety_reason")
+        if application_safety is not None:
+            # HardwareWorker publishes the owner interlock before queueing the
+            # UI payload.  Re-read that owner state so an older queued payload
+            # cannot roll AppState/UI safety backward.
+            current_interlock = self.actuation_interlock.read()[1]
+            sample_timestamp = payload.get("airflow_sample_timestamp")
+            if (
+                isinstance(sample_timestamp, int | float)
+                and not isinstance(sample_timestamp, bool)
+                and float(sample_timestamp)
+                < current_interlock.airflow_sample_timestamp
+            ):
+                LOG.debug(
+                    "Ignoring stale application telemetry | sample_ts=%s | current_ts=%s",
+                    sample_timestamp,
+                    current_interlock.airflow_sample_timestamp,
+                )
+                return
+            application_safety = current_interlock.safety_state
+            application_reason = current_interlock.safety_reason
+        hardware_safety = None if application_safety is not None else payload.get("safety_state")
         self.state.update_telemetry(payload)
         if self.state.telemetry.connected:
             self._has_seen_connection = True
@@ -739,6 +784,9 @@ class MainController(QObject):
         )
         self._apply_safety_check(
             hardware_safety=hardware_safety,
+            application_safety=application_safety,
+            application_reason=application_reason,
+            safety_source=str(payload.get("safety_source") or "flow_monitor"),
             previous_state_override=previous_safety_state,
         )
         self._publish_interlock_from_state()
@@ -747,6 +795,7 @@ class MainController(QObject):
             timestamp=self.state.telemetry.timestamp or time.time(),
         )
         self._drain_actuation_if_not_running()
+        self._resume_pretest_after_fresh_flow()
         if self.view:
             self.view.render_telemetry(self.state.telemetry)
             self.view.update_status(self.state.status_message)
@@ -762,6 +811,9 @@ class MainController(QObject):
 
     @Slot(str)
     def handle_status(self, message: str) -> None:
+        if self._telemetry_terminal_stopped:
+            LOG.debug("Ignoring worker status after terminal global stop | %s", message)
+            return
         self.state.update_status(message)
         if self.view:
             self.view.update_status(message)
@@ -1828,12 +1880,27 @@ class MainController(QObject):
         self._set_cleaning_status("正在发布 maintenance bundle，请等待完整性校验。")
 
     def _wake_cleaning_for_recorder_failure(self, failure) -> None:
+        descriptor = self._cleaning_descriptor
+        if (
+            descriptor is None
+            or failure.session_id != descriptor.operation_id
+            or failure.session_generation != descriptor.generation
+        ):
+            LOG.debug(
+                "Ignoring stale maintenance recorder failure | id=%s | generation=%s",
+                failure.session_id,
+                failure.session_generation,
+            )
+            return
         self.actuation_interlock.update(
             recording_ready=False,
             recorder_failed=True,
             recorder_generation=failure.session_generation,
         )
-        self.actuation_worker.post_recorder_failed(failure.message)
+        self.actuation_worker.post_recorder_failed(
+            failure.message,
+            generation=failure.session_generation,
+        )
         self.actuation_worker.post_cleaning_stop(
             reason=f"maintenance writer 失败：{failure.message}",
             aborted=False,
@@ -2672,13 +2739,28 @@ class MainController(QObject):
         self._session_finalize_event.set()
 
     def _wake_actuation_for_recorder_failure(self, failure) -> None:
+        descriptor = self.session_state.descriptor
+        if (
+            descriptor is None
+            or failure.session_id != descriptor.session_id
+            or failure.session_generation != descriptor.generation
+        ):
+            LOG.debug(
+                "Ignoring stale session recorder failure | id=%s | generation=%s",
+                failure.session_id,
+                failure.session_generation,
+            )
+            return
         self.actuation_interlock.update(
             recording_ready=False,
             recorder_failed=True,
             recorder_generation=failure.session_generation,
         )
         self.session_state.fail(failure.message, recovery_required=True)
-        self.actuation_worker.post_recorder_failed(failure.message)
+        self.actuation_worker.post_recorder_failed(
+            failure.message,
+            generation=failure.session_generation,
+        )
         self.actuation_worker.post_stop(
             message="会话写入失败，Controller 已请求安全停止。"
         )
@@ -3103,6 +3185,7 @@ class MainController(QObject):
 
     @Slot()
     def handle_protocol_executor_tick(self) -> None:
+        self._resume_pretest_after_fresh_flow()
         self._render_protocol_execution_state()
 
     def reset_hardware(self) -> None:
@@ -3158,6 +3241,7 @@ class MainController(QObject):
             self._set_configuration_block_status(configuration_block)
             self._connect_in_progress = False
             return
+        self._telemetry_terminal_stopped = False
         was_running = self.worker.isRunning()
         if not self.start_worker():
             self._connect_in_progress = False
@@ -3824,6 +3908,8 @@ class MainController(QObject):
             reason="user_stop",
             force=True,
         )
+        if event.get("result") == "success":
+            self._telemetry_terminal_stopped = True
         self._handle_shutdown_event(event, success_message="已停止/已关闭阀门")
         if finalize_session:
             self._finish_session_after_global_stop(event)
@@ -4008,11 +4094,19 @@ class MainController(QObject):
         self._publish_interlock_from_state()
 
     def _execution_readiness(self) -> ProtocolExecutionReadiness:
+        interlock = self.actuation_interlock.read()[1]
+        state_safety = self.state.telemetry.safety_state
+        safety_state = (
+            state_safety if state_safety != "SAFE" else interlock.safety_state
+        )
         return ProtocolExecutionReadiness(
-            connected=bool(self.state.telemetry.connected),
-            hardware_ready=bool(self.state.hardware_ready),
-            flow_setpoints_ready=bool(self.state.flow_setpoints_ready),
-            safety_state=self.state.telemetry.safety_state,
+            # AppState remains the controller-facing readiness contract.  The
+            # interlock is combined conservatively so a newer owner-side loss
+            # cannot be hidden by an older queued AppState snapshot.
+            connected=bool(self.state.telemetry.connected and interlock.connected),
+            hardware_ready=bool(self.state.hardware_ready and interlock.hardware_ready),
+            flow_setpoints_ready=bool(interlock.flow_setpoints_ready),
+            safety_state=safety_state,
             ttl_input_ready=bool(getattr(self.worker, "ttl_input_ready", False)),
         )
 
@@ -4116,6 +4210,13 @@ class MainController(QObject):
 
     @Slot(object)
     def _handle_flow_command_result(self, wrapped) -> None:
+        if self._telemetry_terminal_stopped:
+            self._pending_flow_context.pop(wrapped.command.source, None)
+            LOG.debug(
+                "Ignoring flow result after terminal global stop | command=%s",
+                wrapped.command.command_id,
+            )
+            return
         self._record_cleaning_flow_result(wrapped)
         result = wrapped.result
         context = self._pending_flow_context.pop(wrapped.command.source, {})
@@ -4144,7 +4245,9 @@ class MainController(QObject):
                 )
             return
         self._last_flow_result = result
-        self.state.flow_setpoints_ready = bool(result.success)
+        self.state.flow_setpoints_ready = bool(
+            self.actuation_interlock.read()[1].flow_setpoints_ready
+        )
         if kind == "startup_zero":
             self._startup_zero_completed.emit(result)
             return
@@ -4159,6 +4262,65 @@ class MainController(QObject):
         if not result.success:
             self._pretest_sequence_completed.emit(mode, channels, result, False, result.message)
             return
+        if mode != "stim_start":
+            # Closing/rest routes are conservative actions and must not wait
+            # behind the admission gate used only for dangerous OPEN paths.
+            self._submit_pretest_valve_plan(mode, channels, result)
+            return
+        self._pending_pretest_flow = (mode, channels, result)
+        cleaning_config = self.config.get("cleaning") or {}
+        self._pretest_flow_ready_deadline = time.monotonic() + float(
+            cleaning_config.get("flow_ready_timeout_ms", 5000)
+        ) / 1000.0
+        self._resume_pretest_after_fresh_flow()
+
+    def _resume_pretest_after_fresh_flow(self) -> None:
+        pending = self._pending_pretest_flow
+        if pending is None:
+            return
+        mode, channels, result = pending
+        interlock = self.actuation_interlock.read()[1]
+        if not interlock.airflow_fresh_after_arm:
+            if time.monotonic() < self._pretest_flow_ready_deadline:
+                return
+            self._pending_pretest_flow = None
+            self._pretest_sequence_completed.emit(
+                mode,
+                channels,
+                result,
+                False,
+                "供气确认后未在时限内收到新的气流遥测，阀门保持关闭。",
+            )
+            return
+        if interlock.safety_state != "SAFE":
+            self._pending_pretest_flow = None
+            self._pretest_sequence_completed.emit(
+                mode,
+                channels,
+                result,
+                False,
+                f"供气布防后的新鲜气流状态为 {interlock.safety_state}，阀门保持关闭。",
+            )
+            return
+        if not self.actuation_interlock.clear_unsafe_latch():
+            self._pending_pretest_flow = None
+            self._pretest_sequence_completed.emit(
+                mode,
+                channels,
+                result,
+                False,
+                "供气恢复 SAFE 后安全锁存无法清除，阀门保持关闭。",
+            )
+            return
+        self._pending_pretest_flow = None
+        self._submit_pretest_valve_plan(mode, channels, result)
+
+    def _submit_pretest_valve_plan(
+        self,
+        mode: str,
+        channels: list[int],
+        result: FlowApplyResult,
+    ) -> None:
         desired_open = mode == "stim_start"
         safety_state = self._build_current_safety_state()
         combined_steps = []
@@ -4609,6 +4771,7 @@ class MainController(QObject):
         pretest = self.view.pretest_view if self.view and hasattr(self.view, "pretest_view") else None
         self.state.flow_setpoints_ready = False
         if result and result.success:
+            self.actuation_interlock.disarm_airflow_monitor()
             self._startup_zero_confirmed = True
             self.state.applied_a = 0.0
             self.state.applied_b = 0.0
@@ -4684,6 +4847,7 @@ class MainController(QObject):
             self._protocol_lease_epoch = None
             self._protocol_start_pending = False
         if success and flow_lease_idle:
+            self.actuation_interlock.disarm_airflow_monitor()
             self._cleaning_lease_token = None
             self.actuation_worker.complete_global_safe_stop_handoff()
             self._cleaning_runtime = replace(
@@ -4867,6 +5031,9 @@ class MainController(QObject):
         *,
         initial: bool = False,
         hardware_safety: str | None = None,
+        application_safety: str | None = None,
+        application_reason: str | None = None,
+        safety_source: str = "flow_monitor",
         previous_state_override: str | None = None,
     ) -> None:
         if not self.safety_manager:
@@ -4925,41 +5092,54 @@ class MainController(QObject):
         previous_state = self._last_safety_state
         timestamp = telemetry.timestamp
 
-        safety_state = self.safety_manager.evaluate_state(
-            airflow=airflow,
-            timestamp=timestamp,
-            previous=previous_state,
-            hardware_state=hardware_safety,
-        )
+        if application_safety is not None:
+            safety_state = SafetyState(
+                state=str(application_safety),
+                airflow=airflow,
+                threshold=self.safety_manager.low_flow_threshold,
+                updated_at=timestamp,
+                reason=str(application_reason or ""),
+            )
+        else:
+            safety_state = self.safety_manager.evaluate_application_state(
+                airflow=airflow,
+                timestamp=timestamp,
+                armed=self.actuation_interlock.read()[1].airflow_armed,
+                previous=previous_state,
+                hardware_state=hardware_safety,
+            )
         self._last_safety_state = safety_state
         telemetry.safety_state = safety_state.state
         telemetry.safety_reason = safety_state.reason
         telemetry.timestamp = safety_state.updated_at
-        LOG.info(
-            "Safety update | state=%s | airflow=%.3f | reason=%s | hw=%s",
-            safety_state.state,
-            airflow,
-            safety_state.reason,
-            hardware_safety,
-        )
-
         previous_label = previous_state.state if previous_state else previous_state_override
         should_update_status = safety_state.state != previous_label or (
             initial and safety_state.state == "LOW_FLOW"
         )
         if not should_update_status:
+            LOG.debug(
+                "Safety steady | state=%s | source=%s | reason=%s",
+                safety_state.state,
+                safety_source,
+                safety_state.reason,
+            )
             return
+        LOG.info(
+            "Safety transition | from=%s | to=%s | source=%s | reason=%s",
+            previous_label or "UNKNOWN",
+            safety_state.state,
+            hardware_safety or safety_source,
+            safety_state.reason,
+        )
 
-        if safety_state.state in {"LOW_FLOW", "DATA_STALE"} or (
-            safety_state.state not in {"SAFE"} and hardware_safety
-        ):
+        if safety_state.state != "SAFE":
             self.state.last_shutdown_event = {
                 "state": safety_state.state,
                 "airflow": airflow,
                 "threshold": self.safety_manager.low_flow_threshold,
                 "timestamp": safety_state.updated_at,
                 "reason": safety_state.reason,
-                "source": hardware_safety or "flow_monitor",
+                "source": hardware_safety or safety_source,
             }
 
         if safety_state.state == "SAFE":

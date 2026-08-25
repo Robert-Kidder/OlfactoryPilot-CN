@@ -132,6 +132,7 @@ def test_connected_but_unsafe_device_is_not_shown_as_success(qt_app) -> None:
         simulation=True,
     )
     try:
+        window.manual_experiment_view.clear_notice()
         telemetry = window.state.telemetry
         telemetry.connected = True
         telemetry.safety_state = "FAULT"
@@ -143,5 +144,72 @@ def test_connected_but_unsafe_device_is_not_shown_as_success(qt_app) -> None:
         assert window._connection_badge.level == InfoLevel.ERROR
         assert window.manual_experiment_view.current_notice_severity == "error"
         assert "当前状态不允许操作" in window.manual_experiment_view.current_notice_title
+    finally:
+        window.close()
+
+
+def test_safety_notice_is_transition_driven_and_reentry_can_notify_again(qt_app) -> None:
+    _, window = build_application(
+        DEFAULT_CONFIG,
+        start_worker=False,
+        simulation=True,
+    )
+    try:
+        window.show()
+        telemetry = window.state.telemetry
+        telemetry.connected = True
+        telemetry.safety_state = "LOW_FLOW"
+        telemetry.safety_reason = "气流低于安全阈值"
+        window.render_telemetry(telemetry)
+        qt_app.processEvents()
+
+        first = window.manual_experiment_view.notice_frame
+        assert first is not None
+        first.close()
+        qt_app.processEvents()
+        assert window.manual_experiment_view.notice_frame is None
+        assert "LOW_FLOW" in window._safety_reason_label.text()
+
+        window.controller._render_manual_snapshot()
+        window.render_telemetry(telemetry)
+        qt_app.processEvents()
+        assert window.manual_experiment_view.notice_frame is None
+
+        telemetry.safety_state = "SAFE"
+        telemetry.safety_reason = "Alicat 气流正常"
+        window.render_telemetry(telemetry)
+        telemetry.safety_state = "LOW_FLOW"
+        telemetry.safety_reason = "气流再次低于安全阈值"
+        window.render_telemetry(telemetry)
+        qt_app.processEvents()
+
+        assert window.manual_experiment_view.notice_frame is not None
+        assert "气流不足" in window.manual_experiment_view.current_notice_title
+    finally:
+        window.close()
+
+
+def test_connected_data_stale_episode_notifies_after_disconnected_idle(qt_app) -> None:
+    _, window = build_application(
+        DEFAULT_CONFIG,
+        start_worker=False,
+        simulation=True,
+    )
+    try:
+        window.manual_experiment_view.clear_notice()
+        telemetry = window.state.telemetry
+        telemetry.connected = False
+        telemetry.safety_state = "DATA_STALE"
+        telemetry.safety_reason = "设备未连接"
+        window.render_telemetry(telemetry)
+        assert "设备数据中断" not in window.manual_experiment_view.current_notice_title
+
+        telemetry.connected = True
+        telemetry.safety_reason = "气流采样已过期"
+        window.render_telemetry(telemetry)
+        qt_app.processEvents()
+
+        assert window.manual_experiment_view.notice_frame is not None
+        assert "设备数据中断" in window.manual_experiment_view.current_notice_title
     finally:
         window.close()

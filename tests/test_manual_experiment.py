@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from dataclasses import replace
 from pathlib import Path
 
@@ -138,6 +139,17 @@ def _accept_flow(worker, flows) -> None:
             ),
         )
     )
+    _publish_fresh_safe_airflow(worker, airflow=max(1.0, command.a))
+    worker.process_ready()
+
+
+def _publish_fresh_safe_airflow(worker, *, airflow: float) -> None:
+    worker.interlock.publish_airflow(
+        airflow=airflow,
+        timestamp=10.0,
+        hardware_state="SAFE",
+    )
+    worker.post_interlock_changed(timestamp=10.0)
 
 
 def _start_to_stimulating(worker, plan, lease, flows) -> None:
@@ -146,6 +158,53 @@ def _start_to_stimulating(worker, plan, lease, flows) -> None:
     assert worker.manual_snapshot.status is ManualExperimentStatus.FLOW_PENDING
     _accept_flow(worker, flows)
     assert worker.manual_snapshot.status is ManualExperimentStatus.STIMULATING
+
+
+def test_manual_fresh_low_flow_never_opens_hazardous_route() -> None:
+    worker, _, _, _, plan, lease, flows, written = _fixture()
+    assert worker.post_manual_start(plan, lease_token=lease)
+    worker.process_ready()
+    command = flows[0]
+    worker.post_flow_result(
+        FlowCommandResult(
+            command=command,
+            result=FlowApplyResult(
+                True, "ok", command.a, command.b, command.c, command.a
+            ),
+        )
+    )
+    worker.process_ready()
+    worker.interlock.publish_airflow(
+        airflow=0.0,
+        timestamp=10.0,
+        hardware_state="SAFE",
+    )
+    worker.post_interlock_changed(timestamp=10.0)
+    worker.process_ready()
+
+    assert not any(command.action is ActuationAction.OPEN for command in written)
+    assert worker.manual_snapshot.status is ManualExperimentStatus.RECOVERY_REQUIRED
+
+
+def test_manual_fresh_flow_timeout_fails_closed() -> None:
+    worker, _, _, clock, plan, lease, flows, written = _fixture()
+    assert worker.post_manual_start(plan, lease_token=lease)
+    worker.process_ready()
+    command = flows[0]
+    worker.post_flow_result(
+        FlowCommandResult(
+            command=command,
+            result=FlowApplyResult(
+                True, "ok", command.a, command.b, command.c, command.a
+            ),
+        )
+    )
+    worker.process_ready()
+    clock.value += 2_000_000
+    worker.process_ready()
+
+    assert not any(command.action is ActuationAction.OPEN for command in written)
+    assert worker.manual_snapshot.status is ManualExperimentStatus.RECOVERY_REQUIRED
 
 
 def _finish_normal_completion(worker, flows) -> None:
@@ -231,6 +290,8 @@ def test_manual_open_receipts_may_arrive_in_reverse_order() -> None:
             result=FlowApplyResult(True, "ok", command.a, command.b, command.c, command.a),
         )
     )
+    _publish_fresh_safe_airflow(worker, airflow=max(1.0, command.a))
+    worker.process_ready(max_items=1)  # fresh SAFE schedules selector
     worker.process_ready(max_items=1)  # selector receipt creates the open cohort
     open_commands = [item[3] for item in worker._normal_heap]
     worker._normal_heap.clear()
@@ -264,6 +325,8 @@ def test_partial_open_cohort_timeout_fails_closed_without_sleep() -> None:
             result=FlowApplyResult(True, "ok", command.a, command.b, command.c, command.a),
         )
     )
+    _publish_fresh_safe_airflow(worker, airflow=max(1.0, command.a))
+    worker.process_ready(max_items=1)  # fresh SAFE schedules selector
     worker.process_ready(max_items=1)  # selector
     worker.process_ready(max_items=1)  # first open only
     command_ids = tuple(
@@ -471,6 +534,8 @@ def test_late_success_after_open_timeout_keeps_recovery_without_deadline() -> No
             result=FlowApplyResult(True, "ok", command.a, command.b, command.c, command.a),
         )
     )
+    _publish_fresh_safe_airflow(worker, airflow=max(1.0, command.a))
+    worker.process_ready(max_items=1)  # fresh SAFE schedules selector
     worker.process_ready(max_items=1)
     open_commands = [item[3] for item in worker._normal_heap]
     worker._normal_heap.clear()
@@ -764,6 +829,14 @@ def test_blocked_writer_late_success_receipt_is_rejected_by_current_clock() -> N
                 ),
             )
         )
+        armed_deadline = time.monotonic() + 1.0
+        while (
+            not worker.interlock.read()[1].airflow_armed
+            and time.monotonic() < armed_deadline
+        ):
+            time.sleep(0.001)
+        assert worker.interlock.read()[1].airflow_armed
+        _publish_fresh_safe_airflow(worker, airflow=max(1.0, command.a))
         assert entered.wait(1.0)
         deadline = next(iter(worker._manual_expected.values()))["deadline_ns"]
         clock.value = deadline + 1

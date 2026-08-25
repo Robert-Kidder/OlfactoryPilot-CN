@@ -420,7 +420,10 @@ class ManualExperimentView(QWidget):
         self.port_buttons = self.port_tiles
         self._notice_signature: tuple[str, str, str] | None = None
         self._dismissed_notice_signature: tuple[str, str, str] | None = None
+        self._notice_key: object | None = None
+        self._dismissed_notice_key: object | None = None
         self._notice_severity: str | None = None
+        self._persistent_safety_state = "SAFE"
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -758,7 +761,21 @@ class ManualExperimentView(QWidget):
         status_text = snapshot.status_text
         detail_text = snapshot.detail_text
         if snapshot.experiment.status is ManualExperimentStatus.RECOVERY_REQUIRED:
-            self.show_notice(status_text or "需要立即处理", detail_text, severity="error")
+            self.show_notice(
+                status_text or "需要立即处理",
+                detail_text,
+                severity="error",
+                notice_key=(
+                    "manual-recovery",
+                    snapshot.experiment.identity,
+                    snapshot.experiment.recovery_reason,
+                ),
+            )
+        elif self._persistent_safety_state != "SAFE":
+            # Persistent safety state belongs to MainWindow's always-visible
+            # status region.  Snapshot rendering must not replace (or recreate)
+            # a dismissed transition-driven safety InfoBar.
+            pass
         elif status_text or detail_text:
             severity = "error" if self._is_actionable_notice(status_text, detail_text) else "info"
             self.show_notice(status_text or "状态", detail_text, severity=severity)
@@ -771,6 +788,11 @@ class ManualExperimentView(QWidget):
         )
         self._render_ports()
         self.refresh_countdown_display()
+
+    def set_persistent_safety_state(self, state: str) -> None:
+        """Tell snapshot rendering which safety state is shown persistently."""
+
+        self._persistent_safety_state = str(state or "UNKNOWN")
 
     def _render_supply_badge(self, snapshot: ManualExperimentViewSnapshot) -> None:
         if snapshot.supply_transitioning:
@@ -816,23 +838,37 @@ class ManualExperimentView(QWidget):
         if message:
             self.show_notice("状态", user_facing_text(message), severity="info")
 
-    def show_notice(self, title: str, message: str, *, severity: str = "warning") -> None:
+    def show_notice(
+        self,
+        title: str,
+        message: str,
+        *,
+        severity: str = "warning",
+        notice_key: object | None = None,
+    ) -> None:
         title = user_facing_text(title).strip()
         message = user_facing_text(message).strip()
         if not title and not message:
             self.clear_notice()
             return
         signature = (title, message, severity)
-        if signature == self._dismissed_notice_signature:
+        effective_key = signature if notice_key is None else notice_key
+        incoming_manual_recovery = bool(
+            isinstance(effective_key, tuple)
+            and effective_key
+            and effective_key[0] == "manual-recovery"
+        )
+        if effective_key == self._dismissed_notice_key:
             return
         if (
             self._notice_severity == "error"
             and self.current_notice_title in SAFETY_NOTICE_TITLES
-            and severity != "error"
+            and title not in SAFETY_NOTICE_TITLES
+            and not incoming_manual_recovery
         ):
             return
         if (
-            signature == self._notice_signature
+            effective_key == self._notice_key
             and self.notice_frame is not None
             and isValid(self.notice_frame)
             and self.notice_frame.isVisible()
@@ -860,22 +896,33 @@ class ManualExperimentView(QWidget):
             parent=self._notice_host,
         )
         bar.setObjectName("manualExperimentInfoBar")
-        bar.closedSignal.connect(lambda: self._dismiss_notice(signature, bar))
+        bar.closedSignal.connect(
+            lambda: self._dismiss_notice(signature, effective_key, bar)
+        )
         self._notice_layout.addWidget(bar)
         self.notice_frame = bar
         self._notice_signature = signature
+        self._notice_key = effective_key
         self._dismissed_notice_signature = None
+        self._dismissed_notice_key = None
         self._notice_severity = severity
         self._notice_host.show()
         bar.show()
 
-    def _dismiss_notice(self, signature: tuple[str, str, str], bar: InfoBar) -> None:
+    def _dismiss_notice(
+        self,
+        signature: tuple[str, str, str],
+        notice_key: object,
+        bar: InfoBar,
+    ) -> None:
         if self.notice_frame is not bar:
             return
         self._notice_layout.removeWidget(bar)
         self.notice_frame = None
         self._notice_signature = signature
+        self._notice_key = notice_key
         self._dismissed_notice_signature = signature
+        self._dismissed_notice_key = notice_key
         self._notice_severity = None
         self._notice_host.hide()
         self.status_label.setText("")
@@ -886,10 +933,31 @@ class ManualExperimentView(QWidget):
             self.notice_frame.hide()
         self._notice_host.hide()
         self._notice_signature = None
+        self._notice_key = None
         self._dismissed_notice_signature = None
+        self._dismissed_notice_key = None
         self._notice_severity = None
         self.status_label.setText("")
         self.detail_label.setText("")
+
+    def clear_safety_notice(self) -> None:
+        """恢复 SAFE 时只清除 safety transition，不覆盖其他操作通知。"""
+
+        current_is_safety = (
+            isinstance(self._notice_key, tuple)
+            and bool(self._notice_key)
+            and self._notice_key[0] == "safety"
+        )
+        dismissed_is_safety = (
+            isinstance(self._dismissed_notice_key, tuple)
+            and bool(self._dismissed_notice_key)
+            and self._dismissed_notice_key[0] == "safety"
+        )
+        if current_is_safety:
+            self.clear_notice()
+        elif dismissed_is_safety:
+            self._dismissed_notice_signature = None
+            self._dismissed_notice_key = None
 
     @staticmethod
     def _is_actionable_notice(title: str, message: str) -> bool:

@@ -189,7 +189,17 @@ def test_controller_cleaning_publishes_complete_maintenance_bundle(
     assert controller.handle_cleaning_start_requested(), controller._cleaning_display_message
 
     deadline = time.monotonic() + 2
+    fresh_airflow_published = False
     while controller._cleaning_runtime.status != CleaningStatus.COMPLETED and time.monotonic() < deadline:
+        interlock = controller.actuation_interlock.read()[1]
+        if interlock.airflow_armed and not fresh_airflow_published:
+            controller.actuation_interlock.publish_airflow(
+                airflow=1500.0,
+                timestamp=time.time(),
+                hardware_state="SAFE",
+            )
+            controller.actuation_worker.post_interlock_changed(timestamp=time.time())
+            fresh_airflow_published = True
         time.sleep(0.01)
         controller._drain_cleaning_if_not_running()
         qt_app.processEvents()

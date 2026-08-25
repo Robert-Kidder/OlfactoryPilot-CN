@@ -164,6 +164,36 @@ class SafetyManager:
             reason="Alicat 气流正常",
         )
 
+    def evaluate_application_state(
+        self,
+        *,
+        airflow: float,
+        timestamp: float,
+        armed: bool,
+        previous: SafetyState | None = None,
+        hardware_state: str | None = None,
+    ) -> SafetyState:
+        """在不改变阈值 primitive 的前提下应用 owner 布防生命周期。"""
+        state = self.evaluate_state(
+            airflow=airflow,
+            timestamp=timestamp,
+            previous=previous,
+            hardware_state=hardware_state,
+        )
+        if (
+            not armed
+            and state.state == "LOW_FLOW"
+            and hardware_state in {None, "SAFE"}
+        ):
+            return SafetyState(
+                state="SAFE",
+                airflow=state.airflow,
+                threshold=state.threshold,
+                updated_at=state.updated_at,
+                reason="未布防：当前为合法 idle 零流量",
+            )
+        return state
+
     @staticmethod
     def _coerce_airflow(value: float) -> float | None:
         try:

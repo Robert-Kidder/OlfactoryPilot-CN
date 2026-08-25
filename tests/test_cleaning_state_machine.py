@@ -160,6 +160,15 @@ def _worker(
     return worker, clock, calls, flows, recorder, token
 
 
+def _publish_fresh_airflow(worker, *, state: str = "SAFE") -> None:
+    worker.interlock.publish_airflow(
+        airflow=1500.0 if state == "SAFE" else 0.0,
+        timestamp=1_700_000_000.0,
+        hardware_state="SAFE" if state == "SAFE" else state,
+    )
+    worker.post_interlock_changed(timestamp=1_700_000_000.0)
+
+
 def test_global_safe_stop_fences_queued_cleaning_start_before_it_can_open() -> None:
     worker, _clock, calls, flows, recorder, token = _worker()
     results = []
@@ -215,6 +224,7 @@ def test_cleaning_owner_enforces_flow_zero_before_selector_safe_route() -> None:
             result=FlowApplyResult(True, "ok", 1500, 0, 0, 1500),
         )
     )
+    _publish_fresh_airflow(worker)
     worker.process_ready()
 
     assert [(item.valve, item.action) for item in calls[-2:]] == [
@@ -276,8 +286,7 @@ def test_cleaning_can_recover_from_idle_low_flow_before_any_open() -> None:
     assert all(command.action == ActuationAction.CLOSE for command in calls)
     assert worker.cleaning_snapshot.status == CleaningStatus.PREPARING
 
-    worker.interlock.update(safety_state="SAFE")
-    worker.post_interlock_changed()
+    _publish_fresh_airflow(worker)
     worker.process_ready()
 
     assert [(item.valve, item.action) for item in calls[-2:]] == [
@@ -285,6 +294,30 @@ def test_cleaning_can_recover_from_idle_low_flow_before_any_open() -> None:
         (2, ActuationAction.OPEN),
     ]
     assert worker.cleaning_snapshot.status == CleaningStatus.RUNNING
+
+
+def test_cleaning_fresh_low_flow_never_opens_master_or_odor() -> None:
+    worker, _clock, calls, flows, recorder, token = _worker(
+        safety_state="LOW_FLOW"
+    )
+    worker.post_cleaning_start(_plan(), lease_token=token, recorder=recorder)
+    worker.process_ready()
+    worker.post_flow_result(
+        FlowCommandResult(
+            command=flows.pop(),
+            result=FlowApplyResult(True, "ok", 1500, 0, 0, 1500),
+        )
+    )
+    worker.process_ready()
+
+    _publish_fresh_airflow(worker, state="LOW_FLOW")
+    worker.process_ready()
+
+    assert not any(command.action is ActuationAction.OPEN for command in calls)
+    assert worker.cleaning_snapshot.status in {
+        CleaningStatus.STOPPING,
+        CleaningStatus.FAILED,
+    }
 
 
 def test_cleaning_waits_through_transient_data_stale_during_setpoint_write() -> None:
@@ -310,8 +343,7 @@ def test_cleaning_waits_through_transient_data_stale_during_setpoint_write() -> 
     assert worker.cleaning_snapshot.status == CleaningStatus.PREPARING
     assert all(command.action == ActuationAction.CLOSE for command in calls)
 
-    worker.interlock.update(safety_state="SAFE")
-    worker.post_interlock_changed()
+    _publish_fresh_airflow(worker)
     worker.process_ready()
 
     assert [(item.valve, item.action) for item in calls[-2:]] == [
@@ -559,6 +591,7 @@ def test_cc02_low_flow_then_late_open_is_latched_and_safely_closed() -> None:
             result=FlowApplyResult(True, "ok", 1500, 0, 0, 1500),
         )
     )
+    _publish_fresh_airflow(worker)
     worker.process_ready()
     worker.interlock.update(safety_state="LOW_FLOW")
     worker.post_interlock_changed()
@@ -624,6 +657,7 @@ def test_cc03_recorder_queue_failure_is_latched_before_odor_open() -> None:
             result=FlowApplyResult(True, "ok", 1500, 0, 0, 1500),
         )
     )
+    _publish_fresh_airflow(worker)
     worker.process_ready()
 
     assert queue_failed.is_set()
@@ -702,6 +736,7 @@ def test_low_flow_preempts_cleaning_and_only_reports_failed_after_close_and_zero
             result=FlowApplyResult(True, "ok", 1500, 0, 0, 1500),
         )
     )
+    _publish_fresh_airflow(worker)
     worker.process_ready()
     before = len(calls)
 
@@ -735,6 +770,7 @@ def test_repeated_unsafe_updates_do_not_restart_cleaning_stop_close_set() -> Non
             result=FlowApplyResult(True, "ok", 1500, 0, 0, 1500),
         )
     )
+    _publish_fresh_airflow(worker)
     worker.process_ready()
 
     worker.interlock.update(safety_state="LOW_FLOW")

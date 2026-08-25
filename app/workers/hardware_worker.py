@@ -432,25 +432,40 @@ class HardwareWorker(QThread):
         self.breath_samples.emit(BreathSampleBatch.from_frames((frame,)))
 
     def _emit_telemetry(self, timestamp: float) -> None:
-        airflow = self._read_flow(timestamp)
+        airflow, sampled_at = self._read_flow_sample(timestamp)
         payload: dict[str, object] = {
             "connected": self._connected,
             "airflow": airflow,
             "safety_state": "DATA_STALE",
             "timestamp": timestamp,
         }
-        current = self._publish_interlock(airflow, timestamp)
+        current = self._publish_interlock(
+            airflow,
+            timestamp,
+            sample_timestamp=sampled_at,
+        )
         if current is not None:
             payload["safety_state"] = current.safety_state
+            payload["safety_reason"] = current.safety_reason
+            payload["application_safety_state"] = current.safety_state
+            payload["application_safety_reason"] = current.safety_reason
+            payload["safety_source"] = "flow_monitor"
+            payload["airflow_sample_timestamp"] = current.airflow_sample_timestamp
         self.telemetry_ready.emit(payload)
 
-    def _publish_interlock(self, airflow: float, timestamp: float):
+    def _publish_interlock(
+        self,
+        airflow: float,
+        timestamp: float,
+        *,
+        sample_timestamp: float | None = None,
+    ):
         if self._interlock_ingress is None:
             return None
         current = self._interlock_ingress.read()[1]
         self._interlock_ingress.publish_raw_telemetry(
             airflow=airflow,
-            timestamp=timestamp,
+            timestamp=(timestamp if sample_timestamp is None else sample_timestamp),
             hardware_state=None,
             connected=bool(self._connected),
             hardware_ready=bool(self._connected and not self._ai_error_latched),
@@ -616,18 +631,25 @@ class HardwareWorker(QThread):
 
     def _read_flow(self, timestamp: float | None = None) -> float:
         """Read the serial owner's cached sample; never access HAL serial here."""
+        return self._read_flow_sample(timestamp)[0]
+
+    def _read_flow_sample(
+        self,
+        timestamp: float | None = None,
+    ) -> tuple[float, float]:
+        """Return the cached value and its producer timestamp for freshness checks."""
         now = time.time() if timestamp is None else float(timestamp)
         with self._flow_sample_lock:
             sample = self._flow_sample
         if sample is None:
-            return float("nan")
+            return float("nan"), now
         airflow, sampled_at = sample
         age = now - sampled_at
         if not math.isfinite(airflow) or not math.isfinite(age):
-            return float("nan")
+            return float("nan"), sampled_at
         if age < 0 or age > self._flow_sample_stale_after_s:
-            return float("nan")
-        return airflow
+            return float("nan"), sampled_at
+        return airflow, sampled_at
 
     @staticmethod
     def _compute_interval_ms(telemetry_hz: int) -> int:

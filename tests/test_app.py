@@ -1,3 +1,4 @@
+import logging
 import os
 import threading
 import time
@@ -514,6 +515,7 @@ def test_airflow_below_threshold_enters_low_flow(qt_app):
     )
     worker = HardwareWorker(telemetry_hz=1)
     controller = MainController(state, worker, safety_manager=SafetyManager(low_flow_threshold=0.5))
+    controller.actuation_interlock.arm_airflow_monitor()
 
     controller.handle_telemetry({"airflow": 0.1, "connected": True, "timestamp": 1})
     assert state.telemetry.safety_state == "LOW_FLOW"
@@ -536,6 +538,7 @@ def test_low_airflow_uses_recovery_hysteresis(qt_app):
     controller = MainController(
         state, worker, safety_manager=SafetyManager(low_flow_threshold=0.5, recovery_margin=0.1)
     )
+    controller.actuation_interlock.arm_airflow_monitor()
 
     controller.handle_telemetry({"airflow": 0.45, "connected": True, "timestamp": 1})
     assert state.telemetry.safety_state == "LOW_FLOW"
@@ -1639,7 +1642,91 @@ def test_connect_requests_self_check_and_sets_connected_status(qt_app, track_con
         ("A", 0.0, False),
     ]
     assert state.flow_setpoints_ready is False
+    interlock = controller.actuation_interlock.read()[1]
+    assert interlock.airflow_armed is False
+    controller.handle_telemetry(
+        {
+            "airflow": 0.0,
+            "connected": True,
+            "timestamp": time.time(),
+            "application_safety_state": "SAFE",
+            "application_safety_reason": "未布防：当前为合法 idle 零流量",
+        }
+    )
+    assert state.telemetry.safety_state == "SAFE"
     assert window._reset_button.isEnabled()
+
+
+def test_safety_logging_uses_info_only_for_transitions(qt_app, caplog):
+    state = AppState.from_config(
+        {"low_flow_threshold": 0.5, "safety_state": "SAFE"}
+    )
+    worker = HardwareWorker(telemetry_hz=1)
+    controller = MainController(
+        state,
+        worker,
+        safety_manager=SafetyManager(low_flow_threshold=0.5),
+    )
+    controller.actuation_interlock.arm_airflow_monitor()
+
+    with caplog.at_level(logging.DEBUG, logger="app.controllers.main_controller"):
+        controller.handle_telemetry(
+            {"airflow": 0.1, "connected": True, "timestamp": 1.0}
+        )
+        controller.handle_telemetry(
+            {"airflow": 0.1, "connected": True, "timestamp": 1.1}
+        )
+        controller.handle_telemetry(
+            {"airflow": 0.7, "connected": True, "timestamp": 1.2}
+        )
+
+    transitions = [
+        record for record in caplog.records if "Safety transition" in record.message
+    ]
+    repeats = [record for record in caplog.records if "Safety steady" in record.message]
+    assert [(record.levelname, record.message.split(" | ", 1)[0]) for record in transitions] == [
+        ("INFO", "Safety transition"),
+        ("INFO", "Safety transition"),
+    ]
+    assert repeats and all(record.levelname == "DEBUG" for record in repeats)
+
+
+def test_stale_application_payload_cannot_roll_interlock_low_flow_back_to_safe(qt_app):
+    state = AppState.from_config(
+        {"low_flow_threshold": 0.5, "safety_state": "SAFE"}
+    )
+    state.telemetry.connected = True
+    state.hardware_ready = True
+    worker = HardwareWorker(telemetry_hz=1)
+    controller = MainController(
+        state,
+        worker,
+        safety_manager=SafetyManager(low_flow_threshold=0.5),
+    )
+    controller.actuation_interlock.arm_airflow_monitor()
+    controller.actuation_interlock.publish_airflow(
+        airflow=0.1,
+        timestamp=10.1,
+        hardware_state="SAFE",
+    )
+    state.telemetry.safety_state = "LOW_FLOW"
+    state.telemetry.airflow = 0.1
+    state.telemetry.timestamp = 10.1
+
+    controller.handle_telemetry(
+        {
+            "airflow": 1.0,
+            "connected": True,
+            "timestamp": 10.2,
+            "application_safety_state": "SAFE",
+            "application_safety_reason": "旧样本",
+            "airflow_sample_timestamp": 10.0,
+        }
+    )
+
+    assert state.telemetry.safety_state == "LOW_FLOW"
+    assert state.telemetry.airflow == 0.1
+    assert state.telemetry.timestamp == 10.1
 
 
 def test_connect_requests_recheck_when_worker_already_running(qt_app, track_controller_workers):
@@ -1946,13 +2033,14 @@ def test_stop_then_disconnect_telemetry_does_not_raise_safety_popup(qt_app):
     controller.handle_telemetry(
         {
             "airflow": 0.0,
-            "connected": False,
+            "connected": True,
             "timestamp": now_ts + 1,
             "safety_state": "SAFE",
         }
     )
 
     assert state.last_shutdown_event == stop_event
+    assert state.telemetry.connected is False
     assert state.telemetry.safety_state == "SAFE"
     assert "DATA_STALE" not in window._telemetry_label.text()
 
