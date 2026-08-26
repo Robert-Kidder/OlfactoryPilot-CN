@@ -144,12 +144,16 @@ def _accept_flow(worker, flows) -> None:
 
 
 def _publish_fresh_safe_airflow(worker, *, airflow: float) -> None:
+    timestamp = max(
+        10.0,
+        worker.interlock.read()[1].airflow_sample_timestamp + 1.0,
+    )
     worker.interlock.publish_airflow(
         airflow=airflow,
-        timestamp=10.0,
+        timestamp=timestamp,
         hardware_state="SAFE",
     )
-    worker.post_interlock_changed(timestamp=10.0)
+    worker.post_interlock_changed(timestamp=timestamp)
 
 
 def _start_to_stimulating(worker, plan, lease, flows) -> None:
@@ -207,6 +211,50 @@ def test_manual_fresh_flow_timeout_fails_closed() -> None:
     assert worker.manual_snapshot.status is ManualExperimentStatus.RECOVERY_REQUIRED
 
 
+def test_direct_flow_receipt_arriving_before_deadline_is_not_made_late_by_owner_delay() -> None:
+    worker, _, _, clock, plan, lease, flows, _ = _fixture()
+    assert worker.post_manual_start(plan, lease_token=lease)
+    worker.process_ready()
+    command = flows[0]
+    assert worker._manual_flow_deadline_ns is not None
+    clock.value = worker._manual_flow_deadline_ns - 1
+    assert worker.enqueue_flow_result_from_producer(
+        FlowCommandResult(
+            command=command,
+            result=FlowApplyResult(
+                True, "ok", command.a, command.b, command.c, command.a
+            ),
+        )
+    )
+    clock.value = worker._manual_flow_deadline_ns + 1
+
+    worker.process_ready(max_items=1)
+
+    assert worker.manual_snapshot.status is ManualExperimentStatus.FLOW_PENDING
+    assert worker._manual_waiting_for_safe_flow
+
+
+def test_safety_message_queued_before_direct_receipt_keeps_owner_priority() -> None:
+    worker, _, ingress, _, plan, lease, flows, _ = _fixture()
+    assert worker.post_manual_start(plan, lease_token=lease)
+    worker.process_ready()
+    command = flows[0]
+    ingress.update(connected=False, hardware_ready=False)
+    worker.post_interlock_changed(timestamp=10.0)
+    assert worker.enqueue_flow_result_from_producer(
+        FlowCommandResult(
+            command=command,
+            result=FlowApplyResult(
+                True, "ok", command.a, command.b, command.c, command.a
+            ),
+        )
+    )
+
+    worker.process_ready(max_items=1)
+
+    assert worker.manual_snapshot.status is ManualExperimentStatus.RECOVERY_REQUIRED
+
+
 def _finish_normal_completion(worker, flows) -> None:
     zero = flows[-1]
     assert zero.mode == "manual_post_close_a_zero"
@@ -226,6 +274,10 @@ def _finish_normal_completion(worker, flows) -> None:
             ),
         )
     )
+    assert worker.manual_snapshot.status is ManualExperimentStatus.RESTORING_SUPPLY
+    assert worker.manual_snapshot.supply_transitioning
+    _publish_fresh_safe_airflow(worker, airflow=max(1.0, restore.a))
+    worker.process_ready()
 
 
 def test_manual_plan_requires_mode_scoped_verification() -> None:
@@ -778,6 +830,8 @@ def test_successful_restore_supply_makes_queued_timeout_harmless() -> None:
             ),
         )
     )
+    _publish_fresh_safe_airflow(worker, airflow=max(1.0, restore.a))
+    worker.process_ready()
     assert worker.manual_snapshot.status is ManualExperimentStatus.COMPLETED
 
     worker._handle_manual_receipt_timeout(
@@ -788,6 +842,40 @@ def test_successful_restore_supply_makes_queued_timeout_harmless() -> None:
 
     assert worker.manual_snapshot.status is ManualExperimentStatus.COMPLETED
 
+
+def test_restore_receipt_without_fresh_safe_airflow_times_out_fail_closed() -> None:
+    worker, _, _, clock, plan, lease, flows, _ = _fixture()
+    _start_to_stimulating(worker, plan, lease, flows)
+    clock.value = worker.manual_snapshot.deadline_ns
+    worker.process_ready()
+    zero = flows[-1]
+    worker.post_flow_result(
+        FlowCommandResult(
+            command=zero,
+            result=FlowApplyResult(True, "A=0", zero.a, zero.b, zero.c, zero.c),
+        )
+    )
+    restore = flows[-1]
+    worker.post_flow_result(
+        FlowCommandResult(
+            command=restore,
+            result=FlowApplyResult(
+                True,
+                "restored",
+                restore.a,
+                restore.b,
+                restore.c,
+                restore.a,
+            ),
+        )
+    )
+    assert worker.manual_snapshot.status is ManualExperimentStatus.RESTORING_SUPPLY
+    clock.value += worker._manual_receipt_timeout_ns + 1
+
+    worker.process_ready()
+
+    assert worker.manual_snapshot.status is ManualExperimentStatus.RECOVERY_REQUIRED
+    assert worker._background_safe_stop_plan is not None
 
 def test_blocked_writer_late_success_receipt_is_rejected_by_current_clock() -> None:
     entered = threading.Event()

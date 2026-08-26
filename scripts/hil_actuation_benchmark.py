@@ -21,7 +21,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from PySide6.QtCore import QThread
+from PySide6.QtCore import Qt, QThread
 from PySide6.QtWidgets import QApplication
 
 from app.main import load_effective_config
@@ -745,7 +745,10 @@ class Runtime:
         self._flow_restore_confirmed = not self.protocol_mode
         self._hil_flow_results = {}
         self.flow.result_ready.connect(self._handle_hil_flow_result)
-        self.flow.result_ready.connect(self.actuation.post_flow_result)
+        self.flow.result_ready.connect(
+            self.actuation.enqueue_flow_result_from_producer,
+            Qt.ConnectionType.DirectConnection,
+        )
         self.actuation.flow_result_ready.connect(self._handle_hil_flow_result)
         self.sequence = 0
         self._last_ui_ns = 0

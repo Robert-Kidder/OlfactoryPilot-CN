@@ -268,7 +268,9 @@ def test_pretest_fresh_low_flow_never_opens_valves(qt_app) -> None:
 
 def test_pretest_fresh_flow_timeout_finishes_pending_ui(qt_app) -> None:
     _, controller, window, hal = _build_flow_context(low_flow_threshold=0.2)
-    controller.config.setdefault("cleaning", {})["flow_ready_timeout_ms"] = 1
+    # Keep the real timer comfortably open until the test expires it below;
+    # a 1 ms window races the background sequence thread and GUI event loop.
+    controller.config.setdefault("cleaning", {})["flow_ready_timeout_ms"] = 5000
     controller.handle_telemetry({"airflow": 1.0, "connected": True, "timestamp": 1.0})
     window.pretest_view._handle_click(1)
     window.pretest_view._toggle_manual_mode(True)

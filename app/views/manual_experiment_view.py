@@ -25,6 +25,7 @@ from qfluentwidgets import (
     IconInfoBadge,
     InfoBadge,
     InfoBar,
+    InfoBarManager,
     InfoBarPosition,
     InfoLevel,
     PrimaryPushButton,
@@ -43,8 +44,10 @@ from app.models import (
     ManualExperimentIntent,
     ManualExperimentSnapshot,
     ManualExperimentStatus,
+    ManualPresentationSnapshot,
     ManualSupplyIntent,
 )
+from app.views.notification_coordinator import NotificationCoordinator
 from app.views.product_text import user_facing_text
 
 FLOW_STEP_ML_MIN = 500.0
@@ -94,6 +97,8 @@ class PortTile(CardWidget):
         self._available = False
         self._actually_open = False
         self._fault = ""
+        self._visual_state: tuple[str, bool, bool, str, bool, bool] | None = None
+        self.visual_mutation_count = 0
         super().__init__(parent)
         self.setObjectName(f"portTile{external_port:02d}")
         self.setClickEnabled(True)
@@ -188,6 +193,9 @@ class PortTile(CardWidget):
         alias = _normalize_alias(display_name)
         if alias in {f"气口 {self.external_port}", f"气口 {self.external_port:02d}"}:
             alias = ""
+        if alias == self._alias and self.title_label.text():
+            return
+        self._visual_state = None
         self._alias = alias
         number = f"气口 {self.external_port:02d}"
         self.port_label.setText(number)
@@ -227,11 +235,24 @@ class PortTile(CardWidget):
         available: bool,
         interactive: bool,
     ) -> None:
-        self._selected = bool(selected and available)
-        self._actually_open = bool(actually_open)
-        self._fault = user_facing_text(fault)
-        self._available = bool(available)
-        self.set_port_content(display_name)
+        normalized_name = _normalize_alias(display_name)
+        normalized_fault = user_facing_text(fault)
+        visual_state = (
+            normalized_name,
+            bool(selected and available),
+            bool(actually_open),
+            normalized_fault,
+            bool(available),
+            bool(interactive),
+        )
+        if visual_state == self._visual_state:
+            return
+        self.visual_mutation_count += 1
+        self._selected = visual_state[1]
+        self._actually_open = visual_state[2]
+        self._fault = visual_state[3]
+        self._available = visual_state[4]
+        self.set_port_content(normalized_name)
         self.selection_accent.setVisible(self._selected)
         self.open_group.setVisible(self._actually_open)
         self.fault_group.setVisible(bool(self._fault))
@@ -263,12 +284,24 @@ class PortTile(CardWidget):
         self.setProperty("portState", visual_state)
         self._updateBackgroundColor()
         self.update()
+        self._visual_state = (
+            normalized_name,
+            self._selected,
+            self._actually_open,
+            normalized_fault,
+            self._available,
+            bool(interactive),
+        )
 
     def isChecked(self) -> bool:  # noqa: N802 - Qt-style compatibility
         return self._selected
 
     def setChecked(self, selected: bool) -> None:  # noqa: N802 - Qt-style compatibility
-        self._selected = bool(selected)
+        selected = bool(selected)
+        if self._selected == selected:
+            return
+        self._visual_state = None
+        self._selected = selected
         self.selection_accent.setVisible(self._selected)
         self._updateBackgroundColor()
         self.update()
@@ -416,15 +449,19 @@ class ManualExperimentView(QWidget):
         self._snapshot = ManualExperimentViewSnapshot()
         self._draft = self._snapshot.draft
         self._registry: ChannelRegistry | None = None
+        self._registry_signature: tuple[object, ...] | None = None
         self._allow_mock = False
         self._flow_history: deque[tuple[float, float]] = deque(maxlen=1000)
+        self._last_telemetry_timestamp: float | None = None
+        self._last_plot_payload: tuple[tuple[float, ...], tuple[float, ...]] | None = None
+        self._last_rendered_snapshot: ManualExperimentViewSnapshot | None = None
+        self._last_presentation_generation = -1
         self.port_tiles: dict[int, PortTile] = {}
         self.port_buttons = self.port_tiles
-        self._notice_signature: tuple[str, str, str] | None = None
-        self._dismissed_notice_signature: tuple[str, str, str] | None = None
-        self._notice_key: object | None = None
-        self._dismissed_notice_key: object | None = None
+        self._notification_coordinator = NotificationCoordinator()
+        self._notice_identity: tuple[object, ...] | None = None
         self._notice_severity: str | None = None
+        self.notice_creation_count = 0
         self._header_safety_state = "SAFE"
 
         root = QVBoxLayout(self)
@@ -441,13 +478,7 @@ class ManualExperimentView(QWidget):
         root.addWidget(controls)
         root.addWidget(self._build_port_card())
 
-        self._notice_host = QWidget(self)
-        self._notice_layout = QVBoxLayout(self._notice_host)
-        self._notice_layout.setContentsMargins(0, 0, 0, 0)
-        self._notice_host.hide()
-        root.addWidget(self._notice_host)
-        self.notice_frame: QWidget | None = QWidget(self._notice_host)
-        self.notice_frame.hide()
+        self.notice_frame: QWidget | None = None
         self.status_label = BodyLabel("", self)
         self.detail_label = BodyLabel("", self)
         self.status_label.hide()
@@ -640,6 +671,10 @@ class ManualExperimentView(QWidget):
     def set_registry(self, registry: ChannelRegistry, allow_mock: bool) -> None:
         if not isinstance(registry, ChannelRegistry):
             raise TypeError("手动实验需要有效的气口映射。")
+        signature = (registry.channels, bool(allow_mock))
+        if signature == self._registry_signature:
+            return
+        self._registry_signature = signature
         self._registry = registry
         self._allow_mock = bool(allow_mock)
         ports = tuple(
@@ -722,26 +757,36 @@ class ManualExperimentView(QWidget):
             status_text=user_facing_text(snapshot.status_text),
             detail_text=_operator_detail_text(snapshot.detail_text),
         )
+        if snapshot == self._last_rendered_snapshot:
+            return
         self._snapshot = snapshot
         self._draft = snapshot.draft
         self._rendering = True
         try:
-            self.total_input.setRange(0.0, max(0.0, snapshot.max_total_sccm))
-            self.sample_a_input.setRange(
+            self._set_range_if_changed(
+                self.total_input, 0.0, max(0.0, snapshot.max_total_sccm)
+            )
+            self._set_range_if_changed(
+                self.sample_a_input,
                 0.0,
                 min(snapshot.max_sample_a_sccm, snapshot.draft.total_sccm),
             )
-            self.vacuum_c_input.setRange(0.0, max(0.0, snapshot.max_vacuum_c_sccm))
-            self.duration_input.setRange(
+            self._set_range_if_changed(
+                self.vacuum_c_input, 0.0, max(0.0, snapshot.max_vacuum_c_sccm)
+            )
+            self._set_range_if_changed(
+                self.duration_input,
                 DURATION_MIN_S,
                 max(DURATION_MIN_S, snapshot.max_duration_s),
             )
-            self.total_input.setValue(snapshot.draft.total_sccm)
-            self.sample_a_input.setValue(snapshot.draft.sample_a_sccm)
-            self.vacuum_c_input.setValue(snapshot.draft.vacuum_c_sccm)
-            self.duration_input.setValue(snapshot.draft.duration_s)
-            self.main_b_input.setRange(0.0, max(0.0, snapshot.max_total_sccm))
-            self.main_b_input.setValue(snapshot.draft.main_b_sccm)
+            self._set_value_if_changed(self.total_input, snapshot.draft.total_sccm)
+            self._set_value_if_changed(self.sample_a_input, snapshot.draft.sample_a_sccm)
+            self._set_value_if_changed(self.vacuum_c_input, snapshot.draft.vacuum_c_sccm)
+            self._set_value_if_changed(self.duration_input, snapshot.draft.duration_s)
+            self._set_range_if_changed(
+                self.main_b_input, 0.0, max(0.0, snapshot.max_total_sccm)
+            )
+            self._set_value_if_changed(self.main_b_input, snapshot.draft.main_b_sccm)
         finally:
             self._rendering = False
 
@@ -751,49 +796,133 @@ class ManualExperimentView(QWidget):
             self.vacuum_c_input,
             self.duration_input,
         ):
-            control.setEnabled(snapshot.controls_enabled)
-        self.main_b_input.setEnabled(snapshot.controls_enabled)
-        self.main_b_input.setReadOnly(True)
-        self.apply_flow_button.setEnabled(
-            snapshot.can_apply_flow and not snapshot.supply_transitioning
-        )
-        self.apply_flow_button.setText(
-            "开始供气" if snapshot.supply_enabled is False else "停止供气"
-        )
+            if control.isEnabled() != snapshot.controls_enabled:
+                control.setEnabled(snapshot.controls_enabled)
+        if self.main_b_input.isEnabled() != snapshot.controls_enabled:
+            self.main_b_input.setEnabled(snapshot.controls_enabled)
+        if not self.main_b_input.isReadOnly():
+            self.main_b_input.setReadOnly(True)
+        apply_enabled = snapshot.can_apply_flow and not snapshot.supply_transitioning
+        if self.apply_flow_button.isEnabled() != apply_enabled:
+            self.apply_flow_button.setEnabled(apply_enabled)
+        apply_text = "开始供气" if snapshot.supply_enabled is False else "停止供气"
+        if self.apply_flow_button.text() != apply_text:
+            self.apply_flow_button.setText(apply_text)
         self._render_supply_badge(snapshot)
-        self.release_button.setEnabled(snapshot.can_release)
-        self.stop_button.setEnabled(snapshot.can_stop)
+        if self.release_button.isEnabled() != snapshot.can_release:
+            self.release_button.setEnabled(snapshot.can_release)
+        if self.stop_button.isEnabled() != snapshot.can_stop:
+            self.stop_button.setEnabled(snapshot.can_stop)
 
         status_text = snapshot.status_text
         detail_text = snapshot.detail_text
         if snapshot.experiment.status is ManualExperimentStatus.RECOVERY_REQUIRED:
-            self.show_notice(
+            self.show_condition_notice(
                 status_text or "需要立即处理",
                 detail_text,
-                severity="error",
-                notice_key=(
-                    "manual-recovery",
-                    snapshot.experiment.identity,
-                    snapshot.experiment.recovery_reason,
-                ),
+                source="manual-recovery",
+                condition_key=("safety", "RECOVERY_REQUIRED"),
+                severity="critical",
             )
+        else:
+            self.resolve_notice_condition(source="manual-recovery")
+        if snapshot.experiment.status is ManualExperimentStatus.RECOVERY_REQUIRED:
+            pass
         elif self._header_safety_state != "SAFE":
             # MainWindow already keeps the current abnormal state and next
             # action visible in the header. Snapshot rendering must not
             # recreate a dismissed transition-driven safety InfoBar.
             pass
-        elif status_text or detail_text:
+        elif detail_text:
             severity = "error" if self._is_actionable_notice(status_text, detail_text) else "info"
-            self.show_notice(status_text or "状态", detail_text, severity=severity)
+            self.show_notice(
+                status_text or "状态",
+                detail_text,
+                severity=severity,
+                source="manual-status",
+            )
+        elif snapshot.experiment.status is ManualExperimentStatus.COMPLETED:
+            completion_message = (
+                "供气已开启。"
+                if not snapshot.experiment.selected_external_ports
+                else "所选气口已关闭，供气已恢复。"
+            )
+            self.show_notice(
+                status_text or "实验已完成",
+                completion_message,
+                severity="success",
+                notice_key=("manual-completed", snapshot.experiment.identity),
+                source="manual-status",
+            )
         else:
-            self.clear_notice()
-        self.telemetry_a_label.setText(
+            self.clear_notice_event(source="manual-status")
+        telemetry_text = (
             "暂无数据"
             if snapshot.telemetry_a_sccm is None
             else f"{snapshot.telemetry_a_sccm:.0f}"
         )
+        if self.telemetry_a_label.text() != telemetry_text:
+            self.telemetry_a_label.setText(telemetry_text)
         self._render_ports()
         self.refresh_countdown_display()
+        self._last_rendered_snapshot = snapshot
+
+    def render_presentation(self, presentation: ManualPresentationSnapshot) -> None:
+        """以单一 generation 原子更新页面，拒绝迟到旧帧。"""
+
+        if not isinstance(presentation, ManualPresentationSnapshot):
+            raise TypeError("手动实验页面只能显示有效 presentation。")
+        if presentation.generation <= self._last_presentation_generation:
+            return
+        experiment = presentation.experiment
+        ports = tuple(
+            replace(
+                port,
+                actually_open=(
+                    port.external_port in experiment.open_confirmed
+                    and port.external_port not in experiment.close_confirmed
+                ),
+                fault=(
+                    experiment.recovery_reason
+                    if port.external_port in experiment.possibly_open
+                    else ""
+                ),
+            )
+            for port in self._snapshot.ports
+        )
+        snapshot = replace(
+            self._snapshot,
+            experiment=experiment,
+            ports=ports,
+            controls_enabled=presentation.controls_enabled,
+            can_apply_flow=presentation.can_apply_flow,
+            can_release=presentation.can_release,
+            can_stop=presentation.can_stop,
+            supply_enabled=experiment.supply_enabled,
+            supply_transitioning=experiment.supply_transitioning,
+            status_text=self._status_text(experiment),
+            detail_text=presentation.detail_text,
+        )
+        if presentation.connected:
+            self.update_a_observation(
+                presentation.airflow,
+                sampled_at_s=presentation.telemetry_timestamp,
+            )
+            snapshot = replace(snapshot, telemetry_a_sccm=self._snapshot.telemetry_a_sccm)
+        else:
+            snapshot = replace(snapshot, telemetry_a_sccm=None)
+        self.render_snapshot(snapshot)
+        self._last_presentation_generation = presentation.generation
+
+    @staticmethod
+    def _set_range_if_changed(control: DoubleSpinBox, minimum: float, maximum: float) -> None:
+        if control.minimum() != minimum or control.maximum() != maximum:
+            control.setRange(minimum, maximum)
+
+    @staticmethod
+    def _set_value_if_changed(control: DoubleSpinBox, value: float) -> None:
+        if not math.isclose(control.value(), value, rel_tol=0.0, abs_tol=1e-9):
+            control.setValue(value)
 
     def set_header_safety_state(self, state: str) -> None:
         """Keep snapshot notices consistent with MainWindow's durable header state."""
@@ -809,29 +938,70 @@ class ManualExperimentView(QWidget):
             text, level = "供气已停止", InfoLevel.INFOAMTION
         else:
             text, level = "供气状态未知", InfoLevel.INFOAMTION
-        self.supply_state_badge.setText(text)
-        self.supply_state_badge.setLevel(level)
-        self.supply_state_label.setText(text)
+        if self.supply_state_badge.text() != text:
+            self.supply_state_badge.setText(text)
+        if self.supply_state_badge.level != level:
+            self.supply_state_badge.setLevel(level)
+        if self.supply_state_label.text() != text:
+            self.supply_state_label.setText(text)
 
-    def update_a_observation(self, value: float) -> None:
+    def update_a_observation(
+        self,
+        value: float,
+        *,
+        sampled_at_s: float | None = None,
+    ) -> None:
+        sampled_at = (
+            self._clock_ns() / 1_000_000_000
+            if sampled_at_s is None
+            else float(sampled_at_s)
+        )
+        if not math.isfinite(sampled_at):
+            return
+        previous_timestamp = self._last_telemetry_timestamp
+        if previous_timestamp is not None and sampled_at < previous_timestamp:
+            return
         if isinstance(value, bool) or not math.isfinite(float(value)):
+            self._last_telemetry_timestamp = sampled_at
             self._snapshot = replace(self._snapshot, telemetry_a_sccm=None)
-            self.telemetry_a_label.setText("暂无数据")
+            if self.telemetry_a_label.text() != "暂无数据":
+                self.telemetry_a_label.setText("暂无数据")
             return
         numeric = float(value)
+        if previous_timestamp == sampled_at:
+            if self._snapshot.telemetry_a_sccm == numeric:
+                return
+            self._snapshot = replace(self._snapshot, telemetry_a_sccm=numeric)
+            text = f"{numeric:.0f}"
+            if self.telemetry_a_label.text() != text:
+                self.telemetry_a_label.setText(text)
+            if self._flow_history and self._flow_history[-1][0] == sampled_at:
+                self._flow_history[-1] = (sampled_at, numeric)
+                self._refresh_plot()
+            return
+        self._last_telemetry_timestamp = sampled_at
         self._snapshot = replace(self._snapshot, telemetry_a_sccm=numeric)
-        self.telemetry_a_label.setText(f"{numeric:.0f}")
-        self._flow_history.append((self._clock_ns() / 1_000_000_000, numeric))
+        text = f"{numeric:.0f}"
+        if self.telemetry_a_label.text() != text:
+            self.telemetry_a_label.setText(text)
+        self._flow_history.append((sampled_at, numeric))
         self._refresh_plot()
 
     def _refresh_plot(self) -> None:
-        now_s = self._clock_ns() / 1_000_000_000
+        now_s = (
+            self._flow_history[-1][0]
+            if self._flow_history
+            else self._clock_ns() / 1_000_000_000
+        )
         cutoff_s = now_s - 30.0
         while self._flow_history and self._flow_history[0][0] < cutoff_s:
             self._flow_history.popleft()
         xs = [sampled_at - now_s for sampled_at, _value in self._flow_history]
         values = [value for _sampled_at, value in self._flow_history]
-        self._flow_curve.setData(xs, values)
+        payload = (tuple(xs), tuple(values))
+        if payload != self._last_plot_payload:
+            self._flow_curve.setData(xs, values)
+            self._last_plot_payload = payload
 
     def render_supply_state(self, enabled: bool, message: str = "") -> None:
         self._snapshot = replace(
@@ -851,6 +1021,7 @@ class ManualExperimentView(QWidget):
         *,
         severity: str = "warning",
         notice_key: object | None = None,
+        source: str = "view-event",
     ) -> None:
         title = user_facing_text(title).strip()
         message = user_facing_text(message).strip()
@@ -859,111 +1030,138 @@ class ManualExperimentView(QWidget):
             return
         signature = (title, message, severity)
         effective_key = signature if notice_key is None else notice_key
-        incoming_manual_recovery = bool(
-            isinstance(effective_key, tuple)
-            and effective_key
-            and effective_key[0] == "manual-recovery"
+        self._notification_coordinator.publish_event(
+            source=source,
+            key=effective_key,
+            title=title,
+            message=message,
+            severity=severity,
         )
-        if effective_key == self._dismissed_notice_key:
+        self._sync_notice_output()
+
+    def show_condition_notice(
+        self,
+        title: str,
+        message: str,
+        *,
+        source: str,
+        condition_key: object,
+        severity: str = "error",
+    ) -> None:
+        self._notification_coordinator.publish_condition(
+            source=source,
+            key=condition_key,
+            title=user_facing_text(title).strip(),
+            message=user_facing_text(message).strip(),
+            severity=severity,
+        )
+        self._sync_notice_output()
+
+    def resolve_notice_condition(self, *, source: str) -> None:
+        self._notification_coordinator.resolve_condition(source=source)
+        self._sync_notice_output()
+
+    def clear_notice_event(self, *, source: str = "view-event") -> None:
+        self._notification_coordinator.clear_event(source=source)
+        self._sync_notice_output()
+
+    def _sync_notice_output(self) -> None:
+        current = self._notification_coordinator.current
+        if current is None:
+            self._remove_notice_frame()
             return
         if (
-            self._notice_severity == "error"
-            and self.current_notice_title in SAFETY_NOTICE_TITLES
-            and title not in SAFETY_NOTICE_TITLES
-            and not incoming_manual_recovery
-        ):
-            return
-        if (
-            effective_key == self._notice_key
+            current.identity == self._notice_identity
+            and current.severity == self._notice_severity
             and self.notice_frame is not None
             and isValid(self.notice_frame)
             and self.notice_frame.isVisible()
         ):
+            if self.status_label.text() != current.title:
+                self.status_label.setText(current.title)
+            if self.detail_label.text() != current.message:
+                self.detail_label.setText(current.message)
+            title_label = getattr(self.notice_frame, "titleLabel", None)
+            if title_label is not None and title_label.text() != current.title:
+                title_label.setText(current.title)
+            content_label = getattr(self.notice_frame, "contentLabel", None)
+            if content_label is not None and content_label.text() != current.message:
+                content_label.setText(current.message)
+            self._notice_severity = current.severity
             return
         old = self.notice_frame
         if old is not None and isValid(old):
-            self._notice_layout.removeWidget(old)
-            old.hide()
-            old.deleteLater()
-        self.status_label.setText(title)
-        self.detail_label.setText(message)
+            self.notice_frame = None
+            old.close()
+        self._purge_invalid_managed_bars()
+        self.status_label.setText(current.title)
+        self.detail_label.setText(current.message)
         factory = {
             "error": InfoBar.error,
+            "critical": InfoBar.error,
             "success": InfoBar.success,
             "info": InfoBar.info,
             "warning": InfoBar.warning,
-        }.get(severity, InfoBar.warning)
+        }.get(current.severity, InfoBar.warning)
         bar = factory(
-            title,
-            message,
+            current.title,
+            current.message,
             isClosable=True,
             duration=-1,
-            position=InfoBarPosition.NONE,
-            parent=self._notice_host,
+            position=InfoBarPosition.BOTTOM_RIGHT,
+            parent=self,
         )
         bar.setObjectName("manualExperimentInfoBar")
         bar.closedSignal.connect(
-            lambda: self._dismiss_notice(signature, effective_key, bar)
+            lambda: self._dismiss_notice(current.identity, bar)
         )
-        self._notice_layout.addWidget(bar)
         self.notice_frame = bar
-        self._notice_signature = signature
-        self._notice_key = effective_key
-        self._dismissed_notice_signature = None
-        self._dismissed_notice_key = None
-        self._notice_severity = severity
-        self._notice_host.show()
+        self._notice_identity = current.identity
+        self._notice_severity = current.severity
+        self.notice_creation_count += 1
         bar.show()
+
+    def _purge_invalid_managed_bars(self) -> None:
+        """Discard dead wrappers left by QFluentWidgets' process-wide manager."""
+
+        manager = InfoBarManager.make(InfoBarPosition.BOTTOM_RIGHT)
+        bars = manager.infoBars.get(self)
+        if bars is not None:
+            bars[:] = [bar for bar in bars if isValid(bar)]
 
     def _dismiss_notice(
         self,
-        signature: tuple[str, str, str],
-        notice_key: object,
+        identity: tuple[object, ...],
         bar: InfoBar,
     ) -> None:
         if self.notice_frame is not bar:
             return
-        self._notice_layout.removeWidget(bar)
         self.notice_frame = None
-        self._notice_signature = signature
-        self._notice_key = notice_key
-        self._dismissed_notice_signature = signature
-        self._dismissed_notice_key = notice_key
+        self._notice_identity = None
         self._notice_severity = None
-        self._notice_host.hide()
+        self.status_label.setText("")
+        self.detail_label.setText("")
+        self._notification_coordinator.dismiss(identity)
+        self._sync_notice_output()
+
+    def _remove_notice_frame(self) -> None:
+        old = self.notice_frame
+        self.notice_frame = None
+        if old is not None and isValid(old):
+            old.close()
+        self._notice_identity = None
+        self._notice_severity = None
         self.status_label.setText("")
         self.detail_label.setText("")
 
     def clear_notice(self) -> None:
-        if self.notice_frame is not None and isValid(self.notice_frame):
-            self.notice_frame.hide()
-        self._notice_host.hide()
-        self._notice_signature = None
-        self._notice_key = None
-        self._dismissed_notice_signature = None
-        self._dismissed_notice_key = None
-        self._notice_severity = None
-        self.status_label.setText("")
-        self.detail_label.setText("")
+        self._notification_coordinator.clear()
+        self._remove_notice_frame()
 
     def clear_safety_notice(self) -> None:
         """恢复 SAFE 时只清除 safety transition，不覆盖其他操作通知。"""
 
-        current_is_safety = (
-            isinstance(self._notice_key, tuple)
-            and bool(self._notice_key)
-            and self._notice_key[0] == "safety"
-        )
-        dismissed_is_safety = (
-            isinstance(self._dismissed_notice_key, tuple)
-            and bool(self._dismissed_notice_key)
-            and self._dismissed_notice_key[0] == "safety"
-        )
-        if current_is_safety:
-            self.clear_notice()
-        elif dismissed_is_safety:
-            self._dismissed_notice_signature = None
-            self._dismissed_notice_key = None
+        self.resolve_notice_condition(source="safety")
 
     @staticmethod
     def _is_actionable_notice(title: str, message: str) -> bool:
@@ -992,14 +1190,15 @@ class ManualExperimentView(QWidget):
             and experiment.deadline_ns is not None
         ):
             remaining_ns = max(0, experiment.deadline_ns - self._clock_ns())
-            self.countdown_label.setText(f"剩余 {remaining_ns / 1_000_000_000:.1f} 秒")
-            return
-        if experiment.status is ManualExperimentStatus.COMPLETED:
-            self.countdown_label.setText("本次已完成")
+            text = f"剩余 {remaining_ns / 1_000_000_000:.1f} 秒"
+        elif experiment.status is ManualExperimentStatus.COMPLETED:
+            text = "本次已完成"
         elif experiment.status is ManualExperimentStatus.RECOVERY_REQUIRED:
-            self.countdown_label.setText("需要恢复")
+            text = "需要恢复"
         else:
-            self.countdown_label.setText("剩余 --")
+            text = "剩余 --"
+        if self.countdown_label.text() != text:
+            self.countdown_label.setText(text)
 
     def _render_ports(self) -> None:
         snapshots = {port.external_port: port for port in self._snapshot.ports}

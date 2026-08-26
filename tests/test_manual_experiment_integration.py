@@ -68,24 +68,37 @@ def _intent(
     )
 
 
+def _publish_fresh_safe_after_restore(
+    controller: MainController,
+    *,
+    drain=None,
+) -> None:
+    timestamp = max(
+        time.time(),
+        controller.actuation_interlock.read()[1].airflow_sample_timestamp + 0.001,
+    )
+    controller.actuation_interlock.publish_airflow(
+        airflow=250.0,
+        timestamp=timestamp,
+        hardware_state="SAFE",
+    )
+    controller.actuation_worker.post_interlock_changed(timestamp=timestamp)
+    (drain or controller._drain_actuation_if_not_running)()
+
+
 def test_mock_controller_runs_manual_owner_and_releases_matching_lease(tmp_path, qtbot) -> None:
     controller, clock = _controller(tmp_path)
 
     assert controller.handle_manual_release_requested(_intent())
     assert controller.actuation_worker.manual_snapshot.status is ManualExperimentStatus.FLOW_PENDING
-    controller.actuation_interlock.publish_airflow(
-        airflow=250.0,
-        timestamp=time.time(),
-        hardware_state="SAFE",
-    )
-    controller.actuation_worker.post_interlock_changed(timestamp=time.time())
-    controller._drain_actuation_if_not_running()
+    _publish_fresh_safe_after_restore(controller)
     assert controller.actuation_worker.manual_snapshot.status is ManualExperimentStatus.STIMULATING
     assert controller.device_lease.snapshot.kind is DeviceLeaseKind.MANUAL
     assert not controller.handle_manual_release_requested(_intent())
 
     clock.value = controller.actuation_worker.manual_snapshot.deadline_ns
     controller._drain_actuation_if_not_running()
+    _publish_fresh_safe_after_restore(controller)
 
     snapshot = controller.actuation_worker.manual_snapshot
     window = MainWindow(controller, controller.state)
@@ -113,6 +126,7 @@ def test_supplied_mock_runs_ports_04_06_for_five_seconds_without_protocol_crosst
             vacuum_c_sccm=100,
         )
     )
+    _publish_fresh_safe_after_restore(controller)
     assert controller.actuation_worker.manual_snapshot.supply_enabled
     original_epoch = controller.actuation_worker.protocol_state.execution_epoch
     original_event_count = len(controller.actuation_worker.protocol_state.events)
@@ -120,13 +134,7 @@ def test_supplied_mock_runs_ports_04_06_for_five_seconds_without_protocol_crosst
     assert controller.handle_manual_release_requested(
         _intent(external_ports=(4, 6), duration_ns=5_000_000_000)
     )
-    controller.actuation_interlock.publish_airflow(
-        airflow=250.0,
-        timestamp=time.time(),
-        hardware_state="SAFE",
-    )
-    controller.actuation_worker.post_interlock_changed(timestamp=time.time())
-    controller._drain_actuation_if_not_running()
+    _publish_fresh_safe_after_restore(controller)
     stimulating = controller.actuation_worker.manual_snapshot
     assert stimulating.status is ManualExperimentStatus.STIMULATING
     assert stimulating.open_confirmed == (4, 6)
@@ -161,6 +169,7 @@ def test_supplied_mock_runs_ports_04_06_for_five_seconds_without_protocol_crosst
 
     clock.value = stimulating.deadline_ns
     controller._drain_actuation_if_not_running()
+    _publish_fresh_safe_after_restore(controller)
 
     completed = controller.actuation_worker.manual_snapshot
     assert completed.status is ManualExperimentStatus.COMPLETED
@@ -245,6 +254,7 @@ def test_manual_safe_readiness_is_protocol_isolated_across_lifecycle_windows(
     worker.manual_result_ready.connect(terminal_results.append)
     clock.value = worker.manual_snapshot.deadline_ns
     drain()
+    _publish_fresh_safe_after_restore(controller, drain=drain)
     assert worker.manual_snapshot.status is ManualExperimentStatus.COMPLETED
     assert terminal_results[-1].completed
     assert controller.device_lease.snapshot.kind is DeviceLeaseKind.MANUAL
@@ -280,6 +290,7 @@ def test_mock_supply_uses_a_zero_compensation_gate_before_restoring_setpoints(
             vacuum_c_sccm=100,
         )
     )
+    _publish_fresh_safe_after_restore(controller)
 
     snapshot = controller.actuation_worker.manual_snapshot
     assert snapshot.status is ManualExperimentStatus.COMPLETED

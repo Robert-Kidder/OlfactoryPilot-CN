@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import subprocess
 import sys
@@ -40,6 +41,7 @@ from app.models import (
     ManualExperimentResult,
     ManualExperimentSnapshot,
     ManualExperimentStatus,
+    ManualPresentationSnapshot,
     ManualSupplyIntent,
     ProtocolExecutionReadiness,
     ProtocolExecutionSnapshot,
@@ -350,7 +352,10 @@ class MainController(QObject):
         self.actuation_worker.start_result_ready.connect(self._handle_protocol_start_result)
         self.actuation_worker.receipt_ready.connect(self._handle_actuation_receipt)
         self.actuation_worker.plan_result_ready.connect(self._handle_actuation_plan_result)
-        self.flow_worker.result_ready.connect(self.actuation_worker.post_flow_result)
+        self.flow_worker.result_ready.connect(
+            self.actuation_worker.enqueue_flow_result_from_producer,
+            Qt.ConnectionType.DirectConnection,
+        )
         self.actuation_worker.flow_result_ready.connect(self._handle_flow_command_result)
         self.actuation_worker.cleaning_snapshot_ready.connect(
             self._handle_cleaning_snapshot
@@ -381,6 +386,9 @@ class MainController(QObject):
         )
         self.actuation_worker.manual_result_ready.connect(self._handle_manual_result)
         self._manual_generation = 0
+        self._presentation_generation = 0
+        self._latest_airflow_sample_timestamp = float(state.telemetry.timestamp)
+        self._last_manual_supply_restored_at = 0.0
         self._manual_lease_token = None
         self._manual_snapshot = self.actuation_worker.manual_snapshot
         self._manual_supply_identity: ManualExperimentIdentity | None = None
@@ -448,7 +456,6 @@ class MainController(QObject):
         self._apply_previous_shutdown_status()
         self._apply_safety_check(initial=True)
         self.view.update_status(self.state.status_message)
-        self.view.render_telemetry(self.state.telemetry)
         self.view.render_last_shutdown(self.state.last_shutdown_event)
         self._update_pretest_view_safety(
             SafetyState(
@@ -771,6 +778,16 @@ class MainController(QObject):
             application_reason = current_interlock.safety_reason
         hardware_safety = None if application_safety is not None else payload.get("safety_state")
         self.state.update_telemetry(payload)
+        sample_timestamp = payload.get("airflow_sample_timestamp")
+        if (
+            isinstance(sample_timestamp, int | float)
+            and not isinstance(sample_timestamp, bool)
+            and math.isfinite(float(sample_timestamp))
+        ):
+            self._latest_airflow_sample_timestamp = max(
+                self._latest_airflow_sample_timestamp,
+                float(sample_timestamp),
+            )
         if self.state.telemetry.connected:
             self._has_seen_connection = True
 
@@ -797,14 +814,9 @@ class MainController(QObject):
         self._drain_actuation_if_not_running()
         self._resume_pretest_after_fresh_flow()
         if self.view:
-            self.view.render_telemetry(self.state.telemetry)
             self.view.update_status(self.state.status_message)
             if hasattr(self.view, "pretest_view"):
                 self.view.pretest_view.update_airflow(self.state.telemetry.airflow)
-            if hasattr(self.view, "manual_experiment_view"):
-                self.view.manual_experiment_view.update_a_observation(
-                    self.state.telemetry.airflow
-                )
         self._refresh_toolbar_state()
         self._render_cleaning_snapshot()
         self._render_manual_snapshot()
@@ -1257,6 +1269,7 @@ class MainController(QObject):
             self._drain_actuation_if_not_running()
         self._refresh_toolbar_state()
         self._render_cleaning_snapshot()
+        self._render_manual_snapshot()
 
     def request_self_check(self) -> None:
         """Trigger self-check from UI, keep thread-safe."""
@@ -3231,7 +3244,7 @@ class MainController(QObject):
         self.state.update_status("重置完成：正在重新初始化硬件并自检...")
         if self.view:
             self.view.update_status(self.state.status_message)
-            self.view.render_telemetry(self.state.telemetry)
+        self._render_manual_snapshot()
         self._start_or_request_self_check()
         self._refresh_toolbar_state()
 
@@ -3409,6 +3422,11 @@ class MainController(QObject):
     @Slot(object)
     def _handle_manual_snapshot(self, snapshot: ManualExperimentSnapshot) -> None:
         self._manual_snapshot = snapshot
+        if snapshot.supply_restored_at is not None:
+            self._last_manual_supply_restored_at = max(
+                self._last_manual_supply_restored_at,
+                snapshot.supply_restored_at,
+            )
         self._render_manual_snapshot()
 
     @Slot(object)
@@ -3444,7 +3462,6 @@ class MainController(QObject):
         manual = self.view.manual_experiment_view
         if hasattr(manual, "set_registry") and self.state.channel_registry is not None:
             manual.set_registry(self.state.channel_registry, allow_mock=self.simulation_mode)
-        manual.render_snapshot(self._manual_snapshot)
         base = manual.snapshot
         status = self._manual_snapshot.status
         idle = status in {
@@ -3469,7 +3486,7 @@ class MainController(QObject):
         ready = not readiness_reason
         selected = set(base.draft.selected_external_ports)
         available = {port.external_port for port in base.ports if port.available}
-        detail = base.detail_text
+        detail = ""
         if readiness_reason:
             detail = (
                 f"当前不可操作：{readiness_reason}；安全动作：未产生硬件 intent；"
@@ -3480,8 +3497,16 @@ class MainController(QObject):
                 f"手动实验需要恢复：{self._manual_snapshot.recovery_reason}；"
                 "安全动作：owner 正在执行统一清零/关闭；下一步：完成全局停止后重新连接。"
             )
-        view_snapshot = replace(
-            base,
+        self._presentation_generation += 1
+        presentation = ManualPresentationSnapshot(
+            generation=self._presentation_generation,
+            connected=bool(self.state.telemetry.connected),
+            hardware_ready=bool(self.state.hardware_ready),
+            safety_state=str(self.state.telemetry.safety_state),
+            safety_reason=str(self.state.telemetry.safety_reason),
+            airflow=float(self.state.telemetry.airflow),
+            telemetry_timestamp=float(self._latest_airflow_sample_timestamp),
+            experiment=self._manual_snapshot,
             controls_enabled=ready and idle,
             can_apply_flow=ready and idle and holder is DeviceLeaseKind.IDLE,
             can_release=(
@@ -3502,11 +3527,28 @@ class MainController(QObject):
                 ManualExperimentStatus.SELECTOR_COMPENSATION,
                 ManualExperimentStatus.RESTORING_SUPPLY,
             },
-            supply_enabled=self._manual_snapshot.supply_enabled,
-            supply_transitioning=self._manual_snapshot.supply_transitioning,
             detail_text=detail,
+            expected_flow_transition=(
+                status
+                in {
+                    ManualExperimentStatus.FLOW_PENDING,
+                    ManualExperimentStatus.ZEROING_A,
+                    ManualExperimentStatus.SELECTOR_COMPENSATION,
+                    ManualExperimentStatus.RESTORING_SUPPLY,
+                }
+                or (
+                    self._last_manual_supply_restored_at > 0
+                    and self._latest_airflow_sample_timestamp
+                    <= self._last_manual_supply_restored_at
+                )
+            ),
         )
-        manual.render_snapshot(view_snapshot)
+        runtime_threads_active = bool(
+            self.worker.isRunning()
+            or self.flow_worker.isRunning()
+            or self.actuation_worker.isRunning()
+        )
+        self.view.queue_presentation(presentation, queued=runtime_threads_active)
 
     def _set_manual_status(self, message: str) -> None:
         self.state.update_status(message)
@@ -3918,8 +3960,7 @@ class MainController(QObject):
         self._connect_in_progress = False
         self.state.telemetry.connected = False
         self.state.hardware_ready = False
-        if self.view:
-            self.view.render_telemetry(self.state.telemetry)
+        self._render_manual_snapshot()
         self._refresh_toolbar_state()
 
     def open_help_manual(self) -> None:
@@ -4867,8 +4908,8 @@ class MainController(QObject):
         self.state.update_status(message)
         if self.view:
             self.view.update_status(message)
-            self.view.render_telemetry(self.state.telemetry)
             self.view.render_last_shutdown(event)
+        self._render_manual_snapshot()
 
     def _latch_restart_failure(self, reason: str) -> None:
         self._unsafe_shutdown_latched = True
@@ -4893,7 +4934,7 @@ class MainController(QObject):
         self.state.update_status(message)
         if self.view:
             self.view.update_status(message)
-            self.view.render_telemetry(self.state.telemetry)
+        self._render_manual_snapshot()
 
     def update_breath_threshold(self, name: str, value: float) -> None:
         old_val = 0.0
@@ -5082,10 +5123,10 @@ class MainController(QObject):
             self.state.update_status("紧急关闭：硬件断开，默认阻断命令")
             if self.view:
                 self.view.update_status(self.state.status_message)
-                self.view.render_telemetry(telemetry)
                 self.view.render_last_shutdown(self.state.last_shutdown_event)
                 self._update_pretest_view_safety(safety_state)
             self._refresh_toolbar_state()
+            self._render_manual_snapshot()
             return
 
         airflow = telemetry.airflow

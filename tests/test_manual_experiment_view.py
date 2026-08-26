@@ -14,6 +14,7 @@ from app.models import (
     ManualExperimentIntent,
     ManualExperimentSnapshot,
     ManualExperimentStatus,
+    ManualPresentationSnapshot,
     ManualSupplyIntent,
     VerificationStatus,
 )
@@ -381,10 +382,41 @@ def test_closed_infobar_can_be_replaced_without_deleted_qobject_access(qtbot) ->
     assert view.detail_label.text() == "第二条"
 
 
+def test_same_condition_severity_escalation_recreates_infobar_style(qtbot) -> None:
+    view = ManualExperimentView()
+    qtbot.addWidget(view)
+    view.show_condition_notice(
+        "设备异常",
+        "请检查设备。",
+        source="safety",
+        condition_key=("safety", "FAULT"),
+        severity="warning",
+    )
+    first = view.notice_frame
+    assert first is not None
+
+    view.show_condition_notice(
+        "需要立即处理",
+        "请立即停止操作。",
+        source="safety",
+        condition_key=("safety", "FAULT"),
+        severity="critical",
+    )
+
+    assert view.notice_frame is not None
+    assert view.notice_frame is not first
+    assert view.current_notice_severity == "critical"
+
+
 def test_plain_snapshot_detail_replaces_stale_notice(qtbot) -> None:
     view = ManualExperimentView()
     qtbot.addWidget(view)
-    view.show_notice("旧错误", "旧内容", severity="error")
+    view.show_notice(
+        "旧错误",
+        "旧内容",
+        severity="error",
+        source="manual-status",
+    )
 
     view.render_snapshot(
         ManualExperimentViewSnapshot(detail_text="当前不可操作：设备尚未连接。")
@@ -434,3 +466,114 @@ def test_one_second_snapshot_duration_is_not_silently_clamped(qtbot) -> None:
     assert view.duration_input.value() == 1
     view.release_button.click()
     assert intents[-1].duration_ns == 1_000_000_000
+
+
+def test_identical_snapshot_does_not_mutate_tiles_and_one_port_updates_once(qtbot) -> None:
+    view = ManualExperimentView()
+    qtbot.addWidget(view)
+    snapshot = ManualExperimentViewSnapshot(
+        controls_enabled=True,
+        ports=_port_snapshots(),
+    )
+    view.render_snapshot(snapshot)
+    baseline = {
+        port: tile.visual_mutation_count for port, tile in view.port_tiles.items()
+    }
+
+    view.render_snapshot(snapshot)
+    assert {
+        port: tile.visual_mutation_count for port, tile in view.port_tiles.items()
+    } == baseline
+
+    ports = list(snapshot.ports)
+    ports[3] = replace(ports[3], actually_open=True)
+    view.render_snapshot(replace(snapshot, ports=tuple(ports)))
+    changed = [
+        port
+        for port, tile in view.port_tiles.items()
+        if tile.visual_mutation_count != baseline[port]
+    ]
+    assert changed == [4]
+
+
+def test_equal_telemetry_values_keep_distinct_sample_timestamps(qtbot) -> None:
+    view = ManualExperimentView()
+    qtbot.addWidget(view)
+    auto_range = tuple(view.plot_widget.getViewBox().state["autoRange"])
+
+    view.update_a_observation(250.0, sampled_at_s=10.0)
+    view.update_a_observation(250.0, sampled_at_s=10.2)
+    view.update_a_observation(260.0, sampled_at_s=10.2)
+    view.update_a_observation(999.0, sampled_at_s=10.1)
+
+    assert list(view._flow_history) == [(10.0, 250.0), (10.2, 260.0)]
+    assert tuple(view.plot_widget.getViewBox().state["autoRange"]) == auto_range
+
+
+def test_old_presentation_generation_cannot_overwrite_new_frame(qtbot) -> None:
+    view = ManualExperimentView()
+    qtbot.addWidget(view)
+    view.set_registry(_registry(), allow_mock=True)
+    experiment = ManualExperimentSnapshot(supply_enabled=True)
+    newer = ManualPresentationSnapshot(
+        generation=2,
+        connected=True,
+        hardware_ready=True,
+        safety_state="SAFE",
+        safety_reason="",
+        airflow=250.0,
+        telemetry_timestamp=2.0,
+        experiment=experiment,
+        controls_enabled=True,
+        can_apply_flow=True,
+        can_release=False,
+        can_stop=False,
+    )
+    older = replace(
+        newer,
+        generation=1,
+        connected=False,
+        hardware_ready=False,
+        controls_enabled=False,
+        can_apply_flow=False,
+    )
+
+    view.render_presentation(newer)
+    view.render_presentation(older)
+
+    assert view._last_presentation_generation == 2
+    assert view.snapshot.controls_enabled
+    assert view.snapshot.can_apply_flow
+
+
+def test_disconnected_presentation_clears_cached_airflow(qtbot) -> None:
+    view = ManualExperimentView()
+    qtbot.addWidget(view)
+    connected = ManualPresentationSnapshot(
+        generation=1,
+        connected=True,
+        hardware_ready=True,
+        safety_state="SAFE",
+        safety_reason="",
+        airflow=250.0,
+        telemetry_timestamp=1.0,
+        experiment=ManualExperimentSnapshot(supply_enabled=True),
+        controls_enabled=True,
+        can_apply_flow=True,
+        can_release=False,
+        can_stop=False,
+    )
+    view.render_presentation(connected)
+    view.render_presentation(
+        replace(
+            connected,
+            generation=2,
+            connected=False,
+            hardware_ready=False,
+            controls_enabled=False,
+            can_apply_flow=False,
+        )
+    )
+
+    assert view.snapshot.telemetry_a_sccm is None
+    assert view.telemetry_a_label.text() == "暂无数据"

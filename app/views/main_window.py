@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 from typing import TYPE_CHECKING
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QColor, QPalette
 from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
 from qfluentwidgets import (
@@ -20,7 +20,11 @@ from qfluentwidgets import (
     FluentIcon as FIF,
 )
 
-from app.models import AppState, Telemetry
+from app.models import (
+    AppState,
+    ManualPresentationSnapshot,
+    Telemetry,
+)
 from app.views.manual_experiment_view import SAFETY_NOTICE_TITLES, ManualExperimentView
 from app.views.product_text import user_facing_text
 
@@ -47,11 +51,14 @@ class MainWindow(FluentWindow):
 
     def __init__(self, controller: MainController, state: AppState) -> None:
         super().__init__()
+        self.setMicaEffectEnabled(False)
         self.controller = controller
         self.state = state
-        self._last_safety_notice_state = "SAFE"
-        self._last_safety_notice_connected = False
-        self._safety_transition_sequence = 0
+        self._pending_presentation: ManualPresentationSnapshot | None = None
+        self._presentation_flush_scheduled = False
+        self._rendered_presentation_generation = -1
+        self._closing = False
+        self._last_rendered_connected = bool(state.telemetry.connected)
         self.setWindowTitle(state.window_title)
         self.setMinimumSize(1180, 720)
         self.resize(1360, 820)
@@ -73,7 +80,16 @@ class MainWindow(FluentWindow):
 
         self._build_actions()
         self._build_manual_interface()
-        self.render_telemetry(state.telemetry)
+        self.render_telemetry(state.telemetry, hardware_ready=state.hardware_ready)
+
+    def closeEvent(self, event) -> None:
+        # InfoBarManager is process-global and keeps bars grouped by parent.
+        # Remove the overlay while both Qt wrappers are still valid so a later
+        # window cannot inherit a deleted bar from this parent.
+        self._closing = True
+        self._pending_presentation = None
+        self.manual_experiment_view.clear_notice()
+        super().closeEvent(event)
 
     def _build_actions(self) -> None:
         self._connect_button = PushButton(FIF.CONNECT, "连接设备", self)
@@ -128,9 +144,26 @@ class MainWindow(FluentWindow):
         self._connection_action_label.setStyleSheet("color: #FF9A92;")
         self._connection_action_label.setMaximumWidth(220)
         self._connection_action_label.setVisible(False)
-        header_layout.addWidget(self._connection_badge, 0, Qt.AlignmentFlag.AlignVCenter)
-        header_layout.addWidget(self._connection_action_label)
-        header_layout.addWidget(self._connect_button)
+        self._connection_status_slot = QWidget(header)
+        self._connection_status_slot.setFixedWidth(380)
+        connection_layout = QHBoxLayout(self._connection_status_slot)
+        connection_layout.setContentsMargins(0, 0, 0, 0)
+        connection_layout.setSpacing(8)
+        self._connection_action_label.setFixedWidth(220)
+        connection_layout.addWidget(
+            self._connection_badge, 0, Qt.AlignmentFlag.AlignVCenter
+        )
+        connection_layout.addWidget(self._connection_action_label)
+        header_layout.addWidget(self._connection_status_slot)
+
+        self._connection_action_slot = QWidget(header)
+        self._connection_action_slot.setFixedWidth(
+            max(108, self._connect_button.sizeHint().width())
+        )
+        action_layout = QHBoxLayout(self._connection_action_slot)
+        action_layout.setContentsMargins(0, 0, 0, 0)
+        action_layout.addWidget(self._connect_button)
+        header_layout.addWidget(self._connection_action_slot)
         header_layout.addWidget(self._stop_button)
         layout.addWidget(header)
 
@@ -164,9 +197,11 @@ class MainWindow(FluentWindow):
         return user_facing_text(f"上次关闭：{status_word}（{ts_text}）{reason}")
 
     @staticmethod
-    def _connection_summary(telemetry: Telemetry) -> str:
+    def _connection_summary(telemetry: Telemetry, *, hardware_ready: bool) -> str:
         if not telemetry.connected:
             return "设备未连接"
+        if not hardware_ready:
+            return "设备检查未通过"
         return {
             "SAFE": "设备已连接",
             "LOW_FLOW": "气流不足",
@@ -177,7 +212,9 @@ class MainWindow(FluentWindow):
         }.get(telemetry.safety_state, "设备状态异常")
 
     @staticmethod
-    def _connection_action(telemetry: Telemetry) -> str:
+    def _connection_action(telemetry: Telemetry, *, hardware_ready: bool) -> str:
+        if telemetry.connected and not hardware_ready:
+            return "请检查设备后重新连接"
         if not telemetry.connected or telemetry.safety_state == "SAFE":
             return ""
         return {
@@ -197,91 +234,190 @@ class MainWindow(FluentWindow):
 
     def render_last_shutdown(self, event: dict | None) -> None:
         text = self._format_shutdown(event)
-        self._shutdown_label.setText(text)
+        if self._shutdown_label.text() != text:
+            self._shutdown_label.setText(text)
         if event and event.get("result") != "success":
-            self.manual_experiment_view.show_notice("上次关闭未完成", text, severity="error")
+            self.manual_experiment_view.show_condition_notice(
+                "上次关闭未完成",
+                text,
+                source="last-shutdown",
+                condition_key="last-shutdown-failed",
+                severity="critical",
+            )
+        else:
+            self.manual_experiment_view.resolve_notice_condition(source="last-shutdown")
 
-    def render_telemetry(self, telemetry: Telemetry) -> None:
+    def render_telemetry(
+        self,
+        telemetry: Telemetry,
+        *,
+        expected_manual_flow_transition: bool = False,
+        hardware_ready: bool | None = None,
+    ) -> None:
         connected = bool(telemetry.connected)
-        self._connect_button.setVisible(not connected)
-        summary = self._connection_summary(telemetry)
-        self._telemetry_label.setText(self._format_telemetry(telemetry))
-        self._connection_badge.setText(summary)
-        connection_action = self._connection_action(telemetry)
-        self._connection_action_label.setText(connection_action)
-        self._connection_action_label.setVisible(bool(connection_action))
-        self._connection_badge.setLevel(
+        self._last_rendered_connected = connected
+        effective_hardware_ready = (
+            True if hardware_ready is None else bool(hardware_ready)
+        )
+        if self._connect_button.isVisible() == connected:
+            self._connect_button.setVisible(not connected)
+        summary = self._connection_summary(
+            telemetry,
+            hardware_ready=effective_hardware_ready,
+        )
+        telemetry_text = self._format_telemetry(telemetry)
+        if self._telemetry_label.text() != telemetry_text:
+            self._telemetry_label.setText(telemetry_text)
+        if self._connection_badge.text() != summary:
+            self._connection_badge.setText(summary)
+        connection_action = self._connection_action(
+            telemetry,
+            hardware_ready=effective_hardware_ready,
+        )
+        if self._connection_action_label.text() != connection_action:
+            self._connection_action_label.setText(connection_action)
+        if self._connection_action_label.isVisible() != bool(connection_action):
+            self._connection_action_label.setVisible(bool(connection_action))
+        level = (
             InfoLevel.SUCCESS
-            if connected and telemetry.safety_state == "SAFE"
+            if connected and effective_hardware_ready and telemetry.safety_state == "SAFE"
             else InfoLevel.ERROR
         )
+        if self._connection_badge.level != level:
+            self._connection_badge.setLevel(level)
         current_state = telemetry.safety_state if connected else "DATA_STALE"
-        self.manual_experiment_view.set_header_safety_state(
-            current_state
-        )
-        previous_state = self._last_safety_notice_state
-        entered_connected_abnormal = bool(
-            connected
-            and not self._last_safety_notice_connected
-            and current_state != "SAFE"
-        )
-        self._last_safety_notice_connected = connected
-        if current_state == previous_state and not entered_connected_abnormal:
-            return
-        self._last_safety_notice_state = current_state
-        self._safety_transition_sequence += 1
-        transition_key = (
-            "safety",
-            self._safety_transition_sequence,
-            previous_state,
-            current_state,
-        )
-        if current_state == "LOW_FLOW":
-            self.manual_experiment_view.show_notice(
+        self.manual_experiment_view.set_header_safety_state(current_state)
+        if current_state == "LOW_FLOW" and expected_manual_flow_transition:
+            # A=0 and supply restoration deliberately cross LOW_FLOW.  The
+            # coherent manual presentation still exposes the real telemetry
+            # state, but this expected, receipt-bounded transition is not a
+            # user-actionable safety episode and must not create an InfoBar.
+            self.manual_experiment_view.clear_safety_notice()
+        elif current_state == "LOW_FLOW":
+            self.manual_experiment_view.show_condition_notice(
                 "气流不足",
                 "已停止相关操作，请检查供气、管路和流量设置。",
+                source="safety",
+                condition_key=("safety", "LOW_FLOW"),
                 severity="error",
-                notice_key=transition_key,
             )
         elif current_state == "DATA_STALE" and connected:
-            self.manual_experiment_view.show_notice(
+            self.manual_experiment_view.show_condition_notice(
                 "设备数据中断",
                 "请检查设备连接和通信线路。",
+                source="safety",
+                condition_key=("safety", "DATA_STALE"),
                 severity="error",
-                notice_key=transition_key,
             )
         elif connected and current_state != "SAFE":
-            self.manual_experiment_view.show_notice(
+            self.manual_experiment_view.show_condition_notice(
                 "当前状态不允许操作",
-                self._connection_action(telemetry) + "，确认正常后再继续。",
+                self._connection_action(
+                    telemetry,
+                    hardware_ready=effective_hardware_ready,
+                )
+                + "，确认正常后再继续。",
+                source="safety",
+                condition_key=("safety", current_state),
                 severity="error",
-                notice_key=transition_key,
             )
-        elif current_state == "SAFE":
+        else:
             self.manual_experiment_view.clear_safety_notice()
+
+    def queue_presentation(
+        self,
+        presentation: ManualPresentationSnapshot,
+        *,
+        queued: bool = True,
+    ) -> None:
+        """合并同一 GUI event-loop turn 内的帧，只保留最新 generation。"""
+
+        if self._closing:
+            return
+        if presentation.generation <= self._rendered_presentation_generation:
+            return
+        pending = self._pending_presentation
+        if pending is None or presentation.generation > pending.generation:
+            self._pending_presentation = presentation
+        if not queued:
+            self._flush_presentation()
+            return
+        if self._presentation_flush_scheduled:
+            return
+        self._presentation_flush_scheduled = True
+        QTimer.singleShot(0, self._flush_presentation)
+
+    def _flush_presentation(self) -> None:
+        self._presentation_flush_scheduled = False
+        if self._closing:
+            self._pending_presentation = None
+            return
+        presentation = self._pending_presentation
+        self._pending_presentation = None
+        if (
+            presentation is None
+            or presentation.generation <= self._rendered_presentation_generation
+        ):
+            return
+        telemetry = Telemetry(
+            airflow=presentation.airflow,
+            safety_state=presentation.safety_state,
+            safety_reason=presentation.safety_reason,
+            connected=presentation.connected,
+            timestamp=presentation.telemetry_timestamp,
+        )
+        self.render_telemetry(
+            telemetry,
+            expected_manual_flow_transition=(
+                presentation.safety_state == "LOW_FLOW"
+                and presentation.expected_flow_transition
+            ),
+            hardware_ready=presentation.hardware_ready,
+        )
+        self.manual_experiment_view.render_presentation(presentation)
+        self._rendered_presentation_generation = presentation.generation
 
     def update_status(self, message: str) -> None:
         friendly = user_facing_text(message)
         self._status_label.setText(friendly)
         if not friendly or any(term in friendly for term in _INTERNAL_UI_TERMS):
+            self.manual_experiment_view.clear_notice_event(source="status")
             return
         if self.state.telemetry.connected and self.state.telemetry.safety_state != "SAFE":
             return
-        severity = "error" if self.manual_experiment_view._is_actionable_notice("", friendly) else "info"
+        if not self.manual_experiment_view._is_actionable_notice("", friendly):
+            self.manual_experiment_view.clear_notice_event(source="status")
+            return
+        severity = "error"
         if (
             self.manual_experiment_view.current_notice_severity == "error"
             and self.manual_experiment_view.current_notice_title in SAFETY_NOTICE_TITLES
         ):
             return
         title = "操作未完成" if severity == "error" else "状态"
-        self.manual_experiment_view.show_notice(title, friendly, severity=severity)
+        self.manual_experiment_view.show_notice(
+            title,
+            friendly,
+            severity=severity,
+            source="status",
+        )
 
     def render_actuation_alert(self, message: str, *, severe: bool) -> None:
         friendly = user_facing_text(message)
-        self._actuation_alert_label.setText(friendly)
-        self._actuation_alert_label.setVisible(bool(friendly))
+        if self._actuation_alert_label.text() != friendly:
+            self._actuation_alert_label.setText(friendly)
+        if self._actuation_alert_label.isVisible() != bool(friendly):
+            self._actuation_alert_label.setVisible(bool(friendly))
         if severe and friendly:
-            self.manual_experiment_view.show_notice("需要立即处理", friendly, severity="error")
+            self.manual_experiment_view.show_notice(
+                "需要立即处理",
+                friendly,
+                severity="critical",
+                notice_key=("actuation-alert", friendly),
+                source="actuation-alert",
+            )
+        else:
+            self.manual_experiment_view.clear_notice_event(source="actuation-alert")
 
     def ingest_breath_samples(self, samples, *, timestamp: float | None = None) -> None:
         if hasattr(self, "calibration_view"):
@@ -334,4 +470,7 @@ class MainWindow(FluentWindow):
                 "连接失败",
                 "；".join(summary) or "设备检查未通过，请检查连接后重试。",
                 severity="error",
+                source="self-check",
             )
+        else:
+            self.manual_experiment_view.clear_notice_event(source="self-check")

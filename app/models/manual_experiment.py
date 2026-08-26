@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from enum import StrEnum
 
@@ -209,6 +210,7 @@ class ManualExperimentSnapshot:
     flow_zero_confirmed: bool = False
     selector_compensation_confirmed: bool = False
     supply_restored: bool = False
+    supply_restored_at: float | None = None
     # Receipt-owned supply evidence: None means that the current physical
     # state cannot be proven.  A command being queued never changes this
     # value; only its correlated successful receipt may do so.
@@ -219,6 +221,38 @@ class ManualExperimentSnapshot:
     remaining_ns: int = 0
     possibly_open: tuple[int, ...] = ()
     recovery_reason: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class ManualPresentationSnapshot:
+    """GUI 一帧消费的手动实验页面一致性快照。"""
+
+    generation: int
+    connected: bool
+    hardware_ready: bool
+    safety_state: str
+    safety_reason: str
+    airflow: float
+    telemetry_timestamp: float
+    experiment: ManualExperimentSnapshot
+    controls_enabled: bool
+    can_apply_flow: bool
+    can_release: bool
+    can_stop: bool
+    detail_text: str = ""
+    expected_flow_transition: bool = False
+
+    def __post_init__(self) -> None:
+        if type(self.generation) is not int or self.generation < 0:
+            raise ValueError("presentation generation 必须是非负整数。")
+        if not isinstance(self.experiment, ManualExperimentSnapshot):
+            raise ValueError("presentation 必须包含有效 manual snapshot。")
+        if isinstance(self.airflow, bool) or not math.isfinite(float(self.airflow)):
+            raise ValueError("presentation airflow 必须是有限数值。")
+        if isinstance(self.telemetry_timestamp, bool) or not math.isfinite(
+            float(self.telemetry_timestamp)
+        ):
+            raise ValueError("presentation telemetry timestamp 必须是有限数值。")
 
 
 @dataclass(frozen=True, slots=True)

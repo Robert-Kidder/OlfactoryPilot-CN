@@ -6,6 +6,7 @@ from PySide6.QtWidgets import QAbstractButton, QLabel, QMessageBox
 from qfluentwidgets import InfoLevel
 
 from app.main import DEFAULT_CONFIG, build_application
+from app.models import ManualExperimentSnapshot, ManualPresentationSnapshot
 from app.views.calibration_view import CalibrationView
 from app.views.cleaning_view import CleaningView
 from app.views.hardware_settings_view import HardwareSettingsView
@@ -116,6 +117,7 @@ def test_production_telemetry_order_keeps_low_flow_feedback_as_error(qt_app) -> 
                 "safety_state": "LOW_FLOW",
             }
         )
+        window.manual_experiment_view.resolve_notice_condition(source="last-shutdown")
         qt_app.processEvents()
 
         assert window.manual_experiment_view.current_notice_severity == "error"
@@ -194,6 +196,55 @@ def test_safety_notice_is_transition_driven_and_reentry_can_notify_again(qt_app)
 
         assert window.manual_experiment_view.notice_frame is not None
         assert "气流不足" in window.manual_experiment_view.current_notice_title
+    finally:
+        window.close()
+
+
+def test_expected_manual_low_flow_transition_creates_no_safety_notice(qt_app) -> None:
+    _, window = build_application(
+        DEFAULT_CONFIG,
+        start_worker=False,
+        simulation=True,
+    )
+    try:
+        window.show()
+        window.manual_experiment_view.clear_notice()
+        baseline = window.manual_experiment_view.notice_creation_count
+        telemetry = window.state.telemetry
+        telemetry.connected = True
+        telemetry.safety_state = "LOW_FLOW"
+        telemetry.safety_reason = "expected A zero transition"
+
+        window.render_telemetry(
+            telemetry,
+            expected_manual_flow_transition=True,
+            hardware_ready=True,
+        )
+        qt_app.processEvents()
+
+        assert window.manual_experiment_view.notice_creation_count == baseline
+        current = window.manual_experiment_view._notification_coordinator.current
+        assert current is None or current.identity[0] != "condition"
+    finally:
+        window.close()
+
+
+def test_connected_self_check_failure_is_not_presented_as_ready(qt_app) -> None:
+    _, window = build_application(
+        DEFAULT_CONFIG,
+        start_worker=False,
+        simulation=True,
+    )
+    try:
+        telemetry = window.state.telemetry
+        telemetry.connected = True
+        telemetry.safety_state = "SAFE"
+
+        window.render_telemetry(telemetry, hardware_ready=False)
+
+        assert window._connection_badge.text() == "设备检查未通过"
+        assert window._connection_action_label.text() == "请检查设备后重新连接"
+        assert window._connection_badge.level == InfoLevel.ERROR
     finally:
         window.close()
 
@@ -278,5 +329,93 @@ def test_unknown_connected_safety_code_uses_natural_persistent_header_text(qt_ap
         assert "INTERNAL_STATE_42" not in visible
         assert "epoch=7" not in visible
         assert "owner=manual" not in visible
+    finally:
+        window.close()
+
+
+def test_mica_is_disabled_and_overlay_does_not_change_core_geometry(qt_app) -> None:
+    _, window = build_application(
+        DEFAULT_CONFIG,
+        start_worker=False,
+        simulation=True,
+    )
+    try:
+        window.show()
+        qt_app.processEvents()
+        assert not window.isMicaEffectEnabled()
+        assert not hasattr(window.manual_experiment_view, "_notice_host")
+        baseline = (
+            window._connection_status_slot.geometry(),
+            window._connection_action_slot.geometry(),
+            window.manual_experiment_view.geometry(),
+        )
+
+        telemetry = window.state.telemetry
+        telemetry.connected = True
+        telemetry.safety_state = "LOW_FLOW"
+        window.render_telemetry(telemetry)
+        qt_app.processEvents()
+
+        assert window.manual_experiment_view.notice_frame is not None
+        assert window.manual_experiment_view.notice_frame.isVisibleTo(window)
+        assert (
+            window._connection_status_slot.geometry(),
+            window._connection_action_slot.geometry(),
+            window.manual_experiment_view.geometry(),
+        ) == baseline
+    finally:
+        window.close()
+
+
+def test_queued_presentation_coalesces_to_latest_coherent_generation(qt_app) -> None:
+    _, window = build_application(
+        DEFAULT_CONFIG,
+        start_worker=False,
+        simulation=True,
+    )
+    try:
+        window.show()
+        base = ManualPresentationSnapshot(
+            generation=100,
+            connected=False,
+            hardware_ready=False,
+            safety_state="DATA_STALE",
+            safety_reason="设备未连接",
+            airflow=0.0,
+            telemetry_timestamp=100.0,
+            experiment=ManualExperimentSnapshot(supply_enabled=False),
+            controls_enabled=False,
+            can_apply_flow=False,
+            can_release=False,
+            can_stop=False,
+            detail_text="当前不可操作：设备尚未连接。",
+        )
+        latest = ManualPresentationSnapshot(
+            generation=101,
+            connected=True,
+            hardware_ready=True,
+            safety_state="SAFE",
+            safety_reason="",
+            airflow=250.0,
+            telemetry_timestamp=101.0,
+            experiment=ManualExperimentSnapshot(supply_enabled=True),
+            controls_enabled=True,
+            can_apply_flow=True,
+            can_release=False,
+            can_stop=False,
+            detail_text="",
+        )
+
+        window.queue_presentation(base)
+        window.queue_presentation(latest)
+        qt_app.processEvents()
+
+        assert window._rendered_presentation_generation == 101
+        assert window._connection_badge.text() == "设备已连接"
+        assert window.manual_experiment_view.snapshot.controls_enabled
+        assert window.manual_experiment_view.snapshot.can_apply_flow
+        assert window.manual_experiment_view.snapshot.supply_enabled is True
+        assert window.manual_experiment_view.snapshot.detail_text == ""
+        assert window.manual_experiment_view.current_notice_title != "设备数据中断"
     finally:
         window.close()

@@ -47,6 +47,7 @@ from .manual_experiment import (
     ManualExperimentResult,
     ManualExperimentSnapshot,
     ManualExperimentStatus,
+    ManualPresentationSnapshot,
     ManualSupplyIntent,
     ManualValveTarget,
 )
@@ -120,6 +121,7 @@ __all__ = [
     "ManualExperimentIntent",
     "ManualExperimentOutcome",
     "ManualExperimentPlan",
+    "ManualPresentationSnapshot",
     "ManualExperimentResult",
     "ManualExperimentSnapshot",
     "ManualExperimentStatus",

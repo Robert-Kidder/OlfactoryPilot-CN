@@ -165,6 +165,31 @@ class InterlockSnapshot:
         return ""
 
 
+@dataclass(frozen=True, slots=True)
+class _QueuedOwnerMessage:
+    """Owner-queue message with cross-producer arrival ordering metadata."""
+
+    kind: str
+    payload: dict[str, Any]
+    ingress_sequence: int
+
+    def __iter__(self):
+        yield self.kind
+        yield self.payload
+
+    def __getitem__(self, index: int):
+        return (self.kind, self.payload)[index]
+
+
+@dataclass(frozen=True, slots=True)
+class _FlowResultIngress:
+    """Copied receipt and mailbox-owned arrival evidence."""
+
+    ingress_sequence: int
+    received_ns: int
+    result: FlowCommandResult
+
+
 class ActuationInterlockIngress:
     """Producer-safe immutable readiness ingress; protocol state remains elsewhere."""
 
@@ -465,7 +490,11 @@ class ActuationWorker(QThread):
         )
         self._condition = threading.Condition(threading.RLock())
         self._normal_heap: list[tuple[int, int, int, ActuationCommand]] = []
-        self._messages: deque[tuple[str, dict[str, Any]]] = deque()
+        self._messages: deque[_QueuedOwnerMessage] = deque()
+        self._flow_result_mailbox_lock = threading.Lock()
+        self._flow_result_mailbox: deque[_FlowResultIngress] = deque()
+        self._flow_result_ingress_open = True
+        self._owner_ingress_sequence = 0
         self._deadline_heap: list[tuple[int, int, int, str, dict[str, Any]]] = []
         self._emergency: deque[ActuationCommand] = deque()
         self._sequence = 1_000_000
@@ -539,6 +568,7 @@ class ActuationWorker(QThread):
         self._manual_flow_result: FlowCommandResult | None = None
         self._manual_flow_deadline_ns: int | None = None
         self._manual_waiting_for_safe_flow = False
+        self._manual_waiting_for_safe_flow_role = ""
         self._manual_start_pending = False
 
     def set_session_recorder(self, recorder) -> bool:
@@ -573,7 +603,7 @@ class ActuationWorker(QThread):
                 return False
             self._manual_start_pending = True
             self._messages.append(
-                (
+                self._queued_owner_message(
                     "manual_start",
                     {"plan": plan, "lease_token": lease_token},
                 )
@@ -585,7 +615,9 @@ class ActuationWorker(QThread):
         with self._condition:
             if not self._manual_active() and not self._manual_start_pending:
                 return False
-            self._messages.appendleft(("manual_stop", {"reason": str(reason)}))
+            self._messages.appendleft(
+                self._queued_owner_message("manual_stop", {"reason": str(reason)})
+            )
             self._condition.notify_all()
             return True
 
@@ -622,7 +654,7 @@ class ActuationWorker(QThread):
             }:
                 return False
             self._messages.append(
-                (
+                self._queued_owner_message(
                     "cleaning_start",
                     {
                         "plan": plan,
@@ -642,7 +674,7 @@ class ActuationWorker(QThread):
             }:
                 return False
             self._messages.appendleft(
-                (
+                self._queued_owner_message(
                     "cleaning_stop",
                     {"reason": str(reason), "aborted": bool(aborted)},
                 )
@@ -657,7 +689,7 @@ class ActuationWorker(QThread):
                 CleaningStatus.RECOVERY_REQUIRED,
             }:
                 return False
-            self._messages.appendleft(("cleaning_recover", {}))
+            self._messages.appendleft(self._queued_owner_message("cleaning_recover", {}))
             self._condition.notify_all()
         return True
 
@@ -1186,13 +1218,59 @@ class ActuationWorker(QThread):
         if not self.isRunning() and self._writer_hal() is None:
             self.process_ready()
 
+    def enqueue_flow_result_from_producer(self, result: FlowCommandResult) -> bool:
+        """DirectConnection ingress：只复制回执并在专用锁下入队。
+
+        该方法可能在 FlowWorker emitter thread 中执行，因此不得触碰 QObject
+        timer、presentation 或动作状态机。真正消费仍由 ActuationWorker.run() 完成。
+        """
+
+        if not isinstance(result, FlowCommandResult):
+            return False
+        copied = replace(
+            result,
+            command=replace(result.command),
+            result=replace(result.result),
+        )
+        with self._flow_result_mailbox_lock:
+            if not self._flow_result_ingress_open:
+                return False
+            self._owner_ingress_sequence += 1
+            self._flow_result_mailbox.append(
+                _FlowResultIngress(
+                    ingress_sequence=self._owner_ingress_sequence,
+                    received_ns=int(self._clock_ns()),
+                    result=copied,
+                )
+            )
+        # Wake only the serial owner loop. No QObject, timer, controller,
+        # presentation, or state-machine work occurs in this producer thread.
+        with self._condition:
+            self._condition.notify_all()
+        return True
+
+    def _queued_owner_message(
+        self,
+        kind: str,
+        payload: dict[str, Any],
+    ) -> _QueuedOwnerMessage:
+        """Stamp a normal owner message while the caller holds `_condition`."""
+
+        with self._flow_result_mailbox_lock:
+            self._owner_ingress_sequence += 1
+            return _QueuedOwnerMessage(
+                kind=kind,
+                payload=payload,
+                ingress_sequence=self._owner_ingress_sequence,
+            )
+
     def _post_message(self, kind: str, payload: dict[str, Any]) -> None:
         rejected = False
         with self._condition:
             if not self._accepting:
                 rejected = True
             else:
-                self._messages.append((kind, payload))
+                self._messages.append(self._queued_owner_message(kind, payload))
                 self._condition.notify_all()
         if rejected:
             self._reject_stopped_message(kind, payload)
@@ -1767,6 +1845,8 @@ class ActuationWorker(QThread):
     def _consume_background_safe_stop_flow_result(
         self,
         wrapped: FlowCommandResult,
+        *,
+        received_ns: int | None = None,
     ) -> None:
         plan = self._background_safe_stop_plan
         if plan is None:
@@ -1779,7 +1859,10 @@ class ActuationWorker(QThread):
             self._background_safe_stop_final_flow_id = None
             expected_command = self._background_safe_stop_final_flow_command
             self._background_safe_stop_final_flow_command = None
-            late = self._consume_background_flow_deadline(wrapped.command.command_id)
+            late = self._consume_background_flow_deadline(
+                wrapped.command.command_id,
+                received_ns=received_ns,
+            )
             final_zero = bool(
                 expected_command is not None
                 and wrapped.command == expected_command
@@ -1854,7 +1937,10 @@ class ActuationWorker(QThread):
             plan.identity.operation_id,
             "a_zero",
         )
-        late = self._consume_background_flow_deadline(wrapped.command.command_id)
+        late = self._consume_background_flow_deadline(
+            wrapped.command.command_id,
+            received_ns=received_ns,
+        )
         self._background_safe_stop_flow_id = None
         self._background_safe_stop_flow_command = None
         if late:
@@ -1974,9 +2060,15 @@ class ActuationWorker(QThread):
         ]
         heapq.heapify(self._deadline_heap)
 
-    def _consume_background_flow_deadline(self, command_id: str) -> bool:
+    def _consume_background_flow_deadline(
+        self,
+        command_id: str,
+        *,
+        received_ns: int | None = None,
+    ) -> bool:
         deadline_ns = self._background_safe_stop_flow_deadlines.pop(command_id, None)
-        return deadline_ns is None or int(self._clock_ns()) > deadline_ns
+        observed_ns = int(self._clock_ns()) if received_ns is None else int(received_ns)
+        return deadline_ns is None or observed_ns > deadline_ns
 
     def _handle_background_safe_stop_timeout(
         self,
@@ -2122,7 +2214,9 @@ class ActuationWorker(QThread):
         with self._condition:
             self._shutdown_close_started = False
             self._shutdown_close_failed = False
-            self._messages.appendleft(("emergency_close_all", {}))
+            self._messages.appendleft(
+                self._queued_owner_message("emergency_close_all", {})
+            )
             self._condition.notify_all()
         if not self.isRunning():
             self.process_ready_with_do_ownership()
@@ -2151,7 +2245,7 @@ class ActuationWorker(QThread):
         result: dict[str, SafeStopIdentity | None] = {"identity": None}
         with self._condition:
             self._messages.appendleft(
-                (
+                self._queued_owner_message(
                     "safe_stop_fence",
                     {
                         "operation_id": str(operation_id),
@@ -2312,7 +2406,7 @@ class ActuationWorker(QThread):
                 int(self._clock_ns()) + max(1, int(timeout_ms)) * 1_000_000
             )
             self._messages.appendleft(
-                (
+                self._queued_owner_message(
                     "safe_stop_selector",
                     {"identity": plan.identity, "command_id": command_id},
                 )
@@ -2421,7 +2515,9 @@ class ActuationWorker(QThread):
             self._shutdown_close_started = False
             self._shutdown_close_failed = False
             self._messages.appendleft(
-                ("safe_stop_close_odors", {"identity": identity})
+                self._queued_owner_message(
+                    "safe_stop_close_odors", {"identity": identity}
+                )
             )
             self._condition.notify_all()
         if not self.isRunning():
@@ -2589,6 +2685,9 @@ class ActuationWorker(QThread):
             queued_messages = list(self._messages)
             self._messages.clear()
             self._condition.notify_all()
+        with self._flow_result_mailbox_lock:
+            self._flow_result_ingress_open = False
+            self._flow_result_mailbox.clear()
         self._settle_cancelled_receipts(cancelled)
         self._reject_queued_messages(queued_messages)
         if self.isRunning():
@@ -2633,7 +2732,12 @@ class ActuationWorker(QThread):
                 self._manual_pending_flow_role = ""
                 self._manual_flow_result = None
                 self._manual_flow_deadline_ns = None
+                self._manual_waiting_for_safe_flow = False
+                self._manual_waiting_for_safe_flow_role = ""
             self._accepting = True
+        with self._flow_result_mailbox_lock:
+            self._flow_result_mailbox.clear()
+            self._flow_result_ingress_open = True
         self._settle_cancelled_receipts(cancelled)
         self._reject_queued_messages(queued_messages)
         self.manual_snapshot_ready.emit(self._manual_snapshot)
@@ -2657,6 +2761,29 @@ class ActuationWorker(QThread):
                 "safe_stop_selector",
                 "stop",
             }
+            with self._flow_result_mailbox_lock:
+                if self._flow_result_mailbox:
+                    ingress = self._flow_result_mailbox[0]
+                    older_safety_index = None
+                    older_safety_sequence = ingress.ingress_sequence
+                    for index, message in enumerate(self._messages):
+                        if message.kind in {"recorder_bind", "recorder_fence"}:
+                            break
+                        if (
+                            message.kind in safety_priority_message_kinds
+                            and message.ingress_sequence < older_safety_sequence
+                        ):
+                            older_safety_index = index
+                            older_safety_sequence = message.ingress_sequence
+                    if older_safety_index is not None:
+                        message = self._messages[older_safety_index]
+                        del self._messages[older_safety_index]
+                        return message.kind, message.payload
+                    ingress = self._flow_result_mailbox.popleft()
+                    return "flow_result", {
+                        "flow_result": ingress.result,
+                        "received_ns": ingress.received_ns,
+                    }
             # A recorder fence may be queued before a safe-stop Flow receipt.
             # The fence itself waits for the stop transition, so allow only
             # this correlated safety receipt to cross that producer barrier.
@@ -2667,13 +2794,13 @@ class ActuationWorker(QThread):
                     == "safety:safe-stop"
                 ):
                     del self._messages[index]
-                    return message
+                    return message.kind, message.payload
             for index, message in enumerate(self._messages):
                 if message[0] in {"recorder_bind", "recorder_fence"}:
                     break
                 if message[0] in safety_priority_message_kinds:
                     del self._messages[index]
-                    return message
+                    return message.kind, message.payload
             now_ns = int(self._clock_ns())
             normal_head = self._normal_heap[0][:3] if self._normal_heap else None
             deadline_head = self._deadline_heap[0][:3] if self._deadline_heap else None
@@ -2728,7 +2855,7 @@ class ActuationWorker(QThread):
                     break
                 if message[0] in priority_message_kinds:
                     del self._messages[index]
-                    return message
+                    return message.kind, message.payload
             if self._normal_heap and self._normal_heap[0][0] <= now_ns:
                 return heapq.heappop(self._normal_heap)[3]
             if self._messages:
@@ -2804,7 +2931,10 @@ class ActuationWorker(QThread):
             wrapped = payload["flow_result"]
             if self._is_manual_flow_result(wrapped):
                 self.flow_result_ready.emit(wrapped)
-                self._consume_manual_flow_result(wrapped)
+                self._consume_manual_flow_result(
+                    wrapped,
+                    received_ns=payload.get("received_ns"),
+                )
                 return
             if wrapped.command.source == "manual:experiment":
                 if (
@@ -2816,7 +2946,10 @@ class ActuationWorker(QThread):
                     # match its exact pending command/generation.  Treat that
                     # as conflicting evidence, not as an innocuous old result.
                     self.flow_result_ready.emit(wrapped)
-                    self._consume_manual_flow_result(wrapped)
+                    self._consume_manual_flow_result(
+                        wrapped,
+                        received_ns=payload.get("received_ns"),
+                    )
                     return
                 # A previous manual operation may finish after a new one has
                 # acquired the owner.  Preserve it as stale evidence without
@@ -2902,7 +3035,10 @@ class ActuationWorker(QThread):
             payload["flow_result"]
         ):
             self.flow_result_ready.emit(payload["flow_result"])
-            self._consume_background_safe_stop_flow_result(payload["flow_result"])
+            self._consume_background_safe_stop_flow_result(
+                payload["flow_result"],
+                received_ns=payload.get("received_ns"),
+            )
             return
         if self._cleaning_snapshot.status in {
             CleaningStatus.PREPARING,
@@ -4644,6 +4780,8 @@ class ActuationWorker(QThread):
         self._manual_pending_flow_command = None
         self._manual_pending_flow_role = ""
         self._manual_flow_result = None
+        self._manual_waiting_for_safe_flow = False
+        self._manual_waiting_for_safe_flow_role = ""
         self._manual_snapshot = ManualExperimentSnapshot(
             status=ManualExperimentStatus.FLOW_PENDING,
             identity=plan.identity,
@@ -4704,7 +4842,12 @@ class ActuationWorker(QThread):
             and wrapped.command == pending
         )
 
-    def _consume_manual_flow_result(self, wrapped: FlowCommandResult) -> None:
+    def _consume_manual_flow_result(
+        self,
+        wrapped: FlowCommandResult,
+        *,
+        received_ns: int | None = None,
+    ) -> None:
         plan = self._manual_plan
         command = self._manual_pending_flow_command
         role = self._manual_pending_flow_role
@@ -4717,9 +4860,10 @@ class ActuationWorker(QThread):
         if command is None or not self._manual_active():
             self._fail_manual("终态后收到未知或迟到的 manual flow receipt。")
             return
+        observed_ns = int(self._clock_ns()) if received_ns is None else int(received_ns)
         if (
             self._manual_flow_deadline_ns is None
-            or int(self._clock_ns()) > self._manual_flow_deadline_ns
+            or observed_ns > self._manual_flow_deadline_ns
         ):
             self._fail_manual("manual flow receipt 超过单调 deadline。")
             return
@@ -4759,22 +4903,33 @@ class ActuationWorker(QThread):
             self.interlock.arm_airflow_monitor()
             self._publish_manual(
                 supply_restored=True,
+                supply_restored_at=float(self._wall_clock()),
                 supply_enabled=True,
-                supply_transitioning=False,
+                supply_transitioning=True,
             )
-            self._complete_manual()
+            self._manual_waiting_for_safe_flow = True
+            self._manual_waiting_for_safe_flow_role = "restore_supply"
+            self._schedule_manual_receipt_timeout("flow_safe", ("airflow-safe",))
             return
         self.interlock.arm_airflow_monitor()
         self._manual_waiting_for_safe_flow = True
+        self._manual_waiting_for_safe_flow_role = "initial_supply"
         self._schedule_manual_receipt_timeout("flow_safe", ("airflow-safe",))
 
     def _continue_manual_after_safe_flow(self) -> None:
         plan = self._manual_plan
         if plan is None or not self._manual_waiting_for_safe_flow:
             return
+        self._cancel_manual_flow_safe_timeout(plan.identity)
+        waiting_role = self._manual_waiting_for_safe_flow_role
         self._manual_waiting_for_safe_flow = False
+        self._manual_waiting_for_safe_flow_role = ""
         if not self.interlock.clear_unsafe_latch():
             self._fail_manual("手动流量确认后安全锁存无法清除。")
+            return
+        if waiting_role == "restore_supply":
+            self._publish_manual(supply_transitioning=False)
+            self._complete_manual()
             return
         self._publish_manual(
             status=ManualExperimentStatus.SELECTOR_PENDING,
@@ -5212,6 +5367,18 @@ class ActuationWorker(QThread):
         )
         return deadline_ns
 
+    def _cancel_manual_flow_safe_timeout(self, identity) -> None:
+        self._deadline_heap = [
+            item
+            for item in self._deadline_heap
+            if not (
+                item[3] == "manual_receipt_timeout"
+                and item[4].get("identity") == identity
+                and item[4].get("phase") == "flow_safe"
+            )
+        ]
+        heapq.heapify(self._deadline_heap)
+
     def _handle_manual_receipt_timeout(
         self,
         *,
@@ -5240,12 +5407,25 @@ class ActuationWorker(QThread):
             return "manual execution epoch 已被抢占。"
         if snapshot.device_lease != DeviceLeaseKind.MANUAL.value:
             return "manual lease 已被抢占或释放。"
-        if self._manual_snapshot.status is ManualExperimentStatus.FLOW_PENDING:
+        flow_transition_statuses = {
+            ManualExperimentStatus.FLOW_PENDING,
+            ManualExperimentStatus.ZEROING_A,
+            ManualExperimentStatus.SELECTOR_COMPENSATION,
+            ManualExperimentStatus.RESTORING_SUPPLY,
+        }
+        if self._manual_snapshot.status in flow_transition_statuses:
+            # LOW_FLOW and flow_setpoints_ready=False are expected between A=0
+            # and the correlated supply-restore receipt.  A telemetry wake-up
+            # from the zero-flow sample can legitimately remain queued while
+            # the selector compensation receipt advances the owner to restore.
+            # Keep hard connection/hardware faults and every non-flow safety
+            # state fail-closed; only the choreography's known flow transient
+            # is tolerated until its receipt/deadline resolves it.
             if not snapshot.connected:
                 return "硬件连接已断开，manual 已进入安全收敛。"
             if not snapshot.hardware_ready:
                 return "硬件自检状态已失效，manual 已进入安全收敛。"
-            if snapshot.safety_state != "SAFE":
+            if snapshot.safety_state not in {"SAFE", "LOW_FLOW"}:
                 return f"安全状态为 {snapshot.safety_state}，manual 已进入安全收敛。"
             return ""
         unsafe = snapshot.unsafe_reason()
@@ -5287,6 +5467,7 @@ class ActuationWorker(QThread):
         self._manual_pending_flow_role = ""
         self._manual_flow_deadline_ns = None
         self._manual_waiting_for_safe_flow = False
+        self._manual_waiting_for_safe_flow_role = ""
         self._deadline_heap = [
             item
             for item in self._deadline_heap
@@ -5396,6 +5577,19 @@ class ActuationWorker(QThread):
             self.invalidate_execution(reason=wrapped.result.message)
         elif self.protocol_state.active_valve is None and not self.protocol_state.possibly_open_valves:
             self.interlock.clear_unsafe_latch()
+        if (
+            wrapped.result.success
+            and wrapped.command.source == "safety:startup-zero"
+            and not self._manual_active()
+        ):
+            # Startup A/B/C=0 is owner-consumed physical evidence. Publish it
+            # through the manual snapshot so the first UI action is "start
+            # supply", while an actually unknown state remains conservative.
+            self._publish_manual(
+                supply_enabled=False,
+                supply_transitioning=False,
+                supply_restored=False,
+            )
         self.flow_result_ready.emit(wrapped)
 
     def _sync_ttl_request(self) -> None:
