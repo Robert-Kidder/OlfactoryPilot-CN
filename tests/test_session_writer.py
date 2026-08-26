@@ -817,9 +817,11 @@ def test_close_timeout_does_not_publish_or_wait_forever(tmp_path: Path) -> None:
 
 def test_slow_finalize_timeout_claims_terminal_result_and_never_publishes(
     tmp_path: Path,
+    monkeypatch,
 ) -> None:
     entered_finalize = threading.Event()
     release_finalize = threading.Event()
+    fake_monotonic = [100.0]
 
     def slow(stage: str, _path: Path) -> None:
         if stage == "manifest_write":
@@ -833,6 +835,35 @@ def test_slow_finalize_timeout_claims_terminal_result_and_never_publishes(
     )
     assert writer.start_and_wait()
     assert ingress.post_fence("controller", producer_sequence=0)
+
+    real_time = session_writer_module.time
+
+    class ControlledTime:
+        @staticmethod
+        def monotonic() -> float:
+            return fake_monotonic[0]
+
+        def __getattr__(self, name: str):
+            return getattr(real_time, name)
+
+    monkeypatch.setattr(session_writer_module, "time", ControlledTime())
+    finalized = writer._finalized
+
+    class TimeoutAfterFinalizeEntered:
+        def wait(self, timeout: float | None = None) -> bool:
+            assert timeout == pytest.approx(0.03)
+            assert entered_finalize.wait(2)
+            assert writer._close_deadline_monotonic == pytest.approx(100.03)
+            fake_monotonic[0] = writer._close_deadline_monotonic
+            return False
+
+        def set(self) -> None:
+            finalized.set()
+
+        def is_set(self) -> bool:
+            return finalized.is_set()
+
+    writer._finalized = TimeoutAfterFinalizeEntered()  # type: ignore[assignment]
 
     result = writer.close(reason="timeout", timeout_ms=30)
     assert entered_finalize.is_set()

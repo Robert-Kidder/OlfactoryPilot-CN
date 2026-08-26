@@ -1,5 +1,78 @@
+from __future__ import annotations
+
+import os
+import shutil
+import stat
+import sys
+import tempfile
+from pathlib import Path
+
 import pytest
 from PySide6.QtWidgets import QApplication
+
+_PROJECT_ROOT = Path(__file__).resolve().parents[1]
+_MANAGED_BASETEMP_ATTRIBUTE = "_olfactorypilot_managed_basetemp"
+_BASETEMP_REDIRECT_NOTICE = (
+    "仓库内 --basetemp 已重定向到系统临时目录，以避免污染 Git/HIL evidence gate。"
+)
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_configure(config: pytest.Config) -> None:
+    """Redirect only repository-contained basetemp before pytest builds its factory."""
+    requested = config.option.basetemp
+    if requested is None:
+        return
+
+    requested_path = Path(requested)
+    if not requested_path.is_absolute():
+        requested_path = Path.cwd() / requested_path
+    resolved_requested = requested_path.resolve()
+    if not resolved_requested.is_relative_to(_PROJECT_ROOT):
+        return
+
+    system_temp_root = Path(tempfile.gettempdir()).resolve()
+    if system_temp_root.is_relative_to(_PROJECT_ROOT):
+        raise pytest.UsageError(
+            "系统临时目录位于仓库内，无法安全重定向 --basetemp。"
+        )
+    managed_basetemp = Path(
+        tempfile.mkdtemp(prefix="olfactorypilot-pytest-", dir=system_temp_root)
+    ).resolve()
+    if managed_basetemp.is_relative_to(_PROJECT_ROOT):
+        shutil.rmtree(managed_basetemp, onerror=_retry_remove_readonly)
+        raise pytest.UsageError(
+            "pytest 临时目录仍位于仓库内，已拒绝使用以避免污染 Git/HIL evidence gate。"
+        )
+    config.option.basetemp = str(managed_basetemp)
+    setattr(config, _MANAGED_BASETEMP_ATTRIBUTE, managed_basetemp)
+    print(_BASETEMP_REDIRECT_NOTICE, file=sys.stderr)
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_unconfigure(config: pytest.Config) -> None:
+    """Delete only the unique OS temp directory owned by this pytest session."""
+    managed_basetemp = getattr(config, _MANAGED_BASETEMP_ATTRIBUTE, None)
+    if managed_basetemp is not None:
+        delattr(config, _MANAGED_BASETEMP_ATTRIBUTE)
+        if not managed_basetemp.exists():
+            return
+        shutil.rmtree(managed_basetemp, onerror=_retry_remove_readonly)
+
+
+def _retry_remove_readonly(function, path: str, error_info) -> None:
+    """Retry Windows cleanup for read-only files created by nested Git repos."""
+    error = error_info[1]
+    if not isinstance(error, PermissionError):
+        raise error
+    os.chmod(path, os.stat(path, follow_symlinks=False).st_mode | stat.S_IWRITE)
+    function(path)
+
+
+@pytest.fixture
+def temp_policy_plugin():
+    """Expose this conftest plugin to its focused contract tests."""
+    return sys.modules[__name__]
 
 
 @pytest.fixture(scope="session")
