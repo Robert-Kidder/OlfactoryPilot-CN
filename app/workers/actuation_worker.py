@@ -4810,9 +4810,9 @@ class ActuationWorker(QThread):
             command_id=f"manual-flow-{plan.identity.generation}-{self._sequence}",
             execution_epoch=plan.identity.execution_epoch,
             sequence=self._sequence,
-            mode="manual_supply",
-            a=setpoints.sample_a_sccm,
-            b=float(setpoints.main_b_sccm),
+            mode="manual_baseline",
+            a=setpoints.sample_a_sccm + setpoints.vacuum_c_sccm,
+            b=setpoints.main_b_sccm,
             c=setpoints.vacuum_c_sccm,
             source="manual:experiment",
             operation_id=plan.identity.operation_id,
@@ -4911,6 +4911,10 @@ class ActuationWorker(QThread):
             self._manual_waiting_for_safe_flow_role = "restore_supply"
             self._schedule_manual_receipt_timeout("flow_safe", ("airflow-safe",))
             return
+        if role == "stimulus":
+            self._publish_manual(flow_confirmed=True)
+            self._submit_manual_selector_odor()
+            return
         self.interlock.arm_airflow_monitor()
         self._manual_waiting_for_safe_flow = True
         self._manual_waiting_for_safe_flow_role = "initial_supply"
@@ -4937,6 +4941,46 @@ class ActuationWorker(QThread):
             supply_enabled=True,
             supply_transitioning=False,
         )
+        self._submit_manual_stimulus_flow()
+
+    def _submit_manual_stimulus_flow(self) -> None:
+        plan = self._manual_plan
+        if plan is None:
+            return
+        setpoints = plan.flow_setpoints
+        self._sequence += 1
+        command = FlowCommand(
+            command_id=f"manual-stimulus-{plan.identity.generation}-{self._sequence}",
+            execution_epoch=plan.identity.execution_epoch,
+            sequence=self._sequence,
+            mode="manual_stimulus",
+            a=setpoints.sample_a_sccm,
+            b=setpoints.main_b_sccm,
+            c=0.0,
+            source="manual:experiment",
+            operation_id=plan.identity.operation_id,
+            generation=plan.identity.generation,
+            lease_token=(
+                None
+                if self._manual_lease_token is None
+                else self._manual_lease_token.token
+            ),
+        )
+        self._manual_pending_flow_id = command.command_id
+        self._manual_pending_flow_command = command
+        self._manual_pending_flow_role = "stimulus"
+        self._manual_flow_result = None
+        if self._flow_submitter(command) is False:
+            self._fail_manual("手动刺激流量命令未被 FlowWorker 接受。")
+            return
+        self._manual_flow_deadline_ns = self._schedule_manual_receipt_timeout(
+            "stimulus_flow", (command.command_id,)
+        )
+
+    def _submit_manual_selector_odor(self) -> None:
+        plan = self._manual_plan
+        if plan is None:
+            return
         try:
             step = self.valve_service.selector_route_step(SelectorRoute.ODOR)
         except ValueError as exc:
@@ -5222,7 +5266,7 @@ class ActuationWorker(QThread):
             sequence=self._sequence,
             mode="manual_post_close_a_zero",
             a=0.0,
-            b=float(setpoints.main_b_sccm),
+            b=setpoints.main_b_sccm,
             c=setpoints.vacuum_c_sccm,
             source="manual:experiment",
             operation_id=plan.identity.operation_id,
@@ -5299,8 +5343,8 @@ class ActuationWorker(QThread):
             execution_epoch=plan.identity.execution_epoch,
             sequence=self._sequence,
             mode="manual_restore_supply",
-            a=setpoints.sample_a_sccm,
-            b=float(setpoints.main_b_sccm),
+            a=setpoints.sample_a_sccm + setpoints.vacuum_c_sccm,
+            b=setpoints.main_b_sccm,
             c=setpoints.vacuum_c_sccm,
             source="manual:experiment",
             operation_id=plan.identity.operation_id,
@@ -5389,7 +5433,7 @@ class ActuationWorker(QThread):
         plan = self._manual_plan
         if plan is None or identity != plan.identity or not self._manual_active():
             return
-        if phase in {"flow", "flow_zero", "restore_supply"}:
+        if phase in {"flow", "stimulus_flow", "flow_zero", "restore_supply"}:
             pending = self._manual_pending_flow_id in command_ids
         elif phase == "flow_safe":
             pending = self._manual_waiting_for_safe_flow

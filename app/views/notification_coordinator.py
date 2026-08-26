@@ -11,6 +11,12 @@ _SEVERITY_PRIORITY = {
     "critical": 40,
 }
 
+_NON_ACTIONABLE_DURATION_MS = {
+    "success": 2500,
+    "info": 3000,
+    "warning": 5000,
+}
+
 
 @dataclass(frozen=True, slots=True)
 class Notification:
@@ -20,7 +26,16 @@ class Notification:
     title: str
     message: str
     severity: str
+    actionable: bool
     order: int
+
+    @property
+    def duration_ms(self) -> int:
+        """行动型通知永不因视觉 severity 的默认时长而消失。"""
+
+        if self.actionable:
+            return -1
+        return _NON_ACTIONABLE_DURATION_MS.get(self.severity, -1)
 
     @property
     def priority(self) -> tuple[int, int]:
@@ -85,6 +100,7 @@ class NotificationCoordinator:
         title: str,
         message: str,
         severity: str = "error",
+        actionable: bool = True,
     ) -> Notification | None:
         previous_key = self._condition_by_source.get(source)
         if previous_key is not None and previous_key != key:
@@ -105,6 +121,7 @@ class NotificationCoordinator:
             title,
             message,
             severity,
+            actionable,
         )
         self._condition_by_source[source] = key
         return self.current
@@ -137,6 +154,7 @@ class NotificationCoordinator:
         title: str,
         message: str,
         severity: str = "info",
+        actionable: bool = False,
     ) -> Notification | None:
         identity = ("event", source, key)
         previous = self._events.get(source)
@@ -147,6 +165,7 @@ class NotificationCoordinator:
             title,
             message,
             severity,
+            actionable,
         )
         return self.current
 
@@ -154,6 +173,17 @@ class NotificationCoordinator:
         event = self._events.pop(source, None)
         if event is not None:
             self._dismissed.discard(event.identity)
+        return self.current
+
+    def retire_event(self, identity: tuple[object, ...]) -> Notification | None:
+        """抑制 exact event，直到 source 清除或发布新的 semantic key。"""
+
+        if len(identity) < 3 or identity[0] != "event":
+            return self.current
+        source = str(identity[1])
+        event = self._events.get(source)
+        if event is not None and event.identity == identity:
+            self._dismissed.add(identity)
         return self.current
 
     def dismiss(self, identity: tuple[object, ...]) -> Notification | None:
@@ -172,6 +202,7 @@ class NotificationCoordinator:
         title: str,
         message: str,
         severity: str,
+        actionable: bool,
     ) -> Notification:
         self._sequence += 1
         return Notification(
@@ -179,5 +210,6 @@ class NotificationCoordinator:
             title=str(title),
             message=str(message),
             severity=str(severity),
+            actionable=bool(actionable),
             order=self._sequence,
         )

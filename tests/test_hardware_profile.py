@@ -181,28 +181,22 @@ def test_mapping_fingerprint_ignores_display_name_but_includes_mapping_and_polar
     assert replace(channel, target="Dev1/P1.1").mapping_fingerprint != channel.mapping_fingerprint
 
 
-def test_flow_setpoints_derives_b_and_enforces_domain_and_profile_limits() -> None:
+def test_flow_setpoints_keeps_independent_b_and_enforces_domain_and_profile_limits() -> None:
     setpoints = FlowSetpoints(
-        total_sccm=1000,
         sample_a_sccm=250,
+        main_b_sccm=750,
         vacuum_c_sccm=100,
     )
     assert setpoints.main_b_sccm == 750
+    assert setpoints.derived_total_sccm == 1000
     assert setpoints.as_mfc_setpoints() == (("A", 250.0), ("B", 750.0), ("C", 100.0))
 
-    with pytest.raises(ValueError, match="0 ≤ A ≤ T"):
-        FlowSetpoints(total_sccm=100, sample_a_sccm=101, vacuum_c_sccm=0)
-    with pytest.raises(ValueError, match="派生值"):
-        FlowSetpoints(
-            total_sccm=100,
-            sample_a_sccm=25,
-            vacuum_c_sccm=0,
-            main_b_sccm=74,
-        )
-    with pytest.raises(ValueError, match="批准范围"):
+    with pytest.raises(ValueError, match="不得为负数"):
+        FlowSetpoints(sample_a_sccm=101, main_b_sccm=-1, vacuum_c_sccm=0)
+    with pytest.raises(ValueError, match=r"A\+B 总送风"):
         _default_profile().flow_setpoints(
-            total_sccm=5001,
-            sample_a_sccm=0,
+            sample_a_sccm=2501,
+            main_b_sccm=2500,
             vacuum_c_sccm=0,
         )
 

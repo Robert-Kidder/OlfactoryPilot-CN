@@ -61,9 +61,9 @@ def _intent(
 ) -> ManualExperimentIntent:
     return ManualExperimentIntent(
         external_ports=external_ports,
-        total_sccm=1000,
-        sample_a_sccm=250,
-        vacuum_c_sccm=100,
+        sample_a_sccm=500,
+        main_b_sccm=1000,
+        vacuum_c_sccm=500,
         duration_ns=duration_ns,
     )
 
@@ -113,6 +113,39 @@ def test_mock_controller_runs_manual_owner_and_releases_matching_lease(tmp_path,
     assert controller.device_lease.snapshot.kind is DeviceLeaseKind.IDLE
 
 
+def test_manual_500_1000_500_uses_exact_three_phase_targets_and_normal_completion(
+    tmp_path,
+) -> None:
+    controller, clock = _controller(tmp_path)
+    flow_commands = []
+    controller.flow_worker.result_ready.connect(
+        lambda wrapped: flow_commands.append(wrapped.command)
+    )
+
+    assert controller.handle_manual_release_requested(_intent(external_ports=(2, 4)))
+    _publish_fresh_safe_after_restore(controller)
+    stimulating = controller.actuation_worker.manual_snapshot
+    assert stimulating.status is ManualExperimentStatus.STIMULATING
+    assert stimulating.open_confirmed == (2, 4)
+
+    clock.value = stimulating.deadline_ns
+    controller._drain_actuation_if_not_running()
+    _publish_fresh_safe_after_restore(controller)
+
+    assert [(command.mode, command.a, command.b, command.c) for command in flow_commands] == [
+        ("manual_baseline", 1000.0, 1000.0, 500.0),
+        ("manual_stimulus", 500.0, 1000.0, 0.0),
+        ("manual_post_close_a_zero", 0.0, 1000.0, 500.0),
+        ("manual_restore_supply", 1000.0, 1000.0, 500.0),
+    ]
+    completed = controller.actuation_worker.manual_snapshot
+    assert completed.status is ManualExperimentStatus.COMPLETED
+    assert completed.close_confirmed == (2, 4)
+    assert completed.possibly_open == ()
+    assert not completed.recovery_reason
+    assert controller.device_lease.snapshot.kind is DeviceLeaseKind.IDLE
+
+
 def test_supplied_mock_runs_ports_04_06_for_five_seconds_without_protocol_crosstalk(
     tmp_path,
     monkeypatch,
@@ -121,9 +154,9 @@ def test_supplied_mock_runs_ports_04_06_for_five_seconds_without_protocol_crosst
     assert controller.handle_manual_supply_requested(
         ManualSupplyIntent(
             enabled=True,
-            total_sccm=1000,
-            sample_a_sccm=250,
-            vacuum_c_sccm=100,
+            sample_a_sccm=500,
+            main_b_sccm=1000,
+            vacuum_c_sccm=500,
         )
     )
     _publish_fresh_safe_after_restore(controller)
@@ -285,9 +318,9 @@ def test_mock_supply_uses_a_zero_compensation_gate_before_restoring_setpoints(
     assert controller.handle_manual_supply_requested(
         ManualSupplyIntent(
             enabled=True,
-            total_sccm=1000,
-            sample_a_sccm=250,
-            vacuum_c_sccm=100,
+            sample_a_sccm=500,
+            main_b_sccm=1000,
+            vacuum_c_sccm=500,
         )
     )
     _publish_fresh_safe_after_restore(controller)

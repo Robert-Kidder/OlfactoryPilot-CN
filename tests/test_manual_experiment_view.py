@@ -185,7 +185,7 @@ def test_manual_port_short_alias_has_no_redundant_tooltip(qtbot) -> None:
     assert view.port_buttons[2].toolTip() == ""
 
 
-def test_manual_flow_fields_derive_readonly_b_and_emit_domain_intents(qtbot) -> None:
+def test_manual_flow_fields_edit_independent_abc_and_emit_domain_intents(qtbot) -> None:
     view = ManualExperimentView()
     qtbot.addWidget(view)
     view.render_snapshot(
@@ -197,8 +197,8 @@ def test_manual_flow_fields_derive_readonly_b_and_emit_domain_intents(qtbot) -> 
             ports=_port_snapshots(),
             draft=ManualExperimentDraft(
                 selected_external_ports=(2, 4),
-                total_sccm=1000,
                 sample_a_sccm=200,
+                main_b_sccm=800,
                 vacuum_c_sccm=50,
                 duration_s=5,
             ),
@@ -209,22 +209,23 @@ def test_manual_flow_fields_derive_readonly_b_and_emit_domain_intents(qtbot) -> 
     view.supply_requested.connect(supply.append)
     view.release_requested.connect(releases.append)
 
-    assert view.main_b_input.isReadOnly()
     assert view.main_b_input.value() == 800
-    view.total_input.setValue(1200)
     view.sample_a_input.setValue(300)
+    view.main_b_input.setValue(900)
     assert view.main_b_input.value() == 900
+    assert view.derived_total_label.text() == "A+B：1200 ml/min"
     view.apply_flow_button.click()
     view.release_button.click()
 
     assert isinstance(supply[-1], ManualSupplyIntent)
     assert supply[-1].enabled is True
-    assert supply[-1].total_sccm == 1200
+    assert supply[-1].sample_a_sccm == 300
+    assert supply[-1].main_b_sccm == 900
     assert isinstance(releases[-1], ManualExperimentIntent)
     assert releases[-1].external_ports == (2, 4)
     assert releases[-1].duration_ns == 5_000_000_000
-    assert view.total_input.singleStep() == FLOW_STEP_ML_MIN
     assert view.sample_a_input.singleStep() == FLOW_STEP_ML_MIN
+    assert view.main_b_input.singleStep() == FLOW_STEP_ML_MIN
     assert view.duration_input.singleStep() == DURATION_STEP_S
 
 
@@ -249,17 +250,17 @@ def test_fluent_spin_boxes_follow_steps_and_disabled_state(qtbot) -> None:
     view.render_snapshot(
         ManualExperimentViewSnapshot(
             controls_enabled=True,
-            draft=ManualExperimentDraft(total_sccm=1000, sample_a_sccm=500),
+            draft=ManualExperimentDraft(sample_a_sccm=500, main_b_sccm=500),
         )
     )
-    assert isinstance(view.total_input, DoubleSpinBox)
-    view.total_input.stepUp()
-    assert view.total_input.value() == 1500
-    view.total_input.stepDown()
-    assert view.total_input.value() == 1000
+    assert isinstance(view.main_b_input, DoubleSpinBox)
+    view.main_b_input.stepUp()
+    assert view.main_b_input.value() == 1000
+    view.main_b_input.stepDown()
+    assert view.main_b_input.value() == 500
 
     view.render_snapshot(ManualExperimentViewSnapshot(controls_enabled=False))
-    assert not view.total_input.isEnabled()
+    assert not view.main_b_input.isEnabled()
 
 
 def test_manual_timer_only_refreshes_countdown_and_a_wording_is_exact(qtbot) -> None:
@@ -374,12 +375,71 @@ def test_closed_infobar_can_be_replaced_without_deleted_qobject_access(qtbot) ->
     view.show_notice("状态", "第一条", severity="info")
     first = view.notice_frame
     assert first is not None
+    creation_count = view.notice_creation_count
 
     first.close()
     assert view.notice_frame is None
+    view.show_notice("状态", "第一条", severity="info")
+    assert view.notice_frame is None
+    assert view.notice_creation_count == creation_count
+
+    view.clear_notice_event()
+    view.show_notice("状态", "第一条", severity="info")
+    assert view.notice_frame is not None
+    assert view.notice_creation_count == creation_count + 1
     view.show_notice("状态", "第二条", severity="info")
     assert view.notice_frame is not None
     assert view.detail_label.text() == "第二条"
+
+
+def test_managed_infobar_timeout_retires_transient_but_not_actionable(
+    qtbot,
+) -> None:
+    view = ManualExperimentView()
+    qtbot.addWidget(view)
+    view.show()
+
+    view.show_notice(
+        "实验已完成",
+        "供气已恢复。",
+        severity="success",
+        actionable=False,
+        source="result",
+    )
+    assert view.notice_frame is not None
+    assert view.notice_frame.duration == -1
+    assert view.notice_frame.property("managedDurationMs") == 2500
+    assert view._notice_timer.isActive()
+    # Exercise the view-owned timeout deterministically.  The coordinator
+    # tests cover the exact duration policy; relying on a multi-second GUI
+    # wait here also lets unrelated process-global QFluent animations from
+    # preceding tests fire during this assertion.
+    view._notice_timer.timeout.emit()
+    assert view.notice_frame is None
+    assert view._notification_coordinator.current is None
+    creation_count = view.notice_creation_count
+    view.show_notice(
+        "实验已完成",
+        "供气已恢复。",
+        severity="success",
+        actionable=False,
+        source="result",
+    )
+    assert view.notice_frame is None
+    assert view.notice_creation_count == creation_count
+
+    view.show_notice(
+        "请人工处理",
+        "需要检查设备。",
+        severity="warning",
+        actionable=True,
+        source="safety-action",
+    )
+    assert view.notice_frame is not None
+    assert view.notice_frame.duration == -1
+    assert view.notice_frame.property("managedDurationMs") == -1
+    assert not view._notice_timer.isActive()
+    assert view.notice_frame is not None
 
 
 def test_same_condition_severity_escalation_recreates_infobar_style(qtbot) -> None:

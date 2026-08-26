@@ -32,8 +32,8 @@ class ManualExperimentOutcome(StrEnum):
 @dataclass(frozen=True, slots=True)
 class ManualExperimentIntent:
     external_ports: tuple[int, ...]
-    total_sccm: float
     sample_a_sccm: float
+    main_b_sccm: float
     vacuum_c_sccm: float
     duration_ns: int
 
@@ -45,8 +45,8 @@ class ManualExperimentIntent:
             raise ValueError("机外气口必须位于 1–20。")
         object.__setattr__(self, "external_ports", ports)
         FlowSetpoints(
-            total_sccm=self.total_sccm,
             sample_a_sccm=self.sample_a_sccm,
+            main_b_sccm=self.main_b_sccm,
             vacuum_c_sccm=self.vacuum_c_sccm,
         )
         if type(self.duration_ns) is not int or not 0 < self.duration_ns <= MAX_DURATION_NS:
@@ -56,16 +56,16 @@ class ManualExperimentIntent:
 @dataclass(frozen=True, slots=True)
 class ManualSupplyIntent:
     enabled: bool
-    total_sccm: float
     sample_a_sccm: float
+    main_b_sccm: float
     vacuum_c_sccm: float
 
     def __post_init__(self) -> None:
         if type(self.enabled) is not bool:
             raise ValueError("供气 intent.enabled 必须是 boolean。")
         FlowSetpoints(
-            total_sccm=self.total_sccm,
             sample_a_sccm=self.sample_a_sccm,
+            main_b_sccm=self.main_b_sccm,
             vacuum_c_sccm=self.vacuum_c_sccm,
         )
 

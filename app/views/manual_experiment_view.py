@@ -25,7 +25,7 @@ from qfluentwidgets import (
     IconInfoBadge,
     InfoBadge,
     InfoBar,
-    InfoBarManager,
+    InfoBarIcon,
     InfoBarPosition,
     InfoLevel,
     PrimaryPushButton,
@@ -338,8 +338,8 @@ class PortTile(CardWidget):
 @dataclass(frozen=True, slots=True)
 class ManualExperimentDraft:
     selected_external_ports: tuple[int, ...] = ()
-    total_sccm: float = 1500.0
     sample_a_sccm: float = 500.0
+    main_b_sccm: float = 1000.0
     vacuum_c_sccm: float = 0.0
     duration_s: float = 5.0
 
@@ -349,24 +349,22 @@ class ManualExperimentDraft:
             raise ValueError("气口必须是不重复的 1–20。")
         object.__setattr__(self, "selected_external_ports", ports)
         values = (
-            (self.total_sccm, "总流量"),
             (self.sample_a_sccm, "样品流量"),
+            (self.main_b_sccm, "主气流"),
             (self.vacuum_c_sccm, "真空流量"),
             (self.duration_s, "持续时间"),
         )
         for value, label in values:
             if isinstance(value, bool) or not math.isfinite(float(value)):
                 raise ValueError(f"{label}必须是有限数值。")
-        if self.total_sccm < 0 or self.sample_a_sccm < 0 or self.vacuum_c_sccm < 0:
+        if self.sample_a_sccm < 0 or self.main_b_sccm < 0 or self.vacuum_c_sccm < 0:
             raise ValueError("流量不得为负数。")
-        if self.sample_a_sccm > self.total_sccm:
-            raise ValueError("样品流量不能大于总流量。")
         if self.duration_s <= 0:
             raise ValueError("持续时间必须大于 0 秒。")
 
     @property
-    def main_b_sccm(self) -> float:
-        return self.total_sccm - self.sample_a_sccm
+    def derived_total_sccm(self) -> float:
+        return self.sample_a_sccm + self.main_b_sccm
 
 
 @dataclass(frozen=True, slots=True)
@@ -461,6 +459,10 @@ class ManualExperimentView(QWidget):
         self._notification_coordinator = NotificationCoordinator()
         self._notice_identity: tuple[object, ...] | None = None
         self._notice_severity: str | None = None
+        self._notice_actionable: bool | None = None
+        self._notice_timer = QTimer(self)
+        self._notice_timer.setSingleShot(True)
+        self._notice_timer.timeout.connect(self._expire_current_notice)
         self.notice_creation_count = 0
         self._header_safety_state = "SAFE"
 
@@ -484,8 +486,8 @@ class ManualExperimentView(QWidget):
         self.status_label.hide()
         self.detail_label.hide()
 
-        self.total_input.valueChanged.connect(self._on_total_changed)
         self.sample_a_input.valueChanged.connect(self._on_draft_value_changed)
+        self.main_b_input.valueChanged.connect(self._on_draft_value_changed)
         self.vacuum_c_input.valueChanged.connect(self._on_draft_value_changed)
         self.duration_input.valueChanged.connect(self._on_draft_value_changed)
         self.apply_flow_button.clicked.connect(self._request_supply_change)
@@ -569,15 +571,14 @@ class ManualExperimentView(QWidget):
         fields = QGridLayout()
         fields.setHorizontalSpacing(10)
         fields.setVerticalSpacing(6)
-        self.total_input = self._flow_input()
         self.sample_a_input = self._flow_input()
         self.main_b_input = self._flow_input()
-        self.main_b_input.setReadOnly(True)
         self.vacuum_c_input = self._flow_input()
-        fields.addWidget(self._field("总流量 T", self.total_input), 0, 0)
-        fields.addWidget(self._field("样品流量 A", self.sample_a_input), 0, 1)
-        fields.addWidget(self._field("主气流 B", self.main_b_input), 0, 2)
-        fields.addWidget(self._field("真空流量 C", self.vacuum_c_input), 0, 3)
+        self.derived_total_label = CaptionLabel("A+B：1500 ml/min", card)
+        fields.addWidget(self._field("样品流量 A", self.sample_a_input), 0, 0)
+        fields.addWidget(self._field("主气流 B", self.main_b_input), 0, 1)
+        fields.addWidget(self._field("真空流量 C", self.vacuum_c_input), 0, 2)
+        fields.addWidget(self.derived_total_label, 0, 3)
         layout.addLayout(fields)
 
         supply_row = QHBoxLayout()
@@ -764,12 +765,12 @@ class ManualExperimentView(QWidget):
         self._rendering = True
         try:
             self._set_range_if_changed(
-                self.total_input, 0.0, max(0.0, snapshot.max_total_sccm)
-            )
-            self._set_range_if_changed(
                 self.sample_a_input,
                 0.0,
-                min(snapshot.max_sample_a_sccm, snapshot.draft.total_sccm),
+                snapshot.max_sample_a_sccm,
+            )
+            self._set_range_if_changed(
+                self.main_b_input, 0.0, max(0.0, snapshot.max_total_sccm)
             )
             self._set_range_if_changed(
                 self.vacuum_c_input, 0.0, max(0.0, snapshot.max_vacuum_c_sccm)
@@ -779,29 +780,24 @@ class ManualExperimentView(QWidget):
                 DURATION_MIN_S,
                 max(DURATION_MIN_S, snapshot.max_duration_s),
             )
-            self._set_value_if_changed(self.total_input, snapshot.draft.total_sccm)
             self._set_value_if_changed(self.sample_a_input, snapshot.draft.sample_a_sccm)
+            self._set_value_if_changed(self.main_b_input, snapshot.draft.main_b_sccm)
             self._set_value_if_changed(self.vacuum_c_input, snapshot.draft.vacuum_c_sccm)
             self._set_value_if_changed(self.duration_input, snapshot.draft.duration_s)
-            self._set_range_if_changed(
-                self.main_b_input, 0.0, max(0.0, snapshot.max_total_sccm)
+            self.derived_total_label.setText(
+                f"A+B：{snapshot.draft.derived_total_sccm:g} ml/min"
             )
-            self._set_value_if_changed(self.main_b_input, snapshot.draft.main_b_sccm)
         finally:
             self._rendering = False
 
         for control in (
-            self.total_input,
             self.sample_a_input,
+            self.main_b_input,
             self.vacuum_c_input,
             self.duration_input,
         ):
             if control.isEnabled() != snapshot.controls_enabled:
                 control.setEnabled(snapshot.controls_enabled)
-        if self.main_b_input.isEnabled() != snapshot.controls_enabled:
-            self.main_b_input.setEnabled(snapshot.controls_enabled)
-        if not self.main_b_input.isReadOnly():
-            self.main_b_input.setReadOnly(True)
         apply_enabled = snapshot.can_apply_flow and not snapshot.supply_transitioning
         if self.apply_flow_button.isEnabled() != apply_enabled:
             self.apply_flow_button.setEnabled(apply_enabled)
@@ -1022,6 +1018,7 @@ class ManualExperimentView(QWidget):
         severity: str = "warning",
         notice_key: object | None = None,
         source: str = "view-event",
+        actionable: bool | None = None,
     ) -> None:
         title = user_facing_text(title).strip()
         message = user_facing_text(message).strip()
@@ -1030,12 +1027,15 @@ class ManualExperimentView(QWidget):
             return
         signature = (title, message, severity)
         effective_key = signature if notice_key is None else notice_key
+        if actionable is None:
+            actionable = self._is_actionable_notice(title, message)
         self._notification_coordinator.publish_event(
             source=source,
             key=effective_key,
             title=title,
             message=message,
             severity=severity,
+            actionable=actionable,
         )
         self._sync_notice_output()
 
@@ -1073,6 +1073,7 @@ class ManualExperimentView(QWidget):
         if (
             current.identity == self._notice_identity
             and current.severity == self._notice_severity
+            and current.actionable == self._notice_actionable
             and self.notice_frame is not None
             and isValid(self.notice_frame)
             and self.notice_frame.isVisible()
@@ -1088,75 +1089,126 @@ class ManualExperimentView(QWidget):
             if content_label is not None and content_label.text() != current.message:
                 content_label.setText(current.message)
             self._notice_severity = current.severity
+            self._notice_actionable = current.actionable
             return
         old = self.notice_frame
         if old is not None and isValid(old):
+            self._notice_timer.stop()
+            self._stop_notice_animation(old)
             self.notice_frame = None
             old.close()
-        self._purge_invalid_managed_bars()
         self.status_label.setText(current.title)
         self.detail_label.setText(current.message)
-        factory = {
-            "error": InfoBar.error,
-            "critical": InfoBar.error,
-            "success": InfoBar.success,
-            "info": InfoBar.info,
-            "warning": InfoBar.warning,
-        }.get(current.severity, InfoBar.warning)
-        bar = factory(
+        icon = {
+            "error": InfoBarIcon.ERROR,
+            "critical": InfoBarIcon.ERROR,
+            "success": InfoBarIcon.SUCCESS,
+            "info": InfoBarIcon.INFORMATION,
+            "warning": InfoBarIcon.WARNING,
+        }.get(current.severity, InfoBarIcon.WARNING)
+        bar = InfoBar(
+            icon,
             current.title,
             current.message,
             isClosable=True,
+            # QFluentWidgets uses an unowned singleShot + opacity animation
+            # internally for duration.  Replacing/tearing down managed bars
+            # can leave that animation targeting an invalid QObject.  The
+            # view-owned timer below preserves the policy without that race.
             duration=-1,
-            position=InfoBarPosition.BOTTOM_RIGHT,
+            # Only one coordinated notice is visible at a time, so a local
+            # overlay does not need QFluentWidgets' process-wide stacking
+            # manager.  Avoiding that manager also prevents its animations
+            # from outliving a replaced or destroyed Manual view.
+            position=InfoBarPosition.NONE,
             parent=self,
         )
-        bar.setObjectName("manualExperimentInfoBar")
+        bar.setProperty("managedDurationMs", current.duration_ms)
         bar.closedSignal.connect(
-            lambda: self._dismiss_notice(current.identity, bar)
+            lambda: self._dismiss_notice(current.identity, current.actionable, bar)
         )
+        bar.setObjectName("manualExperimentInfoBar")
         self.notice_frame = bar
         self._notice_identity = current.identity
         self._notice_severity = current.severity
+        self._notice_actionable = current.actionable
         self.notice_creation_count += 1
         bar.show()
+        self._position_notice_frame()
+        bar.raise_()
+        if current.duration_ms >= 0:
+            self._notice_timer.start(current.duration_ms)
 
-    def _purge_invalid_managed_bars(self) -> None:
-        """Discard dead wrappers left by QFluentWidgets' process-wide manager."""
+    def _position_notice_frame(self) -> None:
+        bar = self.notice_frame
+        if bar is None or not isValid(bar):
+            return
+        bar.adjustSize()
+        margin = 24
+        bar.move(
+            max(margin, self.width() - bar.width() - margin),
+            max(margin, self.height() - bar.height() - margin),
+        )
 
-        manager = InfoBarManager.make(InfoBarPosition.BOTTOM_RIGHT)
-        bars = manager.infoBars.get(self)
-        if bars is not None:
-            bars[:] = [bar for bar in bars if isValid(bar)]
+    def resizeEvent(self, event) -> None:  # noqa: N802 - Qt virtual method name
+        super().resizeEvent(event)
+        self._position_notice_frame()
+
+    def _expire_current_notice(self) -> None:
+        bar = self.notice_frame
+        if bar is not None and isValid(bar) and self._notice_actionable is False:
+            bar.close()
+
+    @staticmethod
+    def _stop_notice_animation(bar: InfoBar) -> None:
+        """Stop the bar-owned animation before its target is destroyed."""
+
+        bar.opacityAni.stop()
 
     def _dismiss_notice(
         self,
         identity: tuple[object, ...],
+        actionable: bool,
         bar: InfoBar,
     ) -> None:
         if self.notice_frame is not bar:
             return
+        self._notice_timer.stop()
+        self._stop_notice_animation(bar)
         self.notice_frame = None
         self._notice_identity = None
         self._notice_severity = None
+        self._notice_actionable = None
         self.status_label.setText("")
         self.detail_label.setText("")
-        self._notification_coordinator.dismiss(identity)
+        if actionable:
+            self._notification_coordinator.dismiss(identity)
+        else:
+            self._notification_coordinator.retire_event(identity)
         self._sync_notice_output()
 
     def _remove_notice_frame(self) -> None:
+        self._notice_timer.stop()
         old = self.notice_frame
         self.notice_frame = None
         if old is not None and isValid(old):
+            self._stop_notice_animation(old)
             old.close()
         self._notice_identity = None
         self._notice_severity = None
+        self._notice_actionable = None
         self.status_label.setText("")
         self.detail_label.setText("")
 
     def clear_notice(self) -> None:
         self._notification_coordinator.clear()
         self._remove_notice_frame()
+
+    def closeEvent(self, event) -> None:  # noqa: N802 - Qt virtual method name
+        """Release managed notice state before Qt destroys animation targets."""
+
+        self.clear_notice()
+        super().closeEvent(event)
 
     def clear_safety_notice(self) -> None:
         """恢复 SAFE 时只清除 safety transition，不覆盖其他操作通知。"""
@@ -1236,8 +1288,8 @@ class ManualExperimentView(QWidget):
         self.supply_requested.emit(
             ManualSupplyIntent(
                 enabled=self._snapshot.supply_enabled is False,
-                total_sccm=self._draft.total_sccm,
                 sample_a_sccm=self._draft.sample_a_sccm,
+                main_b_sccm=self._draft.main_b_sccm,
                 vacuum_c_sccm=self._draft.vacuum_c_sccm,
             )
         )
@@ -1246,8 +1298,8 @@ class ManualExperimentView(QWidget):
         self.release_requested.emit(
             ManualExperimentIntent(
                 external_ports=self._draft.selected_external_ports,
-                total_sccm=self._draft.total_sccm,
                 sample_a_sccm=self._draft.sample_a_sccm,
+                main_b_sccm=self._draft.main_b_sccm,
                 vacuum_c_sccm=self._draft.vacuum_c_sccm,
                 duration_ns=round(self._draft.duration_s * 1_000_000_000),
             )
@@ -1270,26 +1322,18 @@ class ManualExperimentView(QWidget):
         }
         return labels[snapshot.status]
 
-    def _on_total_changed(self, value: float) -> None:
-        if self._rendering:
-            return
-        self._rendering = True
-        try:
-            self.sample_a_input.setMaximum(min(self._snapshot.max_sample_a_sccm, value))
-        finally:
-            self._rendering = False
-        self._on_draft_value_changed()
-
     def _on_draft_value_changed(self, *_args) -> None:
         if self._rendering:
             return
         self._draft = replace(
             self._draft,
-            total_sccm=self.total_input.value(),
             sample_a_sccm=self.sample_a_input.value(),
+            main_b_sccm=self.main_b_input.value(),
             vacuum_c_sccm=self.vacuum_c_input.value(),
             duration_s=self.duration_input.value(),
         )
         self._snapshot = replace(self._snapshot, draft=self._draft)
-        self.main_b_input.setValue(self._draft.main_b_sccm)
+        self.derived_total_label.setText(
+            f"A+B：{self._draft.derived_total_sccm:g} ml/min"
+        )
         self.draft_changed.emit(ManualDraftChangedIntent(self._draft))

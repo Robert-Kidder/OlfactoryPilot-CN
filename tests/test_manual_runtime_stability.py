@@ -210,8 +210,8 @@ def test_real_qt_three_worker_manual_single_cycle_and_three_cycle_soak(
         assert controller.handle_manual_supply_requested(
             ManualSupplyIntent(
                 enabled=True,
-                total_sccm=1000.0,
                 sample_a_sccm=250.0,
+                main_b_sccm=750.0,
                 vacuum_c_sccm=100.0,
             )
         )
@@ -253,8 +253,8 @@ def test_real_qt_three_worker_manual_single_cycle_and_three_cycle_soak(
             assert controller.handle_manual_release_requested(
                 ManualExperimentIntent(
                     external_ports=(4,),
-                    total_sccm=1000.0,
                     sample_a_sccm=250.0,
+                    main_b_sccm=750.0,
                     vacuum_c_sccm=100.0,
                     duration_ns=80_000_000,
                 )

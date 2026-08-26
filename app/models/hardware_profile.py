@@ -337,44 +337,43 @@ class ChannelRegistry:
 
 @dataclass(frozen=True, slots=True)
 class FlowSetpoints:
-    total_sccm: float
     sample_a_sccm: float
+    main_b_sccm: float
     vacuum_c_sccm: float
-    main_b_sccm: float | None = None
     max_total_sccm: float = DEFAULT_MAX_FLOW_SCCM
     max_sample_a_sccm: float = DEFAULT_MAX_FLOW_SCCM
     max_vacuum_c_sccm: float = DEFAULT_MAX_FLOW_SCCM
 
     def __post_init__(self) -> None:
-        total = _finite_number(self.total_sccm, "T 总流量")
         sample = _finite_number(self.sample_a_sccm, "A 样品流量")
+        main = _finite_number(self.main_b_sccm, "B 主气流")
         vacuum = _finite_number(self.vacuum_c_sccm, "C 真空流量")
-        max_total = _positive_finite(self.max_total_sccm, "T 流量上限")
+        max_total = _positive_finite(self.max_total_sccm, "A+B 总送风上限")
         max_sample = _positive_finite(self.max_sample_a_sccm, "A 流量上限")
         max_vacuum = _positive_finite(self.max_vacuum_c_sccm, "C 流量上限")
-        if total < 0 or sample < 0 or vacuum < 0:
-            raise ValueError("T/A/C 流量不得为负数。")
-        if sample > total:
-            raise ValueError("A 样品流量必须满足 0 ≤ A ≤ T。")
-        if total > max_total or sample > max_sample or vacuum > max_vacuum:
-            raise ValueError("T/A/C 流量超出 HardwareProfile 批准范围。")
-        derived_b = total - sample
-        if self.main_b_sccm is not None:
-            supplied_b = _finite_number(self.main_b_sccm, "B 主气流")
-            if not math.isclose(supplied_b, derived_b, rel_tol=0.0, abs_tol=1e-9):
-                raise ValueError("B 主气流只允许使用派生值 T-A。")
-        object.__setattr__(self, "total_sccm", total)
+        if sample < 0 or main < 0 or vacuum < 0:
+            raise ValueError("A/B/C 流量不得为负数。")
+        if sample + main > max_total:
+            raise ValueError("A+B 总送风超出 HardwareProfile 批准范围。")
+        if sample > max_sample or vacuum > max_vacuum:
+            raise ValueError("A/C 流量超出 HardwareProfile 批准范围。")
         object.__setattr__(self, "sample_a_sccm", sample)
+        object.__setattr__(self, "main_b_sccm", main)
         object.__setattr__(self, "vacuum_c_sccm", vacuum)
-        object.__setattr__(self, "main_b_sccm", derived_b)
         object.__setattr__(self, "max_total_sccm", max_total)
         object.__setattr__(self, "max_sample_a_sccm", max_sample)
         object.__setattr__(self, "max_vacuum_c_sccm", max_vacuum)
 
+    @property
+    def derived_total_sccm(self) -> float:
+        """用户设定的总送风；只用于展示和已确认的联合上限。"""
+
+        return self.sample_a_sccm + self.main_b_sccm
+
     def as_mfc_setpoints(self) -> tuple[tuple[str, float], ...]:
         return (
             ("A", self.sample_a_sccm),
-            ("B", float(self.main_b_sccm)),
+            ("B", self.main_b_sccm),
             ("C", self.vacuum_c_sccm),
         )
 
@@ -419,7 +418,7 @@ class HardwareProfile:
         object.__setattr__(
             self,
             "max_total_sccm",
-            _positive_finite(self.max_total_sccm, "T 流量上限"),
+            _positive_finite(self.max_total_sccm, "A+B 总送风上限"),
         )
         object.__setattr__(
             self,
@@ -451,16 +450,14 @@ class HardwareProfile:
     def flow_setpoints(
         self,
         *,
-        total_sccm: float,
         sample_a_sccm: float,
+        main_b_sccm: float,
         vacuum_c_sccm: float,
-        main_b_sccm: float | None = None,
     ) -> FlowSetpoints:
         return FlowSetpoints(
-            total_sccm=total_sccm,
             sample_a_sccm=sample_a_sccm,
-            vacuum_c_sccm=vacuum_c_sccm,
             main_b_sccm=main_b_sccm,
+            vacuum_c_sccm=vacuum_c_sccm,
             max_total_sccm=self.max_total_sccm,
             max_sample_a_sccm=self.max_sample_a_sccm,
             max_vacuum_c_sccm=self.max_vacuum_c_sccm,

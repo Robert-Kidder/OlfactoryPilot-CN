@@ -92,6 +92,10 @@ tests/                 # 自动化测试
 - 会话记录服务：负责 `.raw` 信号和 `.log` 事件输出。
 - 执行控制器：处理手动触发、TTL 触发、呼吸门控和暂停/停止。
 
+未来 Auto TXT 与当前 parser 的模型不同：每行是 duration、20 个独立 0/1 channel columns、A/B/C 和可忽略尾部 NULL，而当前 parser/model 仍表达 trial/timing/单 valve/trigger。该差异是未来 Auto Build 的显式迁移边界，本轮不把 20 列折叠为 bitmask，也不擅自修改未验收 parser。
+
+Auto external-trigger ingress 与 canonical execution core 必须解耦。USB-6501 ingress 只负责把已确认的 SuperLab/c-pod 8-bit `Trig.In`（包括 `10000001 → 1-based 第128行`）转换为经过范围校验的 trial index；执行仍生成 canonical trial command，经现有 ActuationWorker/FlowWorker/HAL、lease、epoch 和 receipt 链完成。具体 NI MAX alias、port/terminals、DAQmx task、polling/edge/debounce、reconnect、latency 与可靠性待 Auto HIL，不得因此把 USB-6501 的产品角色重新标成未知，也不得加入当前 Manual readiness。
+
 ### 会话 bundle 与单写者记录
 
 - Windows GUI 入口以全局 named mutex 强制单实例；mutex 句柄覆盖完整 Qt event loop，并在正常退出或进程崩溃时由操作系统释放。第二实例在创建 Controller/HAL 前显示中文提示并退出，避免跨进程 recovery 误隔离活动 staging，也避免争用 NI/serial owner。
@@ -109,7 +113,7 @@ tests/                 # 自动化测试
 
 本机真实硬件、端口和校准参数通过 `config/local_config.json` 覆盖默认配置。该文件不提交到 Git；仓库只提交 `config/local_config.example.json` 作为模板。运行时按“默认配置 + 本机覆盖”的顺序合并，嵌套字典递归合并，因此本机可以只覆盖 `serial_port`、`ni_devices`、`ai0_channel`、`hal_mode`、校准值等差异项。
 
-当前实验台的 NI 生产基线为两台 USB-6001：`Dev1` 与 `Dev2`。现场未安装 USB-6501，`Dev3` 不属于当前启动自检或生产 HIL 的必需设备。硬件清单以设备铭牌与 NI MAX/NI-DAQmx 在线枚举共同确认；若日后新增扩展设备，只在对应电脑的本机覆盖配置中显式登记，不据此改变既有阀门映射。
+当前 Manual runtime 的 NI 生产基线为两台 USB-6001：`Dev1` 与 `Dev2`；USB-6501 不属于 Manual 启动自检、connection readiness 或连接成功门禁。未来 Auto ingress 已确定使用 USB-6501 接收 c-pod 的 8-bit `Trig.In`，但其 NI MAX alias、port/line、DAQmx task、readiness 和 HIL 尚未实现；只有 Auto Build 完成物理登记与验证后才能启用，且不改变既有阀门映射。
 
 硬件方案使用 versioned `HardwareProfile` 表达机外气口、内部控制阀位、NI target、显示名称、启用状态、极性和验证指纹。机外气口固定为 1–20；当前初始化映射为机外 2/4/6/8/12/14/16/18 对应内部阀位 2–9，三通选择阀单独建模。通用项目约定优先放入 `default_config.json`；只与某台电脑或某次现场校准有关的值放入本机覆盖配置。硬件配置必须经过 schema/交叉校验、同目录原子替换和显式回滚，不能存入 View 私有状态或 QSettings。
 
@@ -136,8 +140,8 @@ tests/                 # 自动化测试
 ### 手动实验执行纵切片
 
 - 使用 Intent → Command → Receipt → immutable Snapshot。View 只保留未提交 draft 和即时视觉反馈，不直接访问 HAL、不持有硬件状态。
-- `FlowSetpoints` 校验 `0 ≤ A ≤ T` 并派生 `B=T-A`；`ChannelRegistry` 负责机外气口 ↔ 内部阀位 ↔ NI target。
-- 手动供气和刺激阶段由 ActuationWorker/协调器持有。刺激持续时间从全部目标成功 open receipt 的共同就绪时刻起算，由 monotonic deadline 自动关闭；UI `QTimer` 只刷新倒计时。
+- `FlowSetpoints` 以独立 A/B/C 为 authority，派生 `A+B` 只用于展示和已确认的 total-delivery ceiling；旧配置 `flow_limits_sccm.total` 保留原义，不重解释为 B MFC 上限。sample A 用户上限与未来 compensation A-controller `A+C` 上限是不同语义，后者没有证据时不得猜测。
+- 手动供气和刺激阶段由 ActuationWorker/协调器持有。baseline/restore 使用直接目标 `A+C/B/C`，stimulus 使用 `A/B/0`，避免 `FlowService` 的 `rest` mode 二次补偿。刺激持续时间从全部目标成功 open receipt 的共同就绪时刻起算，由 monotonic deadline 自动关闭；UI `QTimer` 只刷新倒计时。
 - 未来自动实验只能生成相同的 typed phase plan，复用 ActuationWorker、FlowWorker、HAL、lease、epoch 和 receipt，不能模拟 UI 点击。
 - QFluentWidgets 手动实验 UI 复用该执行纵切片；正式 runtime 不构造 legacy View。
 

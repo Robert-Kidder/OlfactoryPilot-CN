@@ -126,3 +126,111 @@ def test_intervening_event_retires_old_dismissal_identity() -> None:
     )
     assert repeated is not None
     assert repeated.identity == first.identity
+
+
+def test_actionable_is_final_duration_authority_for_every_visual_severity() -> None:
+    coordinator = NotificationCoordinator()
+    for severity in ("success", "info", "warning", "error"):
+        notice = coordinator.publish_event(
+            source=severity,
+            key="action",
+            title="需要处理",
+            message="请人工确认。",
+            severity=severity,
+            actionable=True,
+        )
+        assert notice is not None
+        assert notice.actionable
+        assert notice.duration_ms == -1
+
+
+def test_non_actionable_duration_policy_and_exact_event_retirement() -> None:
+    coordinator = NotificationCoordinator()
+    expected = {"success": 2500, "info": 3000, "warning": 5000, "error": -1}
+    notices = {}
+    for severity, duration in expected.items():
+        notice = coordinator.publish_event(
+            source=severity,
+            key="ordinary",
+            title="状态",
+            message="操作结果。",
+            severity=severity,
+            actionable=False,
+        )
+        assert notice is not None
+        event = coordinator._events[severity]
+        assert event.duration_ms == duration
+        notices[severity] = event
+
+    retirement = NotificationCoordinator()
+    original = retirement.publish_event(
+        source="result",
+        key="completed",
+        title="已完成",
+        message="普通结果。",
+        severity="success",
+        actionable=False,
+    )
+    assert original is not None
+    retirement.retire_event(original.identity)
+    assert retirement.current is None
+    assert (
+        retirement.publish_event(
+            source="result",
+            key="completed",
+            title="已完成",
+            message="普通结果。",
+            severity="success",
+            actionable=False,
+        )
+        is None
+    )
+    replacement = retirement.publish_event(
+        source="result",
+        key="saved",
+        title="已保存",
+        message="新的普通结果。",
+        severity="success",
+        actionable=False,
+    )
+    assert replacement is not None
+    assert replacement.identity != original.identity
+    retirement.retire_event(replacement.identity)
+    assert retirement.current is None
+    retirement.clear_event(source="result")
+    repeated_after_clear = retirement.publish_event(
+        source="result",
+        key="saved",
+        title="已保存",
+        message="新的普通结果。",
+        severity="success",
+        actionable=False,
+    )
+    assert repeated_after_clear is not None
+    assert repeated_after_clear.identity == replacement.identity
+
+    coordinator.retire_event(("event", "warning", "stale-key"))
+    assert coordinator._events["warning"] == notices["warning"]
+
+
+def test_transient_timeout_never_resolves_or_hides_actionable_condition() -> None:
+    coordinator = NotificationCoordinator()
+    condition = coordinator.publish_condition(
+        source="safety",
+        key=("safety", "LOW_FLOW"),
+        title="气流不足",
+        message="请检查供气。",
+        severity="warning",
+    )
+    transient = coordinator.publish_event(
+        source="result",
+        key="done",
+        title="已保存",
+        message="普通结果。",
+        severity="success",
+        actionable=False,
+    )
+    assert condition is not None and transient is not None
+    assert coordinator.current == condition
+    coordinator.retire_event(transient.identity)
+    assert coordinator.current == condition

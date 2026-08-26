@@ -3299,8 +3299,8 @@ class MainController(QObject):
             if profile is None or registry is None or self.state.selector is None:
                 raise ValueError("HardwareProfile、ChannelRegistry 或 selector 未加载。")
             setpoints = profile.flow_setpoints(
-                total_sccm=intent.total_sccm,
                 sample_a_sccm=intent.sample_a_sccm,
+                main_b_sccm=intent.main_b_sccm,
                 vacuum_c_sccm=intent.vacuum_c_sccm,
             )
             self._manual_generation += 1
@@ -3373,8 +3373,8 @@ class MainController(QObject):
             if profile is None or self.state.selector is None:
                 raise ValueError("HardwareProfile 或 selector 未加载")
             setpoints = profile.flow_setpoints(
-                total_sccm=intent.total_sccm,
                 sample_a_sccm=intent.sample_a_sccm,
+                main_b_sccm=intent.main_b_sccm,
                 vacuum_c_sccm=intent.vacuum_c_sccm,
             )
             self._manual_generation += 1
@@ -3390,7 +3390,7 @@ class MainController(QObject):
                 selector=self.state.selector,
             )
         except Exception as exc:
-            self._set_manual_status(f"供气失败：{exc}；安全动作：未改变流量；下一步：修正 T/A/C。")
+            self._set_manual_status(f"供气失败：{exc}；安全动作：未改变流量；下一步：修正 A/B/C。")
             return False
         token = self.flow_worker.acquire_manual_lease(operation_id, self._manual_generation)
         if token is None:

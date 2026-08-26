@@ -110,8 +110,8 @@ def _fixture(*, writer_mutator=None, duration_ns: int = 50):
     plan = ManualExperimentPlan.from_registry(
         identity=identity,
         flow_setpoints=state.hardware_profile.flow_setpoints(
-            total_sccm=1000,
             sample_a_sccm=250,
+            main_b_sccm=750,
             vacuum_c_sccm=100,
         ),
         selector=state.selector,
@@ -141,6 +141,26 @@ def _accept_flow(worker, flows) -> None:
     )
     _publish_fresh_safe_airflow(worker, airflow=max(1.0, command.a))
     worker.process_ready()
+    _accept_stimulus(worker, flows)
+    worker.process_ready()
+
+
+def _accept_stimulus(worker, flows) -> None:
+    stimulus = flows[-1]
+    assert stimulus.mode == "manual_stimulus"
+    worker._consume_manual_flow_result(
+        FlowCommandResult(
+            command=stimulus,
+            result=FlowApplyResult(
+                True,
+                "ok",
+                stimulus.a,
+                stimulus.b,
+                stimulus.c,
+                stimulus.a,
+            ),
+        )
+    )
 
 
 def _publish_fresh_safe_airflow(worker, *, airflow: float) -> None:
@@ -286,8 +306,8 @@ def test_manual_plan_requires_mode_scoped_verification() -> None:
     kwargs = {
         "identity": identity,
         "flow_setpoints": state.hardware_profile.flow_setpoints(
-            total_sccm=1000,
             sample_a_sccm=100,
+            main_b_sccm=900,
             vacuum_c_sccm=0,
         ),
         "selector": state.selector,
@@ -343,7 +363,8 @@ def test_manual_open_receipts_may_arrive_in_reverse_order() -> None:
         )
     )
     _publish_fresh_safe_airflow(worker, airflow=max(1.0, command.a))
-    worker.process_ready(max_items=1)  # fresh SAFE schedules selector
+    worker.process_ready(max_items=1)  # fresh SAFE schedules stimulus flow
+    _accept_stimulus(worker, flows)
     worker.process_ready(max_items=1)  # selector receipt creates the open cohort
     open_commands = [item[3] for item in worker._normal_heap]
     worker._normal_heap.clear()
@@ -378,7 +399,8 @@ def test_partial_open_cohort_timeout_fails_closed_without_sleep() -> None:
         )
     )
     _publish_fresh_safe_airflow(worker, airflow=max(1.0, command.a))
-    worker.process_ready(max_items=1)  # fresh SAFE schedules selector
+    worker.process_ready(max_items=1)  # fresh SAFE schedules stimulus flow
+    _accept_stimulus(worker, flows)
     worker.process_ready(max_items=1)  # selector
     worker.process_ready(max_items=1)  # first open only
     command_ids = tuple(
@@ -587,7 +609,8 @@ def test_late_success_after_open_timeout_keeps_recovery_without_deadline() -> No
         )
     )
     _publish_fresh_safe_airflow(worker, airflow=max(1.0, command.a))
-    worker.process_ready(max_items=1)  # fresh SAFE schedules selector
+    worker.process_ready(max_items=1)  # fresh SAFE schedules stimulus flow
+    _accept_stimulus(worker, flows)
     worker.process_ready(max_items=1)
     open_commands = [item[3] for item in worker._normal_heap]
     worker._normal_heap.clear()
@@ -925,6 +948,23 @@ def test_blocked_writer_late_success_receipt_is_rejected_by_current_clock() -> N
             time.sleep(0.001)
         assert worker.interlock.read()[1].airflow_armed
         _publish_fresh_safe_airflow(worker, airflow=max(1.0, command.a))
+        stimulus_deadline = time.monotonic() + 1.0
+        while len(flows) < 2 and time.monotonic() < stimulus_deadline:
+            time.sleep(0.001)
+        stimulus = flows[-1]
+        worker.post_flow_result(
+            FlowCommandResult(
+                command=stimulus,
+                result=FlowApplyResult(
+                    True,
+                    "ok",
+                    stimulus.a,
+                    stimulus.b,
+                    stimulus.c,
+                    stimulus.a,
+                ),
+            )
+        )
         assert entered.wait(1.0)
         deadline = next(iter(worker._manual_expected.values()))["deadline_ns"]
         clock.value = deadline + 1

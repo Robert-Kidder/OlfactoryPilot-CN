@@ -9,12 +9,16 @@
 - [`architecture.md`](architecture.md)：线程所有权、执行域、HAL、安全停止和数据架构。
 - [`ux-design.md`](ux-design.md)：当前产品语言、状态反馈和交互原则；不预设未立项页面。
 - [`project-structure.md`](project-structure.md)：目录、工具链与文档放置规则。
-- [`epics.md`](epics.md)：需求拆分历史；不维护动态进度。
+
+## 需求拆分历史（非当前权威）
+
+- [`epics.md`](epics.md)：旧需求拆分历史；不维护动态进度，也不得覆盖当前 PRD、Architecture 或活动 execution spec。
 
 ## 状态与活动执行工件
 
 - [`sprint-artifacts/sprint-status.yaml`](sprint-artifacts/sprint-status.yaml)：唯一动态 Epic/Story 状态源。
 - [`sprint-artifacts/spec-manual-protocol-domain-boundary-docs-alignment.md`](sprint-artifacts/spec-manual-protocol-domain-boundary-docs-alignment.md)：本次执行域与文档收敛 execution spec，必须保留。
+- [`sprint-artifacts/spec-manual-abc-auto-trigger-requirements-baseline.md`](sprint-artifacts/spec-manual-abc-auto-trigger-requirements-baseline.md)：Manual A/B/C 实现与未来 Auto 触发需求基线。
 
 ## 审计证据
 

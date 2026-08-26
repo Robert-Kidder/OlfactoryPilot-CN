@@ -21,7 +21,7 @@ OlfactoryPilot-CN 是用于嗅觉刺激实验的 Windows 桌面控制软件，�
 ### 正式 UI 基线
 
 - 使用 QFluentWidgets Dark Theme：近黑、深墨绿/石墨色，主题强调色为 `#E2AD50`。
-- 当前正式导航只包含“手动实验”；未验收能力不加入运行树或占位导航。
+- 当前产品范围包含“手动实验”“自动实验”两个实验工作页面和“设置”工具页；设置不是第三种实验模式。尚未实现的页面不加占位入口，预测试、协议模式、校准、清洗和呼吸实验不恢复为正式导航；呼吸触发未来属于 Auto trigger strategy。
 - 产品界面优先使用 QFluentWidgets 原生 Card、Label、数字输入、Button、Badge、ToolTip 和 InfoBar；不使用旧 QWidget/QSS 控制台作为未来标准，不引入 superqt。
 - selected 使用琥珀强调；真实开启使用绿色图标状态；故障使用红色且形态不同的图标状态。重要状态不得只靠颜色或 Tooltip 表达。
 
@@ -69,6 +69,8 @@ OlfactoryPilot-CN 是用于嗅觉刺激实验的 Windows 桌面控制软件，�
 
 ## 关键硬件映射
 
+Manual 长期领域规则：可编辑 setpoint 只有独立 A/B/C；`total_delivery=A+B` 仅为派生值，B 在正常供气、selector 切换、刺激和恢复期间保持用户设定不变。baseline/restore controller targets=`A+C/B/C`，stimulus=`A/B/0`。
+
 - NI USB-6001 `Dev1`
   - `AI0`：呼吸传感器模拟输入。
   - `AI6`：外部 TTL 触发输入。
@@ -76,9 +78,9 @@ OlfactoryPilot-CN 是用于嗅觉刺激实验的 Windows 桌面控制软件，�
 - NI USB-6001 `Dev2`
   - `P1.0`：A 路三通选择阀，配置中的历史名称为 `master_valve=Dev2/P1.0`，运行时转换为 NI-DAQmx 线路 `Dev2/port1/line0`。现场 HIL 已确认低电平选择 `A → 补偿出口`，高电平选择 `A → 气味阀1–20总入口`；该阀没有独立全关态，不得建模成第21只普通两通阀。
   - `P0.0-P0.7`：气味通道 13-20，以 `config/default_config.json` 的 `valve_mapping` 为准。
-- 当前实验台未安装 NI USB-6501，生产配置中不要求 `Dev3`。
-  - `Dev3` 仅保留为历史预留名称；当前呼吸/TTL 采集、主阀和 20 通道气味阀全部由 `Dev1`、`Dev2` 承担。
-  - 若日后扩展 USB-6501，须先以设备铭牌和 NI MAX 确认型号与设备名，再通过本机 `config/local_config.json` 显式登记；不得在未确认用途时加入阀门映射。
+- 当前 Manual runtime 不要求 NI USB-6501；当前呼吸/TTL 采集、selector 和 20 通道气味阀仍全部由 `Dev1`、`Dev2` 承担，USB-6501 不加入 Manual required devices、startup self-check 或 connection readiness。
+  - 未来 Auto ingress 已确认使用 USB-6501 接收 SuperLab → c-pod 的 8-bit `Trig.In`；这不等于 reader/readiness 已实现。
+  - Auto Build 必须先用设备铭牌与 NI MAX 确认 alias 和物理 port/line，再通过本机配置登记并完成 DAQmx task 与 HIL；不得把它加入气味阀映射或据此改变当前 Manual 门禁。
 - Alicat RS232
   - MFC A：气味/补偿气路。
   - MFC B：载气气路。
