@@ -127,6 +127,25 @@ def test_registry_refuses_unverified_or_disabled_external_ports() -> None:
         registry.by_external_port(21)
 
 
+def test_production_availability_requires_matching_physical_verification() -> None:
+    profile = _default_profile()
+    original = profile.registry.by_external_port(2)
+    pending = replace(original, verification=replace(original.verification, status=VerificationStatus.PENDING))
+    physical = replace(
+        original,
+        verification=replace(
+            original.verification,
+            status=VerificationStatus.PHYSICAL_VERIFIED,
+            fingerprint=original.mapping_fingerprint,
+        ),
+    )
+
+    assert pending.enabled and not pending.available
+    assert original.verification.status is VerificationStatus.MOCK_VERIFIED
+    assert not original.available
+    assert physical.available
+
+
 @pytest.mark.parametrize(
     ("changes", "message"),
     [
@@ -223,3 +242,20 @@ def test_stale_verified_fingerprint_is_exposed_as_mapping_changed() -> None:
 
     assert changed.verification.status is VerificationStatus.MAPPING_CHANGED
     assert changed.verification_valid is False
+
+
+def test_standard_preset_resolves_controller_channel_and_flags_historical_custom_target() -> None:
+    profile = _default_profile()
+
+    assert profile.resolved_target_for(10) == "Dev1/P1.1"
+    assert profile.channel_uses_custom_target(4) is False
+    raw = profile.to_dict()
+    raw["channels"][3]["target"] = "Dev2/P0.2"
+    custom = HardwareProfile.from_config(
+        {**_default_profile_config(), "hardware_profile": raw}
+    )
+    assert custom.channel_uses_custom_target(4) is True
+
+
+def _default_profile_config() -> dict:
+    return json.loads(Path("config/default_config.json").read_text(encoding="utf-8"))

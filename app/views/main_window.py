@@ -12,6 +12,7 @@ from qfluentwidgets import (
     FluentWindow,
     InfoBadge,
     InfoLevel,
+    NavigationItemPosition,
     PushButton,
     SimpleCardWidget,
     TitleLabel,
@@ -25,6 +26,7 @@ from app.models import (
     ManualPresentationSnapshot,
     Telemetry,
 )
+from app.views.hardware_settings_view import HardwareSettingsView
 from app.views.manual_experiment_view import SAFETY_NOTICE_TITLES, ManualExperimentView
 from app.views.product_text import user_facing_text
 
@@ -80,6 +82,7 @@ class MainWindow(FluentWindow):
 
         self._build_actions()
         self._build_manual_interface()
+        self._build_settings_interface()
         self.render_telemetry(state.telemetry, hardware_ready=state.hardware_ready)
 
     def closeEvent(self, event) -> None:
@@ -177,10 +180,35 @@ class MainWindow(FluentWindow):
         self.manual_experiment_view.stop_requested.connect(
             lambda _request: self.controller.handle_manual_stop_requested()
         )
+        self.manual_experiment_view.settings_requested.connect(self.open_hardware_settings)
         layout.addWidget(self.manual_experiment_view, 1)
 
         self._manual_interface = interface
         self.addSubInterface(interface, FIF.LEAF, "手动实验")
+
+    def _build_settings_interface(self) -> None:
+        self.hardware_settings_view = HardwareSettingsView(self)
+        self.hardware_settings_view.save_requested.connect(
+            self.controller.handle_hardware_profile_save_requested
+        )
+        self.hardware_settings_view.mock_verify_requested.connect(
+            self.controller.handle_hardware_mock_verify_requested
+        )
+        self.hardware_settings_view.physical_verify_requested.connect(
+            self.controller.handle_hardware_physical_verify_requested
+        )
+        self.hardware_settings_view.verification_stop_requested.connect(
+            self.controller.handle_hardware_verification_stop_requested
+        )
+        self._settings_navigation_item = self.addSubInterface(
+            self.hardware_settings_view,
+            FIF.SETTING,
+            "设置",
+            position=NavigationItemPosition.BOTTOM,
+        )
+
+    def open_hardware_settings(self) -> None:
+        self.switchTo(self.hardware_settings_view)
 
     def _format_shutdown(self, event: dict | None) -> str:
         if not event:

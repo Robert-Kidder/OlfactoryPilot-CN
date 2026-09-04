@@ -31,6 +31,7 @@ from .hardware_profile import (
     FlowSetpoints,
     HardwareConnectionConfig,
     HardwareProfile,
+    ValveTargetPreset,
     VerificationStatus,
 )
 from .lease import (
@@ -157,6 +158,7 @@ __all__ = [
     "Telemetry",
     "TriggerMode",
     "VerificationStatus",
+    "ValveTargetPreset",
     "duration_ms_to_ns",
     "normalize_cleaning_target",
     "normalize_digital_target",

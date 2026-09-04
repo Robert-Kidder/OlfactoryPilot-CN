@@ -51,7 +51,8 @@ def test_product_ui_uses_operator_language_and_single_manual_entry(qt_app) -> No
     assert "停止实验" in visible
     assert "全局停止" in visible
     assert not any(term in visible for term in FORBIDDEN_OPERATOR_TERMS)
-    assert window.stackedWidget.count() == 1
+    assert window.stackedWidget.count() == 2
+    assert isinstance(window.hardware_settings_view, HardwareSettingsView)
     assert not hasattr(window, "tabs")
 
 
@@ -67,13 +68,33 @@ def test_product_window_does_not_construct_legacy_views(qt_app) -> None:
     for legacy_type in (
         CalibrationView,
         CleaningView,
-        HardwareSettingsView,
         PreTestView,
         ProtocolView,
         SessionView,
     ):
         assert window.findChildren(legacy_type) == []
+    assert len(window.findChildren(HardwareSettingsView)) == 1
     assert not hasattr(window, "settings_dialog")
+
+
+def test_settings_is_bottom_navigation_and_manual_shortcut_opens_same_view(
+    qt_app,
+) -> None:
+    _, window = build_application(
+        DEFAULT_CONFIG,
+        start_worker=False,
+        simulation=True,
+    )
+    window.show()
+    qt_app.processEvents()
+
+    panel = window.navigationInterface.panel
+    assert panel.bottomLayout.indexOf(window._settings_navigation_item) >= 0
+    assert panel.topLayout.indexOf(window._settings_navigation_item) == -1
+    window.manual_experiment_view.port_settings_button.click()
+    qt_app.processEvents()
+    assert window.stackedWidget.currentWidget() is window.hardware_settings_view
+    assert window.findChildren(HardwareSettingsView) == [window.hardware_settings_view]
 
 
 def test_low_flow_and_connect_never_create_a_message_box_or_orphan_window(qt_app) -> None:

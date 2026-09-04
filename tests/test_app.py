@@ -217,7 +217,7 @@ def test_main_window_builds(qt_app):
     _, window = build_application(DEFAULT_CONFIG, start_worker=False, hal=MockHAL())
     assert window.windowTitle()
     assert isinstance(window, FluentWindow)
-    assert window.stackedWidget.count() == 1
+    assert window.stackedWidget.count() == 2
     assert not hasattr(window, "tabs")
     assert not hasattr(window, "_recheck_button")
 

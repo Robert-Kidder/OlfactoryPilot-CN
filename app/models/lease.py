@@ -14,6 +14,7 @@ class DeviceLeaseKind(StrEnum):
     PRETEST = "pretest"
     COMPENSATION = "compensation"
     CONFIG_CHANGE = "config-change"
+    VERIFICATION = "verification"
 
 
 @dataclass(frozen=True, slots=True)

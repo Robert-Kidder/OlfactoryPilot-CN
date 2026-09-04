@@ -152,3 +152,7 @@ Auto external-trigger ingress 与 canonical execution core 必须解耦。USB-65
 - 清洗继续保留 `CLEANING`、maintenance lease、`maintenance-v1` bundle、owner deadline 与 recovery 资产，但必须改用 selector、SafeStopPlan 和 HardwareProfile，不再使用 21-target 终态。
 - 跨 owner 交错使用 fake clock、Event/Barrier、cancellation token、fake filesystem 和 fault injection；禁止 sleep-only 竞态断言。
 - 修改 selector、SafeStopPlan、ActuationWorker/FlowWorker、NI/serial、deadline、映射或 shutdown 时执行范围触发式真实 Windows/NI HIL；Mock 和 `daqmx_write_ack` 不能替代机械/出口证据。
+- `valve_mapping.variants["20-channel"]` 仅作为普通编辑器的标准 target preset；`HardwareProfile` 中的 descriptor 仍是运行和持久化 authority。控制通道变化必须同步解析 target，历史偏差只读标为高级自定义。
+- 验证结果通过独立 CAS/atomic evidence 事务写入：revision 与单口 mapping fingerprint 任一不匹配即拒绝，事务只能更新该口 verification，不能改变 `external_port/internal_valve/target/active_high`。
+- 三层路由为面板气口 `external_port` → 控制通道 `internal_valve` → resolved NI `target`。默认八路关系是 02→02、04→03、06→04、08→05、12→06、14→07、16→08、18→09；运行时不从面板编号推导控制通道，也不把 preset 作为第二份可变 runtime authority。
+- verification 使用独立 lease。simulation 只在 connected/ready/safe idle、clean saved revision 时运行单口 Mock 并持久化 `MOCK_VERIFIED/INCOMPLETE/FAILED`；production physical handler 在 HIL commissioning 前保持 no-actuation stub，且不能写入 `PHYSICAL_VERIFIED`。

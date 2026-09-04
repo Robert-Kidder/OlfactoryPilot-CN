@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import math
 import time
 from dataclasses import replace
 from pathlib import Path
 
+import pytest
 from qfluentwidgets import FluentWindow
 
 from app.controllers import MainController
@@ -22,7 +24,7 @@ from app.models import (
 from app.services import MockHAL
 from app.views import MainWindow
 from app.views.hardware_settings_view import HardwareSettingsView
-from app.workers import HardwareWorker
+from app.workers import FlowCommand, HardwareWorker
 
 
 class FakeClock:
@@ -34,9 +36,12 @@ class FakeClock:
         return self.value
 
 
-def _controller(tmp_path: Path) -> tuple[MainController, FakeClock]:
+def _controller(
+    tmp_path: Path, *, verification_duration=0
+) -> tuple[MainController, FakeClock]:
     config = json.loads(Path("config/default_config.json").read_text(encoding="utf-8"))
     config["_local_config_path"] = str(tmp_path / "local_config.json")
+    config["simulation_verification_duration_s"] = verification_duration
     state = AppState.from_config(config)
     state.simulation_mode = True
     state.telemetry.connected = True
@@ -585,23 +590,28 @@ def test_mock_verification_requires_isolated_correlated_open_close_receipts(
     controller, _ = _controller(tmp_path)
     window = MainWindow(controller, controller.state)
     qtbot.addWidget(window)
-    window.hardware_settings_view = HardwareSettingsView()
-    qtbot.addWidget(window.hardware_settings_view)
     controller.bind_view(window)
-    controller.state.telemetry.connected = False
-    controller.state.hardware_ready = False
+    controller.state.telemetry.connected = True
+    controller.state.hardware_ready = True
     controller.state.telemetry.safety_state = "SAFE"
     candidate = controller.state.hardware_profile
-    channels = list(candidate.channels)
-    channels[1] = replace(channels[1], active_high=False)
-    candidate = replace(candidate, channels=tuple(channels))
+    controller._render_hardware_profile()
+
+    assert not window.hardware_settings_view.name_inputs[2].isEnabled()
+    assert not window.hardware_settings_view.save_button.isEnabled()
+    assert window.hardware_settings_view.mock_buttons[2].isEnabled()
 
     controller.handle_hardware_mock_verify_requested(2, candidate)
 
-    verified = window.hardware_settings_view.draft.to_profile().channels[1]
+    verified = controller.state.hardware_profile.channels[1]
     assert verified.verification.status is VerificationStatus.MOCK_VERIFIED
     assert verified.verification.fingerprint == verified.mapping_fingerprint
-    assert controller.state.hardware_profile.channels[1] != verified
+    assert json.loads((tmp_path / "local_config.json").read_text(encoding="utf-8"))["hardware_profile_revision"] == 1
+    assert not window.hardware_settings_view.name_inputs[2].isEnabled()
+    notice = window.manual_experiment_view._notification_coordinator.current
+    assert notice is not None
+    assert notice.title == "模拟验证完成"
+    assert notice.actionable is False
 
 
 def test_mock_verification_failure_does_not_publish_fingerprint(
@@ -612,24 +622,329 @@ def test_mock_verification_failure_does_not_publish_fingerprint(
     controller, _ = _controller(tmp_path)
     window = MainWindow(controller, controller.state)
     qtbot.addWidget(window)
-    window.hardware_settings_view = HardwareSettingsView()
-    qtbot.addWidget(window.hardware_settings_view)
     controller.bind_view(window)
-    controller.state.telemetry.connected = False
-    controller.state.hardware_ready = False
+    controller.state.telemetry.connected = True
+    controller.state.hardware_ready = True
     controller.state.telemetry.safety_state = "SAFE"
     candidate = controller.state.hardware_profile
-    channels = list(candidate.channels)
-    channels[1] = replace(channels[1], active_high=False)
-    candidate = replace(candidate, channels=tuple(channels))
     monkeypatch.setattr(MockHAL, "write_digital", lambda *_args, **_kwargs: False)
 
     controller.handle_hardware_mock_verify_requested(2, candidate)
 
     rendered = window.hardware_settings_view.draft.to_profile().channels[1]
     assert rendered == controller.state.hardware_profile.channels[1]
-    assert rendered.mapping_fingerprint != candidate.channels[1].mapping_fingerprint
-    assert "测试气口失败" in window.hardware_settings_view.status_label.text()
+    assert rendered.mapping_fingerprint == candidate.channels[1].mapping_fingerprint
+    assert rendered.verification.status is VerificationStatus.FAILED
+    assert rendered.verification.fingerprint == rendered.mapping_fingerprint
+    assert "验证失败" in window.hardware_settings_view.status_label.text()
+    notice = window.manual_experiment_view._notification_coordinator.current
+    assert notice is not None
+    assert notice.title == "验证失败"
+    assert notice.actionable is True
+
+
+def test_mock_verification_stop_persists_incomplete_without_mapping_change(
+    tmp_path,
+    qtbot,
+) -> None:
+    controller, _ = _controller(tmp_path)
+    controller._hardware_verification_duration_s = 20
+    window = MainWindow(controller, controller.state)
+    qtbot.addWidget(window)
+    controller.bind_view(window)
+    before = controller.state.hardware_profile.registry.by_external_port(2)
+
+    controller.handle_hardware_mock_verify_requested(
+        2,
+        controller.state.hardware_profile,
+        expected_revision=0,
+    )
+
+    assert controller.device_lease.snapshot.kind is DeviceLeaseKind.VERIFICATION
+    assert not window.hardware_settings_view.verification_stop_button.isHidden()
+    window.hardware_settings_view.verification_stop_button.click()
+
+    after = controller.state.hardware_profile.registry.by_external_port(2)
+    assert after.verification.status is VerificationStatus.INCOMPLETE
+    assert after.verification.fingerprint == before.mapping_fingerprint
+    assert (after.internal_valve, after.target, after.active_high) == (
+        before.internal_valve,
+        before.target,
+        before.active_high,
+    )
+    assert controller.device_lease.snapshot.kind is DeviceLeaseKind.IDLE
+    assert window.hardware_settings_view.verification_stop_button.isHidden()
+
+
+def test_verification_rejects_unsaved_draft_and_competing_owner_before_actuation(
+    tmp_path, qtbot
+) -> None:
+    controller, _ = _controller(tmp_path)
+    window = MainWindow(controller, controller.state)
+    qtbot.addWidget(window)
+    controller.bind_view(window)
+    saved = controller.state.hardware_profile
+    channels = list(saved.channels)
+    channels[1] = replace(channels[1], active_high=False)
+    dirty = replace(saved, channels=tuple(channels))
+
+    controller.handle_hardware_mock_verify_requested(2, dirty)
+    assert "先保存并重连" in window.hardware_settings_view.status_label.text()
+    assert not (tmp_path / "local_config.json").exists()
+
+    token = controller.device_lease.acquire(
+        DeviceLeaseKind.MANUAL, operation_id="busy", generation=1
+    )
+    assert token is not None
+    controller.handle_hardware_mock_verify_requested(2, saved)
+    assert "正在执行其他操作" in window.hardware_settings_view.status_label.text()
+    assert not (tmp_path / "local_config.json").exists()
+
+
+def test_production_verification_stub_never_persists_physical_evidence(
+    tmp_path, qtbot, monkeypatch
+) -> None:
+    controller, _ = _controller(tmp_path)
+    controller.state.simulation_mode = False
+    window = MainWindow(controller, controller.state)
+    qtbot.addWidget(window)
+    controller.bind_view(window)
+    monkeypatch.setattr(
+        controller.flow_worker,
+        "acquire_lease",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("production stub must not acquire Flow lease")
+        ),
+    )
+    monkeypatch.setattr(
+        controller,
+        "_execute_isolated_mock_verification",
+        lambda *_args: (_ for _ in ()).throw(
+            AssertionError("production stub must not execute Mock actuation")
+        ),
+    )
+    controller._render_hardware_profile()
+
+    assert window.hardware_settings_view.mock_buttons[2].isEnabled()
+    assert not window.hardware_settings_view.name_inputs[2].isEnabled()
+
+    controller.handle_hardware_mock_verify_requested(
+        2, controller.state.hardware_profile
+    )
+
+    assert "现场验证未开放" in window.hardware_settings_view.status_label.text()
+    assert not (tmp_path / "local_config.json").exists()
+
+
+def test_short_nonzero_verification_timer_completes_and_releases(
+    tmp_path,
+) -> None:
+    controller, _ = _controller(tmp_path, verification_duration=0.01)
+
+    controller.handle_hardware_mock_verify_requested(
+        2, controller.state.hardware_profile, expected_revision=0
+    )
+    assert controller._hardware_verification_run is not None
+    controller._hardware_verification_run = replace(
+        controller._hardware_verification_run,
+        deadline_ns=0,
+    )
+    controller._handle_hardware_verification_tick()
+
+    assert controller.device_lease.snapshot.kind is DeviceLeaseKind.IDLE
+    assert (
+        controller.state.hardware_profile.registry.by_external_port(2).verification.status
+        is VerificationStatus.MOCK_VERIFIED
+    )
+
+
+def test_enabled_button_confirmation_and_main_window_wiring(
+    tmp_path, qtbot, monkeypatch
+) -> None:
+    controller, _ = _controller(tmp_path)
+    window = MainWindow(controller, controller.state)
+    qtbot.addWidget(window)
+    controller.bind_view(window)
+    window.show()
+    controller._render_hardware_profile()
+    monkeypatch.setattr(
+        "app.views.hardware_settings_view.MessageBox.exec", lambda _self: True
+    )
+
+    button = window.hardware_settings_view.mock_buttons[2]
+    assert button.isEnabled()
+    button.click()
+
+    assert controller._hardware_profile_store.revision == 1
+    assert (
+        controller.state.hardware_profile.registry.by_external_port(2).verification.status
+        is VerificationStatus.MOCK_VERIFIED
+    )
+
+
+def test_verification_cas_rejection_still_cleans_up_lease(tmp_path) -> None:
+    controller, _ = _controller(tmp_path, verification_duration=20)
+    controller.handle_hardware_mock_verify_requested(
+        2, controller.state.hardware_profile, expected_revision=0
+    )
+    path = tmp_path / "local_config.json"
+    path.write_text(
+        json.dumps({"hardware_profile_revision": 1}), encoding="utf-8"
+    )
+
+    controller.handle_hardware_verification_stop_requested(2)
+
+    assert controller._hardware_verification_run is None
+    assert controller.device_lease.snapshot.kind is DeviceLeaseKind.IDLE
+    assert controller._hardware_profile_store.revision == 0
+
+
+def test_save_then_reconnect_keeps_revision_synchronized_for_verification(
+    tmp_path,
+) -> None:
+    controller, _ = _controller(tmp_path)
+    controller.state.telemetry.connected = False
+    controller.state.hardware_ready = False
+    controller.state.telemetry.safety_state = "SAFE"
+    profile = controller.state.hardware_profile
+    channels = list(profile.channels)
+    channels[1] = replace(channels[1], display_name="saved-alias")
+
+    assert controller.handle_hardware_profile_save_requested(
+        replace(profile, channels=tuple(channels)), 0
+    )
+    assert controller._runtime_hardware_profile_revision == 1
+    controller.state.telemetry.connected = True
+    controller.state.hardware_ready = True
+    controller.handle_hardware_mock_verify_requested(
+        2, controller.state.hardware_profile, expected_revision=1
+    )
+
+    assert controller._hardware_profile_store.revision == 2
+    assert controller._runtime_hardware_profile_revision == 2
+
+
+def test_teardown_marks_active_verification_incomplete(tmp_path) -> None:
+    controller, _ = _controller(tmp_path, verification_duration=20)
+    controller.handle_hardware_mock_verify_requested(
+        2, controller.state.hardware_profile, expected_revision=0
+    )
+
+    controller.teardown(timeout_ms=50)
+
+    assert controller._hardware_verification_run is None
+    assert controller.device_lease.snapshot.kind is DeviceLeaseKind.IDLE
+    assert (
+        controller.state.hardware_profile.registry.by_external_port(2).verification.status
+        is VerificationStatus.INCOMPLETE
+    )
+
+
+@pytest.mark.parametrize("invalid_state", ("disconnect", "unsafe"))
+def test_runtime_disconnect_or_safety_change_interrupts_verification(
+    tmp_path, invalid_state
+) -> None:
+    controller, _ = _controller(tmp_path, verification_duration=20)
+    controller.handle_hardware_mock_verify_requested(
+        2, controller.state.hardware_profile, expected_revision=0
+    )
+    if invalid_state == "disconnect":
+        controller.state.telemetry.connected = False
+    else:
+        controller.state.telemetry.safety_state = "UNSAFE"
+
+    controller._handle_hardware_verification_tick()
+
+    assert controller._hardware_verification_run is None
+    assert controller.device_lease.snapshot.kind is DeviceLeaseKind.IDLE
+    assert (
+        controller.state.hardware_profile.registry.by_external_port(2).verification.status
+        is VerificationStatus.INCOMPLETE
+    )
+
+
+@pytest.mark.parametrize("busy_kind", ("queued", "inflight"))
+def test_flow_queue_or_inflight_command_blocks_verification_lease(
+    tmp_path, busy_kind
+) -> None:
+    controller, _ = _controller(tmp_path, verification_duration=20)
+    command = FlowCommand(
+        command_id="busy",
+        execution_epoch=0,
+        sequence=1,
+        mode="idle",
+        a=0.0,
+        b=0.0,
+        c=0.0,
+        source="ui",
+    )
+    if busy_kind == "queued":
+        controller.flow_worker._queue.append(command)
+    else:
+        controller.flow_worker._active_command = command
+
+    controller.handle_hardware_mock_verify_requested(
+        2, controller.state.hardware_profile, expected_revision=0
+    )
+
+    assert controller._hardware_verification_run is None
+    assert controller.device_lease.snapshot.kind is DeviceLeaseKind.IDLE
+
+
+def test_global_stop_cancels_verification_as_incomplete(
+    tmp_path, monkeypatch
+) -> None:
+    controller, _ = _controller(tmp_path, verification_duration=20)
+    controller.handle_hardware_mock_verify_requested(
+        2, controller.state.hardware_profile, expected_revision=0
+    )
+    monkeypatch.setattr(
+        controller.shutdown_service,
+        "shutdown",
+        lambda **_kwargs: {"result": "success", "source": "stop"},
+    )
+
+    controller.stop_hardware()
+
+    assert controller._hardware_verification_run is None
+    assert (
+        controller.state.hardware_profile.registry.by_external_port(2).verification.status
+        is VerificationStatus.INCOMPLETE
+    )
+
+
+@pytest.mark.parametrize("raw", ("nan", "inf", -1, object()))
+def test_invalid_verification_duration_falls_back_without_lease_leak(
+    tmp_path, raw
+) -> None:
+    controller, _ = _controller(tmp_path, verification_duration=raw)
+    assert math.isfinite(controller._hardware_verification_duration_s)
+    assert controller._hardware_verification_duration_s == 20.0
+
+    controller.handle_hardware_mock_verify_requested(
+        2, controller.state.hardware_profile, expected_revision=0
+    )
+    assert controller.device_lease.snapshot.kind is DeviceLeaseKind.VERIFICATION
+    controller.handle_hardware_verification_stop_requested(2)
+    assert controller.device_lease.snapshot.kind is DeviceLeaseKind.IDLE
+
+
+@pytest.mark.parametrize("port", ("not-a-port", 99))
+def test_invalid_verification_port_is_productized_and_never_acquires_lease(
+    tmp_path, qtbot, port
+) -> None:
+    controller, _ = _controller(tmp_path)
+    window = MainWindow(controller, controller.state)
+    qtbot.addWidget(window)
+    controller.bind_view(window)
+
+    controller.handle_hardware_mock_verify_requested(
+        port, controller.state.hardware_profile, expected_revision=0
+    )
+
+    assert controller._hardware_verification_run is None
+    assert controller.device_lease.snapshot.kind is DeviceLeaseKind.IDLE
+    assert "验证失败" in window.hardware_settings_view.status_label.text()
 
 
 def test_product_entry_is_single_fluent_manual_interface(qt_app) -> None:
@@ -642,7 +957,7 @@ def test_product_entry_is_single_fluent_manual_interface(qt_app) -> None:
     assert window._manual_interface.findChild(type(window.manual_experiment_view)) is (
         window.manual_experiment_view
     )
-    assert window.stackedWidget.count() == 1
+    assert window.stackedWidget.count() == 2
     assert not hasattr(window, "settings_dialog")
-    assert not hasattr(window, "hardware_settings_view")
+    assert isinstance(window.hardware_settings_view, HardwareSettingsView)
     assert not hasattr(window, "tabs")

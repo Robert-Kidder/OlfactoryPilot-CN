@@ -33,8 +33,11 @@
 - 手动刺激从全部目标 open receipt 的共同就绪时刻起算，由 `ActuationWorker` 自动关闭；UI 定时器仅刷新显示。
 - 气流图必须准确标注当前实际可观测量。只有 A 路 telemetry 时，不得称为 A+B 总流量，也不得显示未经观测证明的“稳定”。
 - `InfoBar` 只提示新异常或用户需要知道的操作结果；同态提示不重复弹出。actionable 通知不受视觉 severity 影响，保持到用户关闭或 condition resolved；仅 non-actionable success/info/warning 分别约 2500/3000/5000ms 自动关闭。普通连接成功和无操作价值的正常阶段不创建提示。只有真正阻断当前操作的问题才使用 Fluent Dialog，不使用 `QMessageBox`。
+- 后续 Manual Product UI Build 统一把派生值写作“总流量 1500 ml/min”，不把领域公式 `A+B` 当作产品文案；“本次已完成”只作瞬时成功反馈，不长期占据 idle 控制区。Header、实时曲线、流量设置、实验控制、气口 Tile 和停止按钮的其余视觉问题也统一留到该轮处理。
 
-Auto 与 Settings 的具体布局不在本轮设计或实现；立项时应从上述用户任务与已验证领域契约继续设计。清洗、配置等既有服务层安全约束仍以 PRD 与架构为准。
+Settings 使用固定 2×10 气口总览与单口详情：普通区编辑别名、控制通道和启用状态；高级展开区只读显示 1–20 preset、当前 resolved NI target、极性和连接标识。连接后 mapping 只读；只有 clean saved profile 且设备 connected/ready/safe idle 时才显示可用的单口验证动作。验证确认只显示面板气口、控制通道、约 20 秒和约 2500 ml/min 的产品意向，不把 NI target 当作普通确认信息；进行中显示进度、剩余时间和“立即停止”。rollback 后端继续保留，但普通页面不显示 rollback。
+
+Auto 的具体布局不在本轮设计或实现；立项时应从上述用户任务与已验证领域契约继续设计。清洗、配置等既有服务层安全约束仍以 PRD 与架构为准。
 
 ## 5. 文案规范
 

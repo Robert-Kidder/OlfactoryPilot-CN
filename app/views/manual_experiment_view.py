@@ -97,6 +97,7 @@ class PortTile(CardWidget):
         self._available = False
         self._actually_open = False
         self._fault = ""
+        self._configuration_mode = False
         self._visual_state: tuple[str, bool, bool, str, bool, bool] | None = None
         self.visual_mutation_count = 0
         super().__init__(parent)
@@ -169,6 +170,8 @@ class PortTile(CardWidget):
         return group
 
     def _normalBackgroundColor(self) -> QColor:
+        if self._configuration_mode and not self._available:
+            return QColor(255, 255, 255, 9)
         if not self.isEnabled():
             return QColor(255, 255, 255, 5)
         if self._selected:
@@ -235,6 +238,7 @@ class PortTile(CardWidget):
         available: bool,
         interactive: bool,
     ) -> None:
+        self._configuration_mode = False
         normalized_name = _normalize_alias(display_name)
         normalized_fault = user_facing_text(fault)
         visual_state = (
@@ -292,6 +296,28 @@ class PortTile(CardWidget):
             self._available,
             bool(interactive),
         )
+
+    def set_configuration_state(
+        self, *, display_name: str, configured: bool, selected: bool
+    ) -> None:
+        """Render Settings availability while keeping every panel port editable."""
+
+        self._configuration_mode = True
+        self._available = bool(configured)
+        self._selected = bool(selected)
+        self.set_port_content(display_name)
+        self.selection_accent.setVisible(self._selected)
+        self.open_group.hide()
+        self.fault_group.hide()
+        self.setEnabled(True)
+        self.setClickEnabled(True)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setProperty(
+            "portState",
+            "selected" if self._selected else ("available" if configured else "disabled"),
+        )
+        self._updateBackgroundColor()
+        self.update()
 
     def isChecked(self) -> bool:  # noqa: N802 - Qt-style compatibility
         return self._selected
@@ -433,6 +459,7 @@ class ManualExperimentView(QWidget):
     supply_requested = Signal(object)
     release_requested = Signal(object)
     stop_requested = Signal(object)
+    settings_requested = Signal()
 
     def __init__(
         self,
@@ -627,7 +654,13 @@ class ManualExperimentView(QWidget):
         layout = QVBoxLayout(card)
         layout.setContentsMargins(12, 9, 12, 11)
         layout.setSpacing(7)
-        layout.addWidget(StrongBodyLabel("气口", card))
+        header = QHBoxLayout()
+        header.addWidget(StrongBodyLabel("气口", card))
+        header.addStretch(1)
+        self.port_settings_button = PushButton(FIF.SETTING, "气口设置", card)
+        self.port_settings_button.clicked.connect(self.settings_requested)
+        header.addWidget(self.port_settings_button)
+        layout.addLayout(header)
         bay = QWidget(card)
         self.port_layout = QGridLayout(bay)
         self.port_layout.setContentsMargins(0, 0, 0, 0)
@@ -1106,6 +1139,9 @@ class ManualExperimentView(QWidget):
             "info": InfoBarIcon.INFORMATION,
             "warning": InfoBarIcon.WARNING,
         }.get(current.severity, InfoBarIcon.WARNING)
+        host = self.window()
+        if not isinstance(host, QWidget):
+            host = self
         bar = InfoBar(
             icon,
             current.title,
@@ -1121,7 +1157,7 @@ class ManualExperimentView(QWidget):
             # manager.  Avoiding that manager also prevents its animations
             # from outliving a replaced or destroyed Manual view.
             position=InfoBarPosition.NONE,
-            parent=self,
+            parent=host,
         )
         bar.setProperty("managedDurationMs", current.duration_ms)
         bar.closedSignal.connect(
@@ -1145,9 +1181,10 @@ class ManualExperimentView(QWidget):
             return
         bar.adjustSize()
         margin = 24
+        host = bar.parentWidget() or self
         bar.move(
-            max(margin, self.width() - bar.width() - margin),
-            max(margin, self.height() - bar.height() - margin),
+            max(margin, host.width() - bar.width() - margin),
+            max(margin, host.height() - bar.height() - margin),
         )
 
     def resizeEvent(self, event) -> None:  # noqa: N802 - Qt virtual method name

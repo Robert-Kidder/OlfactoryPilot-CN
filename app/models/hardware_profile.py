@@ -17,6 +17,53 @@ DEFAULT_MAX_FLOW_SCCM = 5000.0
 DEFAULT_NI_DEVICE_IDS = ("Dev1", "Dev2")
 
 
+@dataclass(frozen=True, slots=True)
+class ValveTargetPreset:
+    """Read-only standard wiring preset used to resolve controller channels."""
+
+    variant: str
+    targets: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if self.variant != "20-channel":
+            raise ValueError("普通气口设置只支持 20-channel target preset。")
+        if len(self.targets) != len(EXTERNAL_PORTS):
+            raise ValueError("20-channel target preset 必须完整包含控制通道 1–20。")
+        normalized = tuple(normalize_digital_target(target) for target in self.targets)
+        if len(set(normalized)) != len(normalized):
+            raise ValueError("20-channel target preset 的 NI target 不得重复。")
+        object.__setattr__(self, "targets", tuple(str(target).strip() for target in self.targets))
+
+    def target_for(self, internal_valve: int | None) -> str:
+        if internal_valve is None:
+            return ""
+        valve = _strict_int(internal_valve, "控制通道")
+        if valve not in EXTERNAL_PORTS:
+            raise ValueError("控制通道必须位于 1–20。")
+        return self.targets[valve - 1]
+
+    @classmethod
+    def from_config(cls, config: Mapping[str, Any]) -> ValveTargetPreset | None:
+        valve_mapping = config.get("valve_mapping")
+        if not isinstance(valve_mapping, Mapping):
+            return None
+        variants = valve_mapping.get("variants")
+        if not isinstance(variants, Mapping):
+            return None
+        raw = variants.get("20-channel")
+        if raw is None:
+            return None
+        if not isinstance(raw, Mapping):
+            raise ValueError("valve_mapping.variants.20-channel 必须是对象。")
+        expected = {str(port) for port in EXTERNAL_PORTS}
+        if set(raw) != expected:
+            raise ValueError("20-channel target preset 必须且只能包含控制通道 1–20。")
+        return cls(
+            variant="20-channel",
+            targets=tuple(str(raw[str(port)]) for port in EXTERNAL_PORTS),
+        )
+
+
 class VerificationStatus(StrEnum):
     PENDING = "pending"
     MOCK_VERIFIED = "mock_verified"
@@ -388,6 +435,7 @@ class HardwareProfile:
     max_total_sccm: float = DEFAULT_MAX_FLOW_SCCM
     max_sample_a_sccm: float = DEFAULT_MAX_FLOW_SCCM
     max_vacuum_c_sccm: float = DEFAULT_MAX_FLOW_SCCM
+    target_preset: ValveTargetPreset | None = None
 
     def __post_init__(self) -> None:
         version = _strict_int(self.schema_version, "HardwareProfile schema_version")
@@ -402,6 +450,10 @@ class HardwareProfile:
         object.__setattr__(self, "profile_name", name)
         if not isinstance(self.connections, HardwareConnectionConfig):
             raise ValueError("connections 必须是 HardwareConnectionConfig。")
+        if self.target_preset is not None and not isinstance(
+            self.target_preset, ValveTargetPreset
+        ):
+            raise ValueError("target_preset 必须是 ValveTargetPreset。")
         normalized_channels = tuple(
             channel.invalidate_stale_verification() for channel in self.channels
         )
@@ -446,6 +498,25 @@ class HardwareProfile:
         ]
         encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
         return hashlib.sha256(encoded).hexdigest()
+
+    def resolved_target_for(self, internal_valve: int | None) -> str:
+        """Resolve a normal-editor controller channel through the standard preset."""
+
+        if internal_valve is None:
+            return ""
+        if self.target_preset is None:
+            raise ValueError("缺少 20-channel target preset，无法修改控制通道。")
+        return self.target_preset.target_for(internal_valve)
+
+    def channel_uses_custom_target(self, external_port: int) -> bool:
+        channel = self.registry.by_external_port(external_port)
+        if channel.internal_valve is None or not channel.target:
+            return False
+        if self.target_preset is None:
+            return True
+        return normalize_digital_target(channel.target) != normalize_digital_target(
+            self.target_preset.target_for(channel.internal_valve)
+        )
 
     def flow_setpoints(
         self,
@@ -545,6 +616,13 @@ class HardwareProfile:
             raise ValueError("flow_limits_sccm 必须是 JSON 对象。")
         _reject_unknown_keys(limits, {"total", "sample_a", "vacuum_c"}, "flow_limits_sccm")
         connections = _parse_connections(raw.get("connections"), legacy_config=config)
+        try:
+            target_preset = ValveTargetPreset.from_config(config)
+        except ValueError:
+            # HardwareProfile remains the runtime authority.  A broken legacy
+            # preset blocks ordinary remapping, but must not rewrite or disable
+            # an already valid saved profile during startup.
+            target_preset = None
         return cls(
             schema_version=raw.get("schema_version"),
             profile_name=raw.get("profile_name", "默认硬件方案"),
@@ -554,6 +632,7 @@ class HardwareProfile:
             max_total_sccm=limits.get("total", DEFAULT_MAX_FLOW_SCCM),
             max_sample_a_sccm=limits.get("sample_a", DEFAULT_MAX_FLOW_SCCM),
             max_vacuum_c_sccm=limits.get("vacuum_c", DEFAULT_MAX_FLOW_SCCM),
+            target_preset=target_preset,
         )
 
 

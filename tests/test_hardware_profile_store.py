@@ -3,11 +3,12 @@ from __future__ import annotations
 import json
 import os
 import threading
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
-from app.models import HardwareProfile, VerificationStatus
+from app.models import ChannelVerification, HardwareProfile, VerificationStatus
 from app.services import HardwareProfileStore, StaleHardwareProfileRevisionError
 
 
@@ -273,3 +274,265 @@ def test_restart_prefers_canonical_local_connections_over_inherited_legacy_defau
     assert restarted.profile.connections.serial_port == "COM22"
     assert restarted.profile.connections.alicat_unit_ids == {"A": "1", "B": "2", "C": "3"}
     assert restarted.effective_config["serial_port"] == "COM22"
+
+
+def test_verification_only_transaction_is_cas_persistent_and_mapping_immutable(tmp_path) -> None:
+    local_path = tmp_path / "local_config.json"
+    store = HardwareProfileStore(
+        default_config=_default_config(), local_config_path=local_path
+    )
+    before = store.profile.registry.by_external_port(4)
+    evidence = ChannelVerification(
+        status=VerificationStatus.MOCK_VERIFIED,
+        fingerprint=before.mapping_fingerprint,
+        verified_at="2026-09-03T12:00:00+08:00",
+    )
+
+    updated = store.update_verification(
+        4,
+        evidence,
+        expected_revision=0,
+        expected_fingerprint=before.mapping_fingerprint,
+    )
+
+    after = updated.registry.by_external_port(4)
+    assert (after.external_port, after.internal_valve, after.target, after.active_high) == (
+        before.external_port,
+        before.internal_valve,
+        before.target,
+        before.active_high,
+    )
+    assert store.revision == 1
+    restarted = HardwareProfileStore(
+        default_config=_default_config(), local_config_path=local_path
+    )
+    assert restarted.profile.registry.by_external_port(4).verification == evidence
+    with pytest.raises(StaleHardwareProfileRevisionError):
+        store.update_verification(
+            4,
+            evidence,
+            expected_revision=0,
+            expected_fingerprint=before.mapping_fingerprint,
+        )
+
+    disk_before = local_path.read_bytes()
+    stale_evidence = ChannelVerification(
+        status=VerificationStatus.FAILED,
+        fingerprint="0" * 64,
+    )
+    with pytest.raises(StaleHardwareProfileRevisionError, match="fingerprint"):
+        restarted.update_verification(
+            4,
+            stale_evidence,
+            expected_revision=1,
+            expected_fingerprint="0" * 64,
+        )
+    assert local_path.read_bytes() == disk_before
+
+
+def test_default_mapping_and_remap_survive_restart_with_verification_invalidated(
+    tmp_path,
+) -> None:
+    local_path = tmp_path / "local_config.json"
+    store = HardwareProfileStore(
+        default_config=_default_config(), local_config_path=local_path
+    )
+    expected = {
+        2: 2,
+        4: 3,
+        6: 4,
+        8: 5,
+        12: 6,
+        14: 7,
+        16: 8,
+        18: 9,
+    }
+    assert {
+        channel.external_port: channel.internal_valve
+        for channel in store.profile.channels
+        if channel.enabled
+    } == expected
+
+    candidate = store.profile.to_dict()
+    candidate["channels"][3]["display_name"] = "薄荷"
+    candidate["channels"][3]["internal_valve"] = 10
+    candidate["channels"][3]["target"] = store.profile.resolved_target_for(10)
+    saved = store.save(candidate, expected_revision=0)
+    assert saved.registry.by_external_port(4).verification.status is (
+        VerificationStatus.MAPPING_CHANGED
+    )
+
+    restarted = HardwareProfileStore(
+        default_config=_default_config(), local_config_path=local_path
+    )
+    port04 = restarted.profile.registry.by_external_port(4)
+    assert restarted.revision == 1
+    assert port04.display_name == "薄荷"
+    assert port04.internal_valve == 10
+    assert port04.target == "Dev1/P1.1"
+    assert port04.verification.status is VerificationStatus.MAPPING_CHANGED
+    assert {
+        channel.external_port
+        for channel in restarted.profile.channels
+        if channel.enabled
+    } == set(expected)
+
+
+def test_verification_transaction_rejects_unconfirmed_physical_status(tmp_path) -> None:
+    store = HardwareProfileStore(
+        default_config=_default_config(),
+        local_config_path=tmp_path / "local_config.json",
+    )
+    channel = store.profile.registry.by_external_port(2)
+    evidence = ChannelVerification(
+        status=VerificationStatus.PHYSICAL_VERIFIED,
+        fingerprint=channel.mapping_fingerprint,
+    )
+
+    with pytest.raises(ValueError, match="现场授权"):
+        store.update_verification(
+            2,
+            evidence,
+            expected_revision=0,
+            expected_fingerprint=channel.mapping_fingerprint,
+        )
+
+
+def test_normal_save_cannot_inject_or_replace_verification_evidence(tmp_path) -> None:
+    store = HardwareProfileStore(
+        default_config=_default_config(),
+        local_config_path=tmp_path / "local_config.json",
+    )
+    channel = store.profile.registry.by_external_port(2)
+    accepted = ChannelVerification(
+        status=VerificationStatus.MOCK_VERIFIED,
+        fingerprint=channel.mapping_fingerprint,
+    )
+    store.update_verification(
+        2,
+        accepted,
+        expected_revision=0,
+        expected_fingerprint=channel.mapping_fingerprint,
+    )
+
+    forged = store.profile.to_dict()
+    forged["channels"][1]["verification"] = {
+        "status": VerificationStatus.FAILED.value,
+        "fingerprint": channel.mapping_fingerprint,
+        "note": "caller controlled",
+    }
+    saved = store.save(forged, expected_revision=1)
+
+    assert saved.registry.by_external_port(2).verification == accepted
+
+
+def test_mapping_save_invalidates_current_evidence_even_if_candidate_forges_physical(
+    tmp_path,
+) -> None:
+    store = HardwareProfileStore(
+        default_config=_default_config(),
+        local_config_path=tmp_path / "local_config.json",
+    )
+    channel = store.profile.registry.by_external_port(2)
+    store.update_verification(
+        2,
+        ChannelVerification(
+            status=VerificationStatus.MOCK_VERIFIED,
+            fingerprint=channel.mapping_fingerprint,
+        ),
+        expected_revision=0,
+        expected_fingerprint=channel.mapping_fingerprint,
+    )
+    candidate = store.profile.to_dict()
+    candidate["channels"][1]["internal_valve"] = 10
+    candidate["channels"][1]["target"] = "Dev1/P1.1"
+    candidate["channels"][1]["verification"] = {
+        "status": VerificationStatus.PHYSICAL_VERIFIED.value,
+        "fingerprint": "f" * 64,
+    }
+
+    saved = store.save(candidate, expected_revision=1)
+
+    assert saved.registry.by_external_port(2).verification.status is (
+        VerificationStatus.MAPPING_CHANGED
+    )
+
+
+@pytest.mark.parametrize(
+    ("section", "field", "value"),
+    (
+        ("profile", "profile_name", "externally-edited"),
+        ("channel", "display_name", "external-alias"),
+        ("channel", "enabled", False),
+        ("selector", "safe_level", True),
+        ("connections", "serial_port", "COM18"),
+        ("limits", "total", 4321.0),
+    ),
+)
+def test_verification_cas_rejects_same_revision_nonverification_disk_drift(
+    tmp_path, section: str, field: str, value
+) -> None:
+    local_path = tmp_path / "local_config.json"
+    store = HardwareProfileStore(
+        default_config=_default_config(), local_config_path=local_path
+    )
+    store.save(store.profile, expected_revision=0)
+    channel = store.profile.registry.by_external_port(2)
+    before_verification = channel.verification
+    disk = json.loads(local_path.read_text(encoding="utf-8"))
+    profile = disk["hardware_profile"]
+    if section == "channel":
+        profile["channels"][1][field] = value
+    elif section == "selector":
+        profile["selector"][field] = value
+    elif section == "connections":
+        profile["connections"][field] = value
+    elif section == "limits":
+        profile["flow_limits_sccm"][field] = value
+    else:
+        profile[field] = value
+    local_path.write_text(json.dumps(disk), encoding="utf-8")
+
+    with pytest.raises(StaleHardwareProfileRevisionError, match="revision"):
+        store.update_verification(
+            2,
+            ChannelVerification(
+                status=VerificationStatus.MOCK_VERIFIED,
+                fingerprint=channel.mapping_fingerprint,
+            ),
+            expected_revision=1,
+            expected_fingerprint=channel.mapping_fingerprint,
+        )
+
+    assert store.revision == 1
+    assert store.profile.registry.by_external_port(2).verification == before_verification
+
+
+def test_valid_physical_evidence_cannot_be_downgraded(tmp_path) -> None:
+    config = _default_config()
+    profile = HardwareProfile.from_config(config)
+    channels = list(profile.channels)
+    channel = channels[1]
+    channels[1] = replace(
+        channel,
+        verification=ChannelVerification(
+            status=VerificationStatus.PHYSICAL_VERIFIED,
+            fingerprint=channel.mapping_fingerprint,
+        ),
+    )
+    config["hardware_profile"] = replace(profile, channels=tuple(channels)).to_dict()
+    store = HardwareProfileStore(
+        default_config=config,
+        local_config_path=tmp_path / "local_config.json",
+    )
+
+    with pytest.raises(ValueError, match="降级"):
+        store.update_verification(
+            2,
+            ChannelVerification(
+                status=VerificationStatus.MOCK_VERIFIED,
+                fingerprint=channel.mapping_fingerprint,
+            ),
+            expected_revision=0,
+            expected_fingerprint=channel.mapping_fingerprint,
+        )

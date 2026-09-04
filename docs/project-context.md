@@ -24,6 +24,8 @@ OlfactoryPilot-CN 是用于嗅觉刺激实验的 Windows 桌面控制软件，�
 - 当前产品范围包含“手动实验”“自动实验”两个实验工作页面和“设置”工具页；设置不是第三种实验模式。尚未实现的页面不加占位入口，预测试、协议模式、校准、清洗和呼吸实验不恢复为正式导航；呼吸触发未来属于 Auto trigger strategy。
 - 产品界面优先使用 QFluentWidgets 原生 Card、Label、数字输入、Button、Badge、ToolTip 和 InfoBar；不使用旧 QWidget/QSS 控制台作为未来标准，不引入 superqt。
 - selected 使用琥珀强调；真实开启使用绿色图标状态；故障使用红色且形态不同的图标状态。重要状态不得只靠颜色或 Tooltip 表达。
+- “设置”位于正式导航底部；手动实验页只提供一个“气口设置”快捷入口，并切换到同一页面。普通设置固定显示 2×10 面板气口，只允许按 `20-channel` preset 选择控制通道，resolved NI target 与极性在高级区只读。
+- 气口配置始终区分三层：面板气口 `external_port` → 控制通道 `internal_valve` → NI/芯片接口 `target`。当前默认八路为 02→02、04→03、06→04、08→05、12→06、14→07、16→08、18→09；它只是默认 HardwareProfile，不是永久硬编码规则。
 
 ## 架构原则
 
@@ -40,6 +42,8 @@ OlfactoryPilot-CN 是用于嗅觉刺激实验的 Windows 桌面控制软件，�
 - Protocol、Manual、Maintenance 是三个互斥执行域；每个域只接受能够由 lease、command category/identity、executor context 或 safe-transition identity 明确归属本域的证据。
 - Protocol lease 是 Protocol ownership 的最强证据。仅加载文档、非零 epoch、任意 non-idle lease、普通 flow ready、active valve 或 possibly-open 状态都不能单独证明 Protocol 正在执行。
 - Manual/Maintenance 的 lease、pending command、valve、possibly-open 和 readiness 不得触发 Protocol invalidation；真正 active Protocol 的 readiness 丢失仍按现有 fail-closed 路径处理。
+- 单口验证使用独立 Verification ownership，只接受已保存且 revision/fingerprint 与运行时一致的 profile；模拟验证可生成 `MOCK_VERIFIED`，production stub 不得生成 `PHYSICAL_VERIFIED`。
+- 配置编辑与验证是两种权限：mapping 及普通保存仅允许设备断开且 owner 全部 handoff；验证则要求设备已连接、ready、safe idle、无未保存 draft 和竞争 owner。验证 evidence 只更新匹配 revision/fingerprint 的单口状态，不触发 connected mapping hot reload。
 
 ## 目标用户
 

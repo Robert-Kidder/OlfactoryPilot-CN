@@ -6,10 +6,15 @@ import os
 import threading
 import uuid
 from collections.abc import Mapping
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from app.models.hardware_profile import HardwareProfile
+from app.models.hardware_profile import (
+    ChannelVerification,
+    HardwareProfile,
+    VerificationStatus,
+)
 from app.models.safe_stop import normalize_digital_target
 
 
@@ -112,11 +117,30 @@ class HardwareProfileStore:
         local: Mapping[str, Any],
     ) -> HardwareProfile:
         if isinstance(candidate, HardwareProfile):
-            parsed = HardwareProfile.from_config(candidate.to_dict())
+            parsed = replace(
+                HardwareProfile.from_config(candidate.to_dict()),
+                target_preset=candidate.target_preset or self._profile.target_preset,
+            )
         elif isinstance(candidate, Mapping):
-            parsed = HardwareProfile.from_config(candidate)
+            parsed = replace(
+                HardwareProfile.from_config(candidate),
+                target_preset=self._profile.target_preset,
+            )
         else:
             raise ValueError("HardwareProfile 候选必须是对象或 HardwareProfile。")
+        current_by_port = {
+            channel.external_port: channel for channel in self._profile.channels
+        }
+        parsed = replace(
+            parsed,
+            channels=tuple(
+                replace(
+                    channel,
+                    verification=current_by_port[channel.external_port].verification,
+                )
+                for channel in parsed.channels
+            ),
+        )
         validated = parsed.invalidate_changes_from(self._profile)
         candidate_effective = _merge(
             _merge(self._base_config, local),
@@ -150,6 +174,87 @@ class HardwareProfileStore:
                 validated,
             )
             return validated
+
+    def update_verification(
+        self,
+        external_port: int,
+        verification: ChannelVerification,
+        *,
+        expected_revision: int,
+        expected_fingerprint: str,
+    ) -> HardwareProfile:
+        """Atomically persist evidence without accepting any mapping mutation."""
+
+        if not isinstance(verification, ChannelVerification):
+            raise ValueError("verification 必须是 ChannelVerification。")
+        if verification.status is VerificationStatus.PHYSICAL_VERIFIED:
+            raise ValueError("现场授权不可用：physical backend 未开放，拒绝写入证据。")
+        if verification.status not in {
+            VerificationStatus.MOCK_VERIFIED,
+            VerificationStatus.FAILED,
+            VerificationStatus.INCOMPLETE,
+        }:
+            raise ValueError("verification-only 事务不接受该验证状态。")
+        with self._lock:
+            expected = self._expected_revision(expected_revision)
+            local = self._read_local()
+            self._require_disk_revision(local, expected)
+            try:
+                disk_effective = _prefer_local_profile_connections(
+                    _merge(self._base_config, local),
+                    local,
+                )
+                disk_profile = HardwareProfile.from_config(disk_effective)
+            except (TypeError, ValueError) as exc:
+                raise StaleHardwareProfileRevisionError(
+                    "磁盘配置在 revision 之外发生无效或冲突变化，"
+                    "拒绝写入验证证据。"
+                ) from exc
+            if _without_verification(disk_profile) != _without_verification(self._profile):
+                raise StaleHardwareProfileRevisionError(
+                    "磁盘配置在 revision 之外发生变化，拒绝写入验证证据。"
+                )
+            port = int(external_port)
+            current = disk_profile.registry.by_external_port(port)
+            fingerprint = str(expected_fingerprint).strip().lower()
+            if not fingerprint or current.mapping_fingerprint != fingerprint:
+                raise StaleHardwareProfileRevisionError(
+                    "验证结果的 mapping fingerprint 已过期，未写入证据。"
+                )
+            if verification.fingerprint != fingerprint:
+                raise ValueError("验证证据 fingerprint 与当前映射不一致。")
+            if (
+                current.verification.status is VerificationStatus.PHYSICAL_VERIFIED
+                and current.verification_valid
+            ):
+                raise ValueError("有效现场验证证据不得被模拟或失败结果降级覆盖。")
+
+            channels = list(disk_profile.channels)
+            channels[port - 1] = replace(current, verification=verification)
+            updated = replace(disk_profile, channels=tuple(channels))
+            before_mapping = tuple(
+                (c.external_port, c.internal_valve, c.target, c.active_high)
+                for c in disk_profile.channels
+            )
+            after_mapping = tuple(
+                (c.external_port, c.internal_valve, c.target, c.active_high)
+                for c in updated.channels
+            )
+            if after_mapping != before_mapping:
+                raise RuntimeError("verification-only 事务不得修改映射。")
+
+            next_local = copy.deepcopy(local)
+            next_local = _with_connection_aliases(next_local, updated)
+            next_local["hardware_profile"] = updated.to_dict()
+            next_local["hardware_profile_revision"] = expected + 1
+            self._atomic_write(next_local)
+            self._profile = updated
+            self._revision = expected + 1
+            self._effective_config = _with_connection_aliases(
+                _merge(self._base_config, next_local),
+                updated,
+            )
+            return updated
 
     def prepare_save(
         self,
@@ -345,6 +450,13 @@ def _merge(base: Mapping[str, Any], override: Mapping[str, Any]) -> dict[str, An
         else:
             merged[key] = copy.deepcopy(value)
     return merged
+
+
+def _without_verification(profile: HardwareProfile) -> dict[str, Any]:
+    value = profile.to_dict()
+    for channel in value["channels"]:
+        channel.pop("verification", None)
+    return value
 
 
 def _with_connection_aliases(
