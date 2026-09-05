@@ -7,6 +7,16 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from PySide6.QtCore import QCoreApplication, QEvent
+from PySide6.QtWidgets import QMainWindow, QMenu, QWidget
+from shiboken6 import isValid
+
+from app.controllers import MainController
+from app.main import DEFAULT_CONFIG, load_config
+from app.models import AppState
+from app.services import MockHAL
+from app.views import MainWindow
+from app.workers import HardwareWorker
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 REDIRECT_NOTICE = (
@@ -17,6 +27,52 @@ EXPECTED_BASETEMP_ENV = "OLFACTORYPILOT_EXPECTED_BASETEMP"
 
 def _config(basetemp: str | None):
     return SimpleNamespace(option=SimpleNamespace(basetemp=basetemp))
+
+
+def test_qt_cleanup_deletes_only_parentless_root_windows(
+    qt_app, temp_policy_plugin
+) -> None:
+    root = QMainWindow()
+    child = QWidget(root)
+    excluded_menu = QMenu()
+    root.show()
+    excluded_menu.show()
+
+    temp_policy_plugin._cleanup_qt_root_widgets(qt_app)
+
+    assert not isValid(root)
+    assert not isValid(child)
+    assert isValid(excluded_menu)
+    excluded_menu.close()
+    excluded_menu.deleteLater()
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    qt_app.processEvents()
+
+
+def test_qt_cleanup_deletes_fluent_product_window(
+    qt_app, temp_policy_plugin
+) -> None:
+    state = AppState.from_config(load_config(DEFAULT_CONFIG))
+    controller = MainController(
+        state,
+        HardwareWorker(telemetry_hz=5, hal=MockHAL(), simulation=True),
+    )
+    window = MainWindow(controller, state)
+
+    temp_policy_plugin._cleanup_qt_root_widgets(qt_app)
+
+    assert not isValid(window)
+
+
+def test_qtbot_tracks_widgets_without_reparenting(qtbot) -> None:
+    root = QWidget()
+    child = QWidget(root)
+
+    qtbot.addWidget(root)
+    qtbot.addWidget(child)
+
+    assert child.parentWidget() is root
+    assert qtbot.registered_widgets == [root, child]
 
 
 def test_actual_pytest_basetemp_contract(tmp_path_factory) -> None:

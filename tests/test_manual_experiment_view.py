@@ -5,7 +5,7 @@ from dataclasses import FrozenInstanceError, replace
 import pytest
 from PySide6.QtCore import Qt
 from PySide6.QtTest import QTest
-from qfluentwidgets import DoubleSpinBox
+from qfluentwidgets import DoubleSpinBox, InfoBarIcon
 
 from app.models import (
     ChannelDescriptor,
@@ -442,9 +442,14 @@ def test_managed_infobar_timeout_retires_transient_but_not_actionable(
     assert view.notice_frame is not None
 
 
-def test_same_condition_severity_escalation_recreates_infobar_style(qtbot) -> None:
+@pytest.mark.parametrize("severity", ("error", "critical"))
+def test_same_condition_severity_escalation_updates_infobar_icon_in_place(
+    qtbot, qt_app, severity
+) -> None:
     view = ManualExperimentView()
     qtbot.addWidget(view)
+    view.show()
+    qt_app.processEvents()
     view.show_condition_notice(
         "设备异常",
         "请检查设备。",
@@ -454,18 +459,104 @@ def test_same_condition_severity_escalation_recreates_infobar_style(qtbot) -> No
     )
     first = view.notice_frame
     assert first is not None
+    initial_icon = first.icon
+    initial_type = first.property("type")
+    assert initial_icon == InfoBarIcon.WARNING
+    assert initial_type == InfoBarIcon.WARNING.value
 
     view.show_condition_notice(
         "需要立即处理",
         "请立即停止操作。",
         source="safety",
         condition_key=("safety", "FAULT"),
-        severity="critical",
+        severity=severity,
     )
 
     assert view.notice_frame is not None
-    assert view.notice_frame is not first
-    assert view.current_notice_severity == "critical"
+    assert view.notice_frame is first
+    assert view.notice_creation_count == 1
+    assert view.current_notice_severity == severity
+    assert view.notice_frame.icon == InfoBarIcon.ERROR
+    assert view.notice_frame.property("type") == InfoBarIcon.ERROR.value
+    assert view.notice_frame.icon != initial_icon
+    assert view.notice_frame.property("type") != initial_type
+
+
+def test_same_order_resync_keeps_transient_deadline_but_payload_update_restarts(
+    qtbot, qt_app,
+) -> None:
+    view = ManualExperimentView()
+    qtbot.addWidget(view)
+    view.show()
+    qt_app.processEvents()
+    view.show_notice(
+        "已保存",
+        "第一条结果",
+        source="result",
+        notice_key="saved",
+        severity="success",
+        actionable=False,
+    )
+    first_order = view._notice_order
+    QTest.qWait(40)
+    before_resync = view._notice_timer.remainingTime()
+
+    view._sync_notice_output()
+    after_resync = view._notice_timer.remainingTime()
+    assert view._notice_order == first_order
+    assert after_resync <= before_resync + 10
+
+    QTest.qWait(40)
+    before_update = view._notice_timer.remainingTime()
+    view.show_notice(
+        "已保存",
+        "第二条结果",
+        source="result",
+        notice_key="saved",
+        severity="success",
+        actionable=False,
+    )
+    assert view._notice_order > first_order
+    assert view._notice_timer.remainingTime() > before_update + 20
+
+
+def test_close_callback_uses_updated_actionability_for_same_infobar(
+    qtbot, qt_app
+) -> None:
+    view = ManualExperimentView()
+    qtbot.addWidget(view)
+    view.show()
+    qt_app.processEvents()
+    view.show_notice(
+        "操作结果",
+        "等待确认",
+        source="result",
+        notice_key="stable",
+        severity="error",
+        actionable=False,
+    )
+    original = view.notice_frame
+    view.show_condition_notice(
+        "已有警告",
+        "稍后处理",
+        source="warning",
+        condition_key="warning",
+        severity="warning",
+    )
+    view.show_notice(
+        "操作失败",
+        "请检查设备",
+        source="result",
+        notice_key="stable",
+        severity="error",
+        actionable=True,
+    )
+    assert view.notice_frame is original
+
+    assert original is not None
+    original.close()
+    assert view.notice_frame is None
+    assert view._notification_coordinator.current is None
 
 
 def test_plain_snapshot_detail_replaces_stale_notice(qtbot) -> None:

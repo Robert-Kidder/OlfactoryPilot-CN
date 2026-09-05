@@ -234,3 +234,261 @@ def test_transient_timeout_never_resolves_or_hides_actionable_condition() -> Non
     assert coordinator.current == condition
     coordinator.retire_event(transient.identity)
     assert coordinator.current == condition
+
+
+def test_same_level_new_condition_does_not_preempt_sticky_winner() -> None:
+    coordinator = NotificationCoordinator()
+    first = coordinator.publish_condition(
+        source="first",
+        key="first",
+        title="第一个警告",
+        message="请先处理",
+        severity="warning",
+    )
+    returned = coordinator.publish_condition(
+        source="second",
+        key="second",
+        title="第二个警告",
+        message="稍后处理",
+        severity="warning",
+    )
+
+    assert first is not None
+    assert returned is not None and returned.identity == first.identity
+    assert coordinator.current == first
+
+
+def test_strict_severity_order_preempts_only_upward() -> None:
+    coordinator = NotificationCoordinator()
+    success = coordinator.publish_event(
+        source="result",
+        key="saved",
+        title="已保存",
+        message="保存完成",
+        severity="success",
+        actionable=True,
+    )
+    info = coordinator.publish_condition(
+        source="info",
+        key="info",
+        title="请注意",
+        message="普通信息",
+        severity="info",
+    )
+    warning = coordinator.publish_condition(
+        source="warning",
+        key="warning",
+        title="请检查",
+        message="警告信息",
+        severity="warning",
+    )
+    error = coordinator.publish_condition(
+        source="error",
+        key="error",
+        title="无法继续",
+        message="错误信息",
+        severity="error",
+    )
+
+    assert success is not None and success.severity == "success"
+    assert info is not None and info.severity == "info"
+    assert warning is not None and warning.severity == "warning"
+    assert error is not None and error.severity == "error"
+    safety_error = coordinator.publish_condition(
+        source="safety",
+        key=("safety", "LOW_FLOW"),
+        title="气流不足",
+        message="请检查供气",
+        severity="error",
+    )
+    assert safety_error is not None and safety_error.identity == error.identity
+    critical = coordinator.publish_event(
+        source="critical",
+        key="stop",
+        title="立即停止",
+        message="需要立即处理",
+        severity="critical",
+        actionable=True,
+    )
+    assert critical is not None and critical.severity == "critical"
+
+
+def test_actionable_event_dismiss_silences_backlog_until_event_clears() -> None:
+    coordinator = NotificationCoordinator()
+    coordinator.publish_condition(
+        source="warning",
+        key="warning",
+        title="已有警告",
+        message="请稍后处理",
+        severity="warning",
+    )
+    winner = coordinator.publish_event(
+        source="action-result",
+        key="failed",
+        title="操作未完成",
+        message="请处理失败原因",
+        severity="error",
+        actionable=True,
+    )
+    coordinator.publish_condition(
+        source="equal-error",
+        key="equal-error",
+        title="另一项错误",
+        message="已有同级问题",
+        severity="error",
+    )
+    assert winner is not None and coordinator.current == winner
+
+    assert coordinator.dismiss(winner.identity) is None
+    assert coordinator.publish_condition(
+        source="new-warning",
+        key="new-warning",
+        title="另一项检查",
+        message="稍后处理",
+        severity="warning",
+    ) is None
+    higher = coordinator.publish_condition(
+        source="critical",
+        key="critical",
+        title="需要立即处理",
+        message="执行安全停止",
+        severity="critical",
+    )
+    assert higher is not None and higher.severity == "critical"
+    coordinator.resolve_condition(source="critical")
+    assert coordinator.current is None
+    coordinator.clear_event(source="action-result")
+    assert coordinator.current is not None
+    assert coordinator.current.severity == "error"
+
+
+def test_resolving_winner_reconsiders_remaining_active_conditions() -> None:
+    coordinator = NotificationCoordinator()
+    first = coordinator.publish_condition(
+        source="first",
+        key="first",
+        title="第一个警告",
+        message="请先处理",
+        severity="warning",
+    )
+    coordinator.publish_condition(
+        source="second",
+        key="second",
+        title="第二个警告",
+        message="仍需处理",
+        severity="warning",
+    )
+
+    assert first is not None and coordinator.current == first
+    remaining = coordinator.resolve_condition(source="first")
+    assert remaining is not None
+    assert remaining.title == "第二个警告"
+
+
+def test_actionable_condition_retires_blocked_transients_without_replay() -> None:
+    coordinator = NotificationCoordinator()
+    coordinator.publish_event(
+        source="result",
+        key="old",
+        title="已保存",
+        message="旧结果",
+        severity="success",
+    )
+    coordinator.publish_condition(
+        source="safety",
+        key="blocked",
+        title="当前不可操作",
+        message="请检查设备",
+        severity="error",
+    )
+    assert "result" not in coordinator._events
+    coordinator.publish_event(
+        source="result",
+        key="while-blocked",
+        title="已结束",
+        message="受阻期间结果",
+        severity="info",
+    )
+    assert "result" not in coordinator._events
+    assert coordinator.resolve_condition(source="safety") is None
+
+    fresh = coordinator.publish_event(
+        source="result",
+        key="fresh",
+        title="已保存",
+        message="新结果",
+        severity="success",
+    )
+    assert fresh is not None and coordinator.current == fresh
+
+
+def test_dismissed_actionable_event_still_suppresses_transients() -> None:
+    coordinator = NotificationCoordinator()
+    actionable = coordinator.publish_event(
+        source="failure",
+        key="failure",
+        title="操作失败",
+        message="请检查设备",
+        severity="error",
+        actionable=True,
+    )
+    assert actionable is not None
+    assert coordinator.dismiss(actionable.identity) is None
+
+    assert coordinator.publish_event(
+        source="result",
+        key="saved",
+        title="已保存",
+        message="普通结果",
+        severity="success",
+    ) is None
+    assert "result" not in coordinator._events
+
+
+def test_suppressed_transient_does_not_clear_existing_actionable_same_source() -> None:
+    coordinator = NotificationCoordinator()
+    actionable = coordinator.publish_event(
+        source="status",
+        key="failure",
+        title="操作失败",
+        message="请检查设备",
+        severity="error",
+        actionable=True,
+    )
+    assert actionable is not None
+
+    returned = coordinator.publish_event(
+        source="status",
+        key="ordinary-result",
+        title="已完成",
+        message="普通结果",
+        severity="success",
+        actionable=False,
+    )
+
+    assert returned == actionable
+    assert coordinator._events["status"] == actionable
+    assert coordinator.current == actionable
+
+
+def test_same_identity_updates_copy_and_severity_without_new_episode() -> None:
+    coordinator = NotificationCoordinator()
+    first = coordinator.publish_condition(
+        source="device",
+        key="device-condition",
+        title="请检查设备",
+        message="连接不稳定",
+        severity="warning",
+    )
+    updated = coordinator.publish_condition(
+        source="device",
+        key="device-condition",
+        title="设备连接中断",
+        message="请重新连接设备",
+        severity="error",
+    )
+    assert first is not None and updated is not None
+    assert updated.identity == first.identity
+    assert updated.title == "设备连接中断"
+    assert updated.message == "请重新连接设备"
+    assert updated.severity == "error"

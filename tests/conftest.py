@@ -7,8 +7,13 @@ import sys
 import tempfile
 from pathlib import Path
 
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
 import pytest
-from PySide6.QtWidgets import QApplication
+from PySide6.QtCore import QCoreApplication, QEvent, Qt
+from PySide6.QtWidgets import QApplication, QDialog, QMainWindow, QMenu
+from shiboken6 import delete as delete_qt_object
+from shiboken6 import isValid
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 _MANAGED_BASETEMP_ATTRIBUTE = "_olfactorypilot_managed_basetemp"
@@ -69,6 +74,38 @@ def _retry_remove_readonly(function, path: str, error_info) -> None:
     function(path)
 
 
+def _cleanup_qt_root_widgets(app: QApplication) -> None:
+    """Synchronously delete parentless test windows and their timer-owning children."""
+
+    # QFluentWidgets.FluentWindow derives from QWidget rather than QMainWindow,
+    # so an abstract Qt base-class filter misses the application's real shell.
+    # Import lazily to keep QT_QPA_PLATFORM configured before application code.
+    from app.views.main_window import MainWindow as ProductMainWindow
+
+    roots = [
+        widget
+        for widget in list(app.topLevelWidgets())
+        if widget.parent() is None
+        and widget.windowType() in {Qt.WindowType.Window, Qt.WindowType.Dialog}
+        and isinstance(widget, QMainWindow | QDialog | ProductMainWindow)
+        and not isinstance(widget, QMenu)
+    ]
+    for widget in roots:
+        if isValid(widget):
+            widget.close()
+    app.processEvents()
+    for widget in roots:
+        if isValid(widget):
+            # pytest does not run QApplication.exec(); on Windows, deleteLater()
+            # can therefore retain a FluentWindow and its 30/20 FPS timers for
+            # the remainder of the session.  The owning controller has already
+            # been joined before this helper runs, so synchronous destruction is
+            # deterministic and remains strictly test-only.
+            delete_qt_object(widget)
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    app.processEvents()
+
+
 @pytest.fixture
 def temp_policy_plugin():
     """Expose this conftest plugin to its focused contract tests."""
@@ -83,12 +120,21 @@ def qt_app():
 
 @pytest.fixture
 def qtbot(qt_app):
-    class _Bot:
-        def addWidget(self, widget):
-            # No-op placeholder; tests only verify widgets exist.
-            widget.setParent(None)
+    widgets = []
 
-    return _Bot()
+    class _Bot:
+        registered_widgets = widgets
+
+        def addWidget(self, widget):
+            widgets.append(widget)
+
+    yield _Bot()
+    for widget in reversed(widgets):
+        if isValid(widget):
+            widget.close()
+            delete_qt_object(widget)
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    qt_app.processEvents()
 
 
 @pytest.fixture(autouse=True)
@@ -107,9 +153,8 @@ def deterministic_qt_thread_teardown(monkeypatch):
     yield
     for controller in reversed(controllers):
         controller.teardown(timeout_ms=2000)
+        if isValid(controller):
+            delete_qt_object(controller)
     app = QApplication.instance()
     if app is not None:
-        for widget in list(app.topLevelWidgets()):
-            widget.close()
-            widget.deleteLater()
-        app.processEvents()
+        _cleanup_qt_root_widgets(app)

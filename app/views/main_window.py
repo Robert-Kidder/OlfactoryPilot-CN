@@ -428,6 +428,7 @@ class MainWindow(FluentWindow):
             friendly,
             severity=severity,
             source="status",
+            notice_key="operation-status",
         )
 
     def render_actuation_alert(self, message: str, *, severe: bool) -> None:
@@ -441,7 +442,7 @@ class MainWindow(FluentWindow):
                 "需要立即处理",
                 friendly,
                 severity="critical",
-                notice_key=("actuation-alert", friendly),
+                notice_key="actuation-alert",
                 source="actuation-alert",
             )
         else:
@@ -499,6 +500,7 @@ class MainWindow(FluentWindow):
                 "；".join(summary) or "设备检查未通过，请检查连接后重试。",
                 severity="error",
                 source="self-check",
+                notice_key="self-check-failed",
             )
         else:
             self.manual_experiment_view.clear_notice_event(source="self-check")

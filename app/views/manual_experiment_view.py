@@ -485,6 +485,7 @@ class ManualExperimentView(QWidget):
         self.port_buttons = self.port_tiles
         self._notification_coordinator = NotificationCoordinator()
         self._notice_identity: tuple[object, ...] | None = None
+        self._notice_order: int | None = None
         self._notice_severity: str | None = None
         self._notice_actionable: bool | None = None
         self._notice_timer = QTimer(self)
@@ -1105,8 +1106,6 @@ class ManualExperimentView(QWidget):
             return
         if (
             current.identity == self._notice_identity
-            and current.severity == self._notice_severity
-            and current.actionable == self._notice_actionable
             and self.notice_frame is not None
             and isValid(self.notice_frame)
             and self.notice_frame.isVisible()
@@ -1121,8 +1120,31 @@ class ManualExperimentView(QWidget):
             content_label = getattr(self.notice_frame, "contentLabel", None)
             if content_label is not None and content_label.text() != current.message:
                 content_label.setText(current.message)
+            icon = {
+                "error": InfoBarIcon.ERROR,
+                "critical": InfoBarIcon.ERROR,
+                "success": InfoBarIcon.SUCCESS,
+                "info": InfoBarIcon.INFORMATION,
+                "warning": InfoBarIcon.WARNING,
+            }.get(current.severity, InfoBarIcon.WARNING)
+            if current.severity != self._notice_severity:
+                self.notice_frame.icon = icon
+                self.notice_frame.setProperty("type", icon.value)
+                self.notice_frame.iconWidget.icon = icon
+                self.notice_frame.iconWidget.update()
+                self.notice_frame.style().unpolish(self.notice_frame)
+                self.notice_frame.style().polish(self.notice_frame)
+            meaningful_update = current.order != self._notice_order
+            self.notice_frame.setProperty("managedDurationMs", current.duration_ms)
+            if meaningful_update:
+                self._notice_timer.stop()
+                if current.duration_ms >= 0:
+                    self._notice_timer.start(current.duration_ms)
+            self._notice_order = current.order
             self._notice_severity = current.severity
             self._notice_actionable = current.actionable
+            self.notice_frame.adjustSize()
+            self._position_notice_frame()
             return
         old = self.notice_frame
         if old is not None and isValid(old):
@@ -1161,11 +1183,12 @@ class ManualExperimentView(QWidget):
         )
         bar.setProperty("managedDurationMs", current.duration_ms)
         bar.closedSignal.connect(
-            lambda: self._dismiss_notice(current.identity, current.actionable, bar)
+            lambda: self._dismiss_notice(current.identity, bar)
         )
         bar.setObjectName("manualExperimentInfoBar")
         self.notice_frame = bar
         self._notice_identity = current.identity
+        self._notice_order = current.order
         self._notice_severity = current.severity
         self._notice_actionable = current.actionable
         self.notice_creation_count += 1
@@ -1205,15 +1228,16 @@ class ManualExperimentView(QWidget):
     def _dismiss_notice(
         self,
         identity: tuple[object, ...],
-        actionable: bool,
         bar: InfoBar,
     ) -> None:
         if self.notice_frame is not bar:
             return
+        actionable = self._notice_actionable is True
         self._notice_timer.stop()
         self._stop_notice_animation(bar)
         self.notice_frame = None
         self._notice_identity = None
+        self._notice_order = None
         self._notice_severity = None
         self._notice_actionable = None
         self.status_label.setText("")
@@ -1232,6 +1256,7 @@ class ManualExperimentView(QWidget):
             self._stop_notice_animation(old)
             old.close()
         self._notice_identity = None
+        self._notice_order = None
         self._notice_severity = None
         self._notice_actionable = None
         self.status_label.setText("")
@@ -1245,6 +1270,11 @@ class ManualExperimentView(QWidget):
         """Release managed notice state before Qt destroys animation targets."""
 
         self.clear_notice()
+        for bar in self.findChildren(InfoBar):
+            if isValid(bar):
+                self._stop_notice_animation(bar)
+                bar.close()
+                bar.deleteLater()
         super().closeEvent(event)
 
     def clear_safety_notice(self) -> None:

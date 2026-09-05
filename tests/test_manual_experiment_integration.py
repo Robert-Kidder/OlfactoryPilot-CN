@@ -437,6 +437,10 @@ def test_hardware_profile_controller_gate_revision_and_rollback(tmp_path, qtbot)
     )
 
     assert controller.handle_hardware_profile_save_requested(candidate, 0)
+    assert window.hardware_settings_view.save_feedback_label.text() == "设置已保存"
+    assert "hardware-settings" not in (
+        window.manual_experiment_view._notification_coordinator._events
+    )
     assert not controller._configuration_restart_required
     assert controller.state.hardware_profile.profile_name == "Mock 候选方案"
     assert controller.state.selector == selector
@@ -608,10 +612,11 @@ def test_mock_verification_requires_isolated_correlated_open_close_receipts(
     assert verified.verification.fingerprint == verified.mapping_fingerprint
     assert json.loads((tmp_path / "local_config.json").read_text(encoding="utf-8"))["hardware_profile_revision"] == 1
     assert not window.hardware_settings_view.name_inputs[2].isEnabled()
-    notice = window.manual_experiment_view._notification_coordinator.current
-    assert notice is not None
-    assert notice.title == "模拟验证完成"
-    assert notice.actionable is False
+    coordinator = window.manual_experiment_view._notification_coordinator
+    assert "hardware-settings" not in coordinator._events
+    assert window.hardware_settings_view.verification_labels[2].text() == "待验证"
+    assert window.hardware_settings_view.verification_panel.isHidden()
+    assert not window.hardware_settings_view.editor_stack.isHidden()
 
 
 def test_mock_verification_failure_does_not_publish_fingerprint(
@@ -640,7 +645,14 @@ def test_mock_verification_failure_does_not_publish_fingerprint(
     notice = window.manual_experiment_view._notification_coordinator.current
     assert notice is not None
     assert notice.title == "验证失败"
+    assert notice.message == "请检查气口后重试。"
+    assert not any(
+        term in notice.message
+        for term in ("映射", "fingerprint", "安全动作", "revision", "写入")
+    )
     assert notice.actionable is True
+    assert window.hardware_settings_view.verification_panel.isHidden()
+    assert not window.hardware_settings_view.editor_stack.isHidden()
 
 
 def test_mock_verification_stop_persists_incomplete_without_mapping_change(
@@ -674,6 +686,12 @@ def test_mock_verification_stop_persists_incomplete_without_mapping_change(
     )
     assert controller.device_lease.snapshot.kind is DeviceLeaseKind.IDLE
     assert window.hardware_settings_view.verification_stop_button.isHidden()
+    assert window.hardware_settings_view.verification_panel.isHidden()
+    assert not window.hardware_settings_view.editor_stack.isHidden()
+    assert window.hardware_settings_view.verification_hints[2].text() == "验证已停止"
+    assert "hardware-settings" not in (
+        window.manual_experiment_view._notification_coordinator._events
+    )
 
 
 def test_verification_rejects_unsaved_draft_and_competing_owner_before_actuation(
@@ -690,6 +708,10 @@ def test_verification_rejects_unsaved_draft_and_competing_owner_before_actuation
 
     controller.handle_hardware_mock_verify_requested(2, dirty)
     assert "先保存并重连" in window.hardware_settings_view.status_label.text()
+    notice = window.manual_experiment_view._notification_coordinator.current
+    assert notice is not None
+    assert notice.title == "无法开始验证"
+    assert notice.message == "请检查设置和设备后重试。"
     assert not (tmp_path / "local_config.json").exists()
 
     token = controller.device_lease.acquire(
@@ -699,6 +721,108 @@ def test_verification_rejects_unsaved_draft_and_competing_owner_before_actuation
     controller.handle_hardware_mock_verify_requested(2, saved)
     assert "正在执行其他操作" in window.hardware_settings_view.status_label.text()
     assert not (tmp_path / "local_config.json").exists()
+
+
+def test_successful_save_clears_dismissed_failure_before_reentry(
+    tmp_path, qtbot
+) -> None:
+    controller, _ = _controller(tmp_path)
+    window = MainWindow(controller, controller.state)
+    qtbot.addWidget(window)
+    controller.bind_view(window)
+    profile = controller.state.hardware_profile
+
+    assert not controller.handle_hardware_profile_save_requested(profile, 0)
+    first = window.manual_experiment_view.notice_frame
+    assert first is not None
+    notice = window.manual_experiment_view._notification_coordinator.current
+    assert notice is not None and notice.message in {
+        "请重新保存。",
+        "请稍后重新保存。",
+    }
+    assert not any(
+        term in notice.message
+        for term in ("安全动作", "运行时", "revision", "owner", "lease")
+    )
+    first.close()
+    controller.state.telemetry.connected = False
+    controller.state.hardware_ready = False
+    controller.state.telemetry.safety_state = "SAFE"
+    candidate = replace(profile, profile_name="saved-after-failure")
+
+    assert controller.handle_hardware_profile_save_requested(candidate, 0)
+    assert "hardware-settings" not in (
+        window.manual_experiment_view._notification_coordinator._events
+    )
+    controller.state.telemetry.connected = True
+    assert not controller.handle_hardware_profile_save_requested(candidate, 1)
+    assert window.manual_experiment_view.notice_frame is not None
+    assert window.manual_experiment_view.current_notice_title == "保存失败"
+
+
+def test_nonfailure_verification_clears_dismissed_failure_before_reentry(
+    tmp_path, qtbot, monkeypatch
+) -> None:
+    controller, _ = _controller(tmp_path)
+    window = MainWindow(controller, controller.state)
+    qtbot.addWidget(window)
+    controller.bind_view(window)
+    original_write = MockHAL.write_digital
+    monkeypatch.setattr(MockHAL, "write_digital", lambda *_args, **_kwargs: False)
+
+    controller.handle_hardware_mock_verify_requested(
+        2, controller.state.hardware_profile, expected_revision=0
+    )
+    first = window.manual_experiment_view.notice_frame
+    assert first is not None
+    first.close()
+    monkeypatch.setattr(MockHAL, "write_digital", original_write)
+    controller.handle_hardware_mock_verify_requested(
+        2, controller.state.hardware_profile, expected_revision=1
+    )
+
+    assert "hardware-settings" not in (
+        window.manual_experiment_view._notification_coordinator._events
+    )
+    monkeypatch.setattr(MockHAL, "write_digital", lambda *_args, **_kwargs: False)
+    controller.handle_hardware_mock_verify_requested(
+        2, controller.state.hardware_profile, expected_revision=2
+    )
+    assert window.manual_experiment_view.notice_frame is not None
+    assert window.manual_experiment_view.current_notice_title == "验证失败"
+
+
+def test_verification_evidence_save_failure_uses_concise_global_copy(
+    tmp_path, qtbot, monkeypatch
+) -> None:
+    controller, _ = _controller(tmp_path)
+    window = MainWindow(controller, controller.state)
+    qtbot.addWidget(window)
+    controller.bind_view(window)
+
+    def fail_evidence_save(*_args, **_kwargs):
+        raise OSError("revision fingerprint mapping diagnostics")
+
+    monkeypatch.setattr(
+        controller._hardware_profile_store,
+        "update_verification",
+        fail_evidence_save,
+    )
+    controller.handle_hardware_mock_verify_requested(
+        2, controller.state.hardware_profile, expected_revision=0
+    )
+
+    notice = window.manual_experiment_view._notification_coordinator.current
+    assert notice is not None
+    assert notice.title == "验证结果保存失败"
+    assert notice.message == "请重新验证。"
+    assert not any(
+        term in notice.message
+        for term in ("revision", "fingerprint", "mapping", "诊断")
+    )
+    assert "revision fingerprint mapping diagnostics" in (
+        window.hardware_settings_view.status_label.text()
+    )
 
 
 def test_production_verification_stub_never_persists_physical_evidence(
@@ -727,12 +851,17 @@ def test_production_verification_stub_never_persists_physical_evidence(
 
     assert window.hardware_settings_view.mock_buttons[2].isEnabled()
     assert not window.hardware_settings_view.name_inputs[2].isEnabled()
+    window.hardware_settings_view.select_port(2)
 
     controller.handle_hardware_mock_verify_requested(
         2, controller.state.hardware_profile
     )
 
     assert "现场验证未开放" in window.hardware_settings_view.status_label.text()
+    assert (
+        window.hardware_settings_view.verification_hints[2].text()
+        == "现场验证暂不可用"
+    )
     assert not (tmp_path / "local_config.json").exists()
 
 

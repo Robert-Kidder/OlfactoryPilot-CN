@@ -4,8 +4,8 @@ from collections.abc import Hashable
 from dataclasses import dataclass
 
 _SEVERITY_PRIORITY = {
+    "success": 0,
     "info": 10,
-    "success": 10,
     "warning": 20,
     "error": 30,
     "critical": 40,
@@ -40,14 +40,6 @@ class Notification:
     @property
     def priority(self) -> tuple[int, int]:
         level = _SEVERITY_PRIORITY.get(self.severity, 20)
-        if (
-            len(self.identity) >= 2
-            and self.identity[0] == "condition"
-            and isinstance(self.identity[1], tuple)
-            and self.identity[1]
-            and self.identity[1][0] == "safety"
-        ):
-            level = max(level, 35)
         return (level, self.order)
 
 
@@ -77,20 +69,54 @@ class NotificationCoordinator:
         self._condition_by_source: dict[str, Hashable] = {}
         self._events: dict[str, Notification] = {}
         self._dismissed: set[tuple[object, ...]] = set()
+        self._dismissed_levels: dict[tuple[object, ...], int] = {}
+        self._winner_identity: tuple[object, ...] | None = None
 
     @property
     def current(self) -> Notification | None:
-        candidates = [
-            episode.notification
-            for episode in self._conditions.values()
-            if episode.notification.identity not in self._dismissed
+        active = self._active_notifications()
+        by_identity = {notice.identity: notice for notice in active}
+        self._discard_inactive_dismissals(set(by_identity))
+        silence_level = max(self._dismissed_levels.values(), default=None)
+        eligible = [
+            notice
+            for notice in active
+            if notice.identity not in self._dismissed
+            and (
+                silence_level is None or notice.priority[0] > silence_level
+            )
         ]
-        candidates.extend(
-            event
-            for event in self._events.values()
-            if event.identity not in self._dismissed
-        )
-        return max(candidates, key=lambda item: item.priority, default=None)
+
+        winner = by_identity.get(self._winner_identity)
+        if winner is not None and winner.identity not in self._dismissed:
+            higher = [
+                notice
+                for notice in eligible
+                if notice.identity != winner.identity
+                and notice.priority[0] > winner.priority[0]
+            ]
+            if not higher:
+                return winner
+            winner = max(higher, key=lambda item: item.priority)
+            self._winner_identity = winner.identity
+            return winner
+
+        if winner is not None:
+            higher = [
+                notice
+                for notice in eligible
+                if notice.priority[0]
+                > self._dismissed_levels.get(winner.identity, winner.priority[0])
+            ]
+            if not higher:
+                return None
+            winner = max(higher, key=lambda item: item.priority)
+            self._winner_identity = winner.identity
+            return winner
+
+        winner = max(eligible, key=lambda item: item.priority, default=None)
+        self._winner_identity = None if winner is None else winner.identity
+        return winner
 
     def publish_condition(
         self,
@@ -123,6 +149,8 @@ class NotificationCoordinator:
             severity,
             actionable,
         )
+        if actionable:
+            self._retire_transients()
         self._condition_by_source[source] = key
         return self.current
 
@@ -144,6 +172,9 @@ class NotificationCoordinator:
         if not episode.sources:
             self._conditions.pop(active_key, None)
             self._dismissed.discard(identity)
+            self._dismissed_levels.pop(identity, None)
+            if self._winner_identity == identity:
+                self._winner_identity = None
         return self.current
 
     def publish_event(
@@ -157,9 +188,20 @@ class NotificationCoordinator:
         actionable: bool = False,
     ) -> Notification | None:
         identity = ("event", source, key)
+        if (
+            not actionable
+            and severity in _NON_ACTIONABLE_DURATION_MS
+            and self._has_active_actionable()
+        ):
+            return self.current
+        if actionable:
+            self._retire_transients()
         previous = self._events.get(source)
         if previous is not None and previous.identity != identity:
             self._dismissed.discard(previous.identity)
+            self._dismissed_levels.pop(previous.identity, None)
+            if self._winner_identity == previous.identity:
+                self._winner_identity = None
         self._events[source] = self._notification(
             identity,
             title,
@@ -173,6 +215,9 @@ class NotificationCoordinator:
         event = self._events.pop(source, None)
         if event is not None:
             self._dismissed.discard(event.identity)
+            self._dismissed_levels.pop(event.identity, None)
+            if self._winner_identity == event.identity:
+                self._winner_identity = None
         return self.current
 
     def retire_event(self, identity: tuple[object, ...]) -> Notification | None:
@@ -184,10 +229,20 @@ class NotificationCoordinator:
         event = self._events.get(source)
         if event is not None and event.identity == identity:
             self._dismissed.add(identity)
+            if self._winner_identity == identity:
+                self._winner_identity = None
         return self.current
 
     def dismiss(self, identity: tuple[object, ...]) -> Notification | None:
+        active = {
+            notice.identity: notice for notice in self._active_notifications()
+        }
+        notice = active.get(identity)
+        if notice is None:
+            return self.current
         self._dismissed.add(identity)
+        if notice.actionable:
+            self._dismissed_levels[identity] = notice.priority[0]
         return self.current
 
     def clear(self) -> None:
@@ -195,6 +250,42 @@ class NotificationCoordinator:
         self._condition_by_source.clear()
         self._events.clear()
         self._dismissed.clear()
+        self._dismissed_levels.clear()
+        self._winner_identity = None
+
+    def _retire_transients(self) -> None:
+        for source, event in tuple(self._events.items()):
+            if (
+                not event.actionable
+                and event.severity in _NON_ACTIONABLE_DURATION_MS
+            ):
+                self._events.pop(source, None)
+                self._dismissed.discard(event.identity)
+                self._dismissed_levels.pop(event.identity, None)
+                if self._winner_identity == event.identity:
+                    self._winner_identity = None
+
+    def _active_notifications(self) -> list[Notification]:
+        notifications = [
+            episode.notification for episode in self._conditions.values()
+        ]
+        notifications.extend(self._events.values())
+        return notifications
+
+    def _has_active_actionable(self) -> bool:
+        return any(
+            notice.actionable
+            for episode in self._conditions.values()
+            for notice in episode.sources.values()
+        ) or any(event.actionable for event in self._events.values())
+
+    def _discard_inactive_dismissals(
+        self, active_identities: set[tuple[object, ...]]
+    ) -> None:
+        self._dismissed.intersection_update(active_identities)
+        for identity in tuple(self._dismissed_levels):
+            if identity not in active_identities:
+                self._dismissed_levels.pop(identity, None)
 
     def _notification(
         self,

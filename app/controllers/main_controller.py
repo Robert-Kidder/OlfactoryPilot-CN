@@ -3776,7 +3776,7 @@ class MainController(QObject):
             message = f"保存失败：{reason}；安全动作：旧配置保持发布；下一步：安全停止并断开后重试。"
             self._render_hardware_profile(message, preserve_draft=True)
             self._notify_hardware_settings(
-                "保存失败", message, severity="error", actionable=True
+                "保存失败", "请重新保存。", severity="error", actionable=True
             )
             return False
         token = self.device_lease.acquire(
@@ -3788,7 +3788,7 @@ class MainController(QObject):
             message = "保存失败：设备正在执行其他操作；旧配置保持不变。"
             self._render_hardware_profile(message, preserve_draft=True)
             self._notify_hardware_settings(
-                "保存失败", message, severity="error", actionable=True
+                "保存失败", "请稍后重新保存。", severity="error", actionable=True
             )
             return False
         previous = self.state.hardware_profile
@@ -3832,7 +3832,7 @@ class MainController(QObject):
             message = f"保存失败：{exc}；安全动作：磁盘与运行时旧配置保持不变；下一步：修正候选或重新加载 revision。"
             self._render_hardware_profile(message, preserve_draft=True)
             self._notify_hardware_settings(
-                "保存失败", message, severity="error", actionable=True
+                "保存失败", "请重新保存。", severity="error", actionable=True
             )
             return False
         finally:
@@ -3843,9 +3843,7 @@ class MainController(QObject):
         else:
             message = "保存成功。请连接设备后验证已保存的气口配置。"
         self._render_hardware_profile(message)
-        self._notify_hardware_settings(
-            "保存成功", message, severity="success", actionable=False
-        )
+        self._clear_hardware_settings_notice()
         return True
 
     @Slot(int)
@@ -3937,7 +3935,7 @@ class MainController(QObject):
             )
             self._notify_hardware_settings(
                 "无法开始验证",
-                gate_reason,
+                "请检查设置和设备后重试。",
                 severity="error",
                 actionable=True,
             )
@@ -4190,7 +4188,7 @@ class MainController(QObject):
                 )
                 self._notify_hardware_settings(
                     "验证结果保存失败",
-                    str(error),
+                    "请重新验证。",
                     severity="error",
                     actionable=True,
                 )
@@ -4208,22 +4206,21 @@ class MainController(QObject):
         )
         try:
             if status is VerificationStatus.MOCK_VERIFIED:
-                message = "模拟验证完成，结果已保存；现场使用前仍需完成物理验证。"
+                message = "检查已结束；此气口仍待现场验证。"
                 self._render_hardware_profile(message)
-                self._notify_hardware_settings(
-                    "模拟验证完成", message, severity="success", actionable=False
-                )
+                self._clear_hardware_settings_notice()
             elif status is VerificationStatus.INCOMPLETE:
                 message = "验证未完成：已立即停止，结果已保存；映射保持不变。"
                 self._render_hardware_profile(message)
-                self._notify_hardware_settings(
-                    "验证未完成", message, severity="warning", actionable=True
-                )
+                self._clear_hardware_settings_notice()
             else:
                 message = f"验证失败：{note}；失败结果已保存，映射保持不变。"
                 self._render_hardware_profile(message)
                 self._notify_hardware_settings(
-                    "验证失败", message, severity="error", actionable=True
+                    "验证失败",
+                    "请检查气口后重试。",
+                    severity="error",
+                    actionable=True,
                 )
         except Exception:
             LOG.exception("验证证据已提交，但 UI 结果渲染失败")
@@ -4250,12 +4247,7 @@ class MainController(QObject):
         self._render_hardware_profile(
             f"现场验证未开放：气口 {external_port:02d} 未执行任何动作，也不会生成现场验证状态。"
         )
-        self._notify_hardware_settings(
-            "现场验证待 HIL commissioning",
-            "当前版本未执行任何真实动作，也不会生成已验证状态。",
-            severity="warning",
-            actionable=False,
-        )
+        self._clear_hardware_settings_notice()
 
     def _publish_hardware_profile(self, profile: HardwareProfile) -> None:
         if profile.selector is None:
@@ -4316,6 +4308,7 @@ class MainController(QObject):
         *,
         severity: str,
         actionable: bool,
+        notice_key: object | None = None,
     ) -> None:
         if self.view is None or not hasattr(self.view, "manual_experiment_view"):
             return
@@ -4324,8 +4317,15 @@ class MainController(QObject):
             message,
             severity=severity,
             source="hardware-settings",
-            notice_key=(title, message),
+            notice_key=title if notice_key is None else notice_key,
             actionable=actionable,
+        )
+
+    def _clear_hardware_settings_notice(self) -> None:
+        if self.view is None or not hasattr(self.view, "manual_experiment_view"):
+            return
+        self.view.manual_experiment_view.clear_notice_event(
+            source="hardware-settings"
         )
 
     def _publish_profile_config_aliases(self, profile: HardwareProfile) -> None:

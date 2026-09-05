@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from types import SimpleNamespace
 
 from PySide6.QtWidgets import QAbstractButton, QLabel, QMessageBox
 from qfluentwidgets import InfoLevel
@@ -27,6 +28,13 @@ FORBIDDEN_OPERATOR_TERMS = (
     "snapshot",
     "owner",
     "lease",
+)
+
+FORBIDDEN_SETTINGS_TERMS = (
+    "固定 2×10 布局",
+    "别名、控制通道和启用状态",
+    "标准通道预设",
+    "编辑气口",
 )
 
 
@@ -95,6 +103,40 @@ def test_settings_is_bottom_navigation_and_manual_shortcut_opens_same_view(
     qt_app.processEvents()
     assert window.stackedWidget.currentWidget() is window.hardware_settings_view
     assert window.findChildren(HardwareSettingsView) == [window.hardware_settings_view]
+
+
+def test_settings_visible_copy_uses_two_clear_sections_without_removed_terms(
+    qt_app,
+) -> None:
+    _, window = build_application(
+        DEFAULT_CONFIG,
+        start_worker=False,
+        simulation=True,
+    )
+    try:
+        window.show()
+        window.stackedWidget.setCurrentWidget(window.hardware_settings_view)
+        qt_app.processEvents()
+        settings = window.hardware_settings_view
+
+        ports_text = "\n".join(_visible_texts(settings))
+        assert "气口配置" in ports_text
+        assert "线路与设备" in ports_text
+        assert "气口总览" in ports_text
+        assert "保存设置" in ports_text
+        assert "控制通道表" not in ports_text
+
+        settings.section_pivot.items["hardware"].click()
+        qt_app.processEvents()
+        hardware_text = "\n".join(_visible_texts(settings))
+        assert "控制通道表" in hardware_text
+        assert "设备连接" in hardware_text
+        combined = f"{ports_text}\n{hardware_text}"
+        assert not any(term in combined for term in FORBIDDEN_SETTINGS_TERMS)
+        assert not any(term in combined for term in FORBIDDEN_OPERATOR_TERMS)
+        assert settings.draft.profile_name not in combined
+    finally:
+        window.close()
 
 
 def test_low_flow_and_connect_never_create_a_message_box_or_orphan_window(qt_app) -> None:
@@ -217,6 +259,189 @@ def test_safety_notice_is_transition_driven_and_reentry_can_notify_again(qt_app)
 
         assert window.manual_experiment_view.notice_frame is not None
         assert "气流不足" in window.manual_experiment_view.current_notice_title
+    finally:
+        window.close()
+
+
+def test_single_notice_slot_updates_in_place_and_never_replays_backlog(qt_app) -> None:
+    _, window = build_application(
+        DEFAULT_CONFIG,
+        start_worker=False,
+        simulation=True,
+    )
+    try:
+        window.show()
+        view = window.manual_experiment_view
+        view.clear_notice()
+        view.show_condition_notice(
+            "请检查", "已有警告", source="warning",
+            condition_key="warning", severity="warning",
+        )
+        original = view.notice_frame
+        creation_count = view.notice_creation_count
+        view.show_condition_notice(
+            "无法继续", "请先处理", source="warning",
+            condition_key="warning", severity="error",
+        )
+        qt_app.processEvents()
+        assert view.notice_frame is original
+        assert view.notice_creation_count == creation_count
+        assert view.current_notice_severity == "error"
+
+        view.show_condition_notice(
+            "普通提醒", "已有信息", source="info",
+            condition_key="info", severity="info",
+        )
+        view.show_notice(
+            "已保存", "受阻期间的旧结果", source="result",
+            notice_key="stale", severity="success", actionable=False,
+        )
+        assert original is not None
+        original.close()
+        qt_app.processEvents()
+        assert view.notice_frame is None
+        view.resolve_notice_condition(source="warning")
+        view.resolve_notice_condition(source="info")
+        qt_app.processEvents()
+        assert view.notice_frame is None
+
+        view.show_notice(
+            "已保存", "恢复后的新结果", source="result",
+            notice_key="fresh", severity="success", actionable=False,
+        )
+        qt_app.processEvents()
+        assert view.notice_frame is not None
+        assert view.current_notice_title == "已保存"
+    finally:
+        window.close()
+
+
+def test_actionable_event_dismiss_keeps_real_window_quiet_until_higher_issue(
+    qt_app,
+) -> None:
+    _, window = build_application(
+        DEFAULT_CONFIG,
+        start_worker=False,
+        simulation=True,
+    )
+    try:
+        window.show()
+        view = window.manual_experiment_view
+        view.clear_notice()
+        view.show_condition_notice(
+            "请检查",
+            "已有警告",
+            source="warning",
+            condition_key="warning",
+            severity="warning",
+        )
+        view.show_notice(
+            "操作失败",
+            "请检查设备",
+            source="action-result",
+            notice_key="failure",
+            severity="error",
+            actionable=True,
+        )
+        event_bar = view.notice_frame
+        view.show_condition_notice(
+            "另一项错误",
+            "同级问题稍后处理",
+            source="equal-error",
+            condition_key="equal-error",
+            severity="error",
+        )
+        qt_app.processEvents()
+        assert view.notice_frame is event_bar
+        assert view.current_notice_title == "操作失败"
+
+        assert event_bar is not None
+        event_bar.close()
+        qt_app.processEvents()
+        assert view.notice_frame is None
+        view.show_condition_notice(
+            "需要立即处理",
+            "请执行安全停止",
+            source="critical",
+            condition_key="critical",
+            severity="critical",
+        )
+        qt_app.processEvents()
+        assert view.notice_frame is not None
+        assert view.current_notice_title == "需要立即处理"
+    finally:
+        window.close()
+
+
+def test_real_status_caller_updates_stable_notice_in_place(qt_app) -> None:
+    _, window = build_application(DEFAULT_CONFIG, start_worker=False, simulation=True)
+    try:
+        window.show()
+        qt_app.processEvents()
+        view = window.manual_experiment_view
+        view.clear_notice()
+        window.state.telemetry.connected = False
+        window.update_status("保存失败，请重新保存。")
+        frame = view.notice_frame
+        identity = view._notice_identity
+        creation_count = view.notice_creation_count
+
+        window.update_status("保存失败，请检查设置后重试。")
+
+        assert frame is not None and view.notice_frame is frame
+        assert view._notice_identity == identity
+        assert view.notice_creation_count == creation_count
+        assert view.detail_label.text() == "保存失败，请检查设置后重试。"
+    finally:
+        window.close()
+
+
+def test_real_actuation_alert_caller_updates_stable_notice_in_place(qt_app) -> None:
+    _, window = build_application(DEFAULT_CONFIG, start_worker=False, simulation=True)
+    try:
+        window.show()
+        qt_app.processEvents()
+        view = window.manual_experiment_view
+        view.clear_notice()
+        window.render_actuation_alert("请停止操作。", severe=True)
+        frame = view.notice_frame
+        identity = view._notice_identity
+        creation_count = view.notice_creation_count
+
+        window.render_actuation_alert("请立即停止并检查气口。", severe=True)
+
+        assert frame is not None and view.notice_frame is frame
+        assert view._notice_identity == identity
+        assert view.notice_creation_count == creation_count
+        assert view.detail_label.text() == "请立即停止并检查气口。"
+    finally:
+        window.close()
+
+
+def test_real_self_check_caller_updates_stable_notice_in_place(qt_app) -> None:
+    _, window = build_application(DEFAULT_CONFIG, start_worker=False, simulation=True)
+    try:
+        window.show()
+        qt_app.processEvents()
+        view = window.manual_experiment_view
+        view.clear_notice()
+        first = SimpleNamespace(
+            name="气流计", status="FAIL", reason="没有读数", suggestion="检查连接"
+        )
+        updated = SimpleNamespace(
+            name="气流计", status="FAIL", reason="读数异常", suggestion="重新连接"
+        )
+        window.render_self_check([first], False)
+        frame = view.notice_frame
+        identity = view._notice_identity
+        creation_count = view.notice_creation_count
+
+        window.render_self_check([updated], False)
+
+        assert frame is not None and view.notice_frame is frame
+        assert view._notice_identity == identity
+        assert view.notice_creation_count == creation_count
+        assert "读数异常" in view.detail_label.text()
     finally:
         window.close()
 

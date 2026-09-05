@@ -25,6 +25,8 @@ OlfactoryPilot-CN 是用于嗅觉刺激实验的 Windows 桌面控制软件，�
 - 产品界面优先使用 QFluentWidgets 原生 Card、Label、数字输入、Button、Badge、ToolTip 和 InfoBar；不使用旧 QWidget/QSS 控制台作为未来标准，不引入 superqt。
 - selected 使用琥珀强调；真实开启使用绿色图标状态；故障使用红色且形态不同的图标状态。重要状态不得只靠颜色或 Tooltip 表达。
 - “设置”位于正式导航底部；手动实验页只提供一个“气口设置”快捷入口，并切换到同一页面。普通设置固定显示 2×10 面板气口，只允许按 `20-channel` preset 选择控制通道，resolved NI target 与极性在高级区只读。
+- Settings 与 Manual 分别拥有自己的 Tile/presentation：Settings 四态固定为“未使用 / 待验证 / 可用 / 异常”，selected 只表示当前编辑选择；`MOCK_VERIFIED`、changed、incomplete 均不得显示为生产可用，只有匹配当前 mapping 的 `PHYSICAL_VERIFIED` 可显示“可用”。
+- 每个产品窗口的全局通知只有一个 sticky winner；严格按 critical > error > warning > info > success 抢占。同 identity 原地更新，dismiss 后不轮播已有 lower/equal backlog；被 actionable 阻挡的 transient 直接退休且不得在 condition 解除后回放。
 - 气口配置始终区分三层：面板气口 `external_port` → 控制通道 `internal_valve` → NI/芯片接口 `target`。当前默认八路为 02→02、04→03、06→04、08→05、12→06、14→07、16→08、18→09；它只是默认 HardwareProfile，不是永久硬编码规则。
 
 ## 架构原则
