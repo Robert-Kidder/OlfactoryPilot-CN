@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-import math
 import os
 import sys
+import tempfile
+import time
 from dataclasses import replace
 from pathlib import Path
 
@@ -12,77 +13,188 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from qfluentwidgets import MessageBox
+
 from app.main import DEFAULT_CONFIG, build_application
-from app.views.manual_experiment_view import ManualExperimentDraft
+from app.models import (
+    ChannelVerification,
+    HardwareVerificationPhase,
+    HardwareVerificationSnapshot,
+    VerificationStatus,
+)
+
+
+def _evidence(channel, status: VerificationStatus) -> ChannelVerification:
+    fingerprint = channel.mapping_fingerprint if status in {
+        VerificationStatus.MOCK_VERIFIED,
+        VerificationStatus.PHYSICAL_VERIFIED,
+    } else ""
+    return ChannelVerification(status=status, fingerprint=fingerprint)
+
+
+def _profile_with_visual_states(profile):
+    channels = []
+    statuses = {
+        2: VerificationStatus.PENDING,
+        4: VerificationStatus.MOCK_VERIFIED,
+        6: VerificationStatus.PHYSICAL_VERIFIED,
+        8: VerificationStatus.FAILED,
+    }
+    for channel in profile.channels:
+        if channel.external_port in statuses:
+            updated = replace(
+                channel,
+                display_name="柠檬" if channel.external_port == 4 else channel.display_name,
+            )
+            updated = replace(
+                updated,
+                verification=_evidence(updated, statuses[channel.external_port]),
+            )
+            channels.append(updated)
+        else:
+            channels.append(channel)
+    return replace(profile, channels=tuple(channels))
+
+
+def _save(widget, output_dir: Path, name: str) -> Path:
+    path = output_dir / name
+    widget.repaint()
+    if not widget.grab().save(str(path)):
+        raise RuntimeError(f"无法保存截图：{path}")
+    return path
 
 
 def main() -> int:
     output_dir = REPO_ROOT / "docs" / "screenshots"
     output_dir.mkdir(parents=True, exist_ok=True)
-    app, window = build_application(
-        DEFAULT_CONFIG,
-        start_worker=False,
-        simulation=True,
-        local_config_path=output_dir / ".screenshot-config-not-created.json",
-    )
-    controller = window.controller
-    controller.state.telemetry.connected = True
-    controller.state.telemetry.safety_state = "SAFE"
-    controller.state.telemetry.airflow = 1498.0
-    controller.state.hardware_ready = True
-    controller._render_manual_snapshot()
-    window.render_telemetry(controller.state.telemetry)
+    created: list[Path] = []
 
-    manual = window.manual_experiment_view
-    ports = tuple(
-        replace(port, display_name="薄荷" if port.external_port == 2 else port.display_name)
-        for port in manual.snapshot.ports
-    )
-    manual.render_snapshot(
-        replace(
-            manual.snapshot,
-            draft=replace(
-                ManualExperimentDraft(),
-                selected_external_ports=(2,),
-            ),
-            ports=ports,
-            controls_enabled=True,
-            can_apply_flow=True,
-            can_release=True,
-            supply_enabled=False,
-            status_text="",
-            detail_text="",
+    with tempfile.TemporaryDirectory(prefix="olfactorypilot-settings-") as temp_dir:
+        local_config = Path(temp_dir) / "config.json"
+        app, window = build_application(
+            DEFAULT_CONFIG,
+            start_worker=False,
+            simulation=True,
+            local_config_path=local_config,
         )
-    )
-    for index in range(160):
-        baseline = 480.0 if index < 48 else 1498.0
-        manual.update_a_observation(baseline + math.sin(index / 4.0) * 12.0)
+        controller = window.controller
+        settings = window.hardware_settings_view
+        original_profile = controller.state.hardware_profile
+        assert original_profile is not None
 
-    window.show()
-    app.processEvents()
-    main_path = output_dir / "story-4-6-manual-experiment.png"
-    if not window.grab().save(str(main_path)):
-        raise RuntimeError(f"无法保存截图：{main_path}")
+        window.resize(1360, 820)
+        window.show()
+        settings.open_home()
+        window.switchTo(settings)
+        app.processEvents()
+        created.append(_save(window, output_dir, "settings-home.png"))
 
-    window.open_settings()
-    window.hardware_settings_view.select_port(2)
-    app.processEvents()
-    settings_path = output_dir / "story-4-6-port-settings.png"
-    if not window.settings_dialog.grab().save(str(settings_path)):
-        raise RuntimeError(f"无法保存截图：{settings_path}")
+        visual_profile = _profile_with_visual_states(original_profile)
+        settings.render_profile(
+            visual_profile,
+            revision=0,
+            can_save=True,
+            can_mock_verify=True,
+        )
+        settings.open_port_settings()
+        settings.select_port(4)
+        app.processEvents()
+        created.append(_save(window, output_dir, "settings-port-configuration.png"))
+        created.append(_save(window, output_dir, "settings-port-states.png"))
+        created.append(_save(window, output_dir, "settings-port-alias.png"))
 
-    window.hardware_settings_view.advanced_toggle.setChecked(True)
-    app.processEvents()
-    advanced_path = output_dir / "story-4-6-port-settings-advanced.png"
-    if not window.settings_dialog.grab().save(str(advanced_path)):
-        raise RuntimeError(f"无法保存截图：{advanced_path}")
+        settings.open_hardware_settings()
+        app.processEvents()
+        created.append(_save(window, output_dir, "settings-hardware-view.png"))
+        settings.edit_lines_button.setChecked(True)
+        app.processEvents()
+        created.append(_save(window, output_dir, "settings-hardware-edit.png"))
 
-    window.settings_dialog.close()
-    window.close()
-    app.processEvents()
-    print(main_path)
-    print(settings_path)
-    print(advanced_path)
+        settings.open_port_settings()
+        settings.select_port(8)
+        app.processEvents()
+        dialog = MessageBox(
+            "验证气口 08",
+            "开始后，请确认气口 08 是否出气。\n\n约 20 秒",
+            window,
+        )
+        dialog.yesButton.setText("开始验证")
+        dialog.cancelButton.setText("取消")
+        dialog.show()
+        app.processEvents()
+        created.append(
+            _save(dialog.widget, output_dir, "verification-start-confirmation.png")
+        )
+        dialog.hide()
+        dialog.close()
+        dialog.deleteLater()
+        app.processEvents()
+
+        now_ns = time.monotonic_ns()
+        channel = visual_profile.registry.by_external_port(8)
+        running = HardwareVerificationSnapshot(
+            phase=HardwareVerificationPhase.RUNNING,
+            external_port=8,
+            started_ns=now_ns - 8_000_000_000,
+            deadline_ns=now_ns + 12_000_000_000,
+            duration_s=20,
+            can_stop=True,
+            awaiting_user_confirmation=False,
+            run_identity="screenshot-running",
+            revision=0,
+            fingerprint=channel.mapping_fingerprint,
+        )
+        settings.render_profile(
+            visual_profile,
+            revision=0,
+            can_save=False,
+            can_mock_verify=True,
+            verification=running,
+        )
+        app.processEvents()
+        created.append(_save(window, output_dir, "verification-running.png"))
+
+        awaiting = replace(
+            running,
+            phase=HardwareVerificationPhase.AWAITING_CONFIRMATION,
+            can_stop=False,
+            awaiting_user_confirmation=True,
+        )
+        settings.render_profile(
+            visual_profile,
+            revision=0,
+            can_save=False,
+            can_mock_verify=True,
+            verification=awaiting,
+        )
+        app.processEvents()
+        created.append(_save(window, output_dir, "verification-result-confirmation.png"))
+
+        controller.state.hardware_profile = original_profile
+        controller.state.channel_registry = original_profile.registry
+        controller.state.telemetry.connected = False
+        controller.state.hardware_ready = False
+        controller._refresh_profile_presentation()
+        candidate = replace(
+            original_profile,
+            channels=tuple(
+                replace(channel, display_name="柠檬", enabled=False)
+                if channel.external_port == 4
+                else channel
+                for channel in original_profile.channels
+            ),
+        )
+        if not controller.handle_hardware_profile_save_requested(candidate, 0):
+            raise RuntimeError("隔离配置保存失败，无法生成跨页面同步截图")
+        window.switchTo(window._manual_interface)
+        app.processEvents()
+        created.append(_save(window, output_dir, "manual-profile-sync.png"))
+
+        window.close()
+        app.processEvents()
+
+    for path in created:
+        print(path)
     return 0
 
 

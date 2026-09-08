@@ -34,6 +34,11 @@ from .hardware_profile import (
     ValveTargetPreset,
     VerificationStatus,
 )
+from .hardware_verification import (
+    HardwareVerificationPhase,
+    HardwareVerificationSnapshot,
+    PhysicalVerificationContract,
+)
 from .lease import (
     DeviceLeaseKind,
     DeviceLeaseToken,
@@ -117,6 +122,8 @@ __all__ = [
     "HARDWARE_PROFILE_SCHEMA_VERSION",
     "HardwareConnectionConfig",
     "HardwareProfile",
+    "HardwareVerificationPhase",
+    "HardwareVerificationSnapshot",
     "MaintenanceLeaseReleaseEvidence",
     "ManualExperimentIdentity",
     "ManualExperimentIntent",
@@ -145,6 +152,7 @@ __all__ = [
     "SafeStopPlan",
     "SafeStopStatus",
     "ProducerFence",
+    "PhysicalVerificationContract",
     "SessionDescriptor",
     "SessionPaths",
     "SessionRecordEnvelope",

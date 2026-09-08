@@ -15,6 +15,8 @@ from app.models import (
     ChannelVerification,
     HardwareConnectionConfig,
     HardwareProfile,
+    HardwareVerificationPhase,
+    HardwareVerificationSnapshot,
     SelectorConfig,
     VerificationStatus,
 )
@@ -80,10 +82,10 @@ def test_settings_renders_20_port_candidate_and_natural_verification_text(qtbot)
     assert view.internal_inputs[2].value() == 2
     assert view.current_channel_labels[2].text() == "02"
     assert view.target_inputs[2].text() == "Dev1/P0.1"
-    assert view.polarity_inputs[2].text() == "高电平开启"
+    assert view.polarity_inputs[2].isChecked()
     assert view.enabled_checks[2].isChecked()
-    assert view.verification_labels[2].text() == "待验证"
-    assert view.verification_labels[1].text() == "未使用"
+    assert view.verification_labels[2].text() == "待现场确认"
+    assert view.verification_labels[1].text() == "未启用"
     assert "2026-08-18" not in view.verification_labels[2].text()
     assert view.serial_port_input.text() == "COM6"
     assert view.ni_device_ids_input.text() == "Dev1, Dev2"
@@ -124,9 +126,9 @@ def test_settings_long_alias_uses_shared_elision_and_only_truncated_tooltip(qtbo
     tile.resize(72, tile.height())
     tile._refresh_elision()
 
-    assert tile.title_label.text().endswith("…")
+    assert tile.title_label.text() == "气口 04"
+    assert tile.port_label.text().endswith("…")
     assert tile.title_label.toolTip().startswith("这是一个需要")
-    assert tile.port_label.text() == "气口 04"
     assert tile.height() == 82
 
 
@@ -135,7 +137,7 @@ def test_settings_long_alias_uses_shared_elision_and_only_truncated_tooltip(qtbo
     (
         (VerificationStatus.PHYSICAL_VERIFIED, "可用"),
         (VerificationStatus.INCOMPLETE, "待验证"),
-        (VerificationStatus.FAILED, "异常"),
+        (VerificationStatus.FAILED, "需检查"),
     ),
 )
 def test_settings_uses_natural_text_for_each_verification_result(
@@ -164,7 +166,7 @@ def test_settings_candidate_signal_is_hardware_profile_and_name_keeps_verificati
     channel = candidates[-1].registry.by_external_port(2)
     assert channel.display_name == "新薄荷"
     assert channel.verification.status is VerificationStatus.MOCK_VERIFIED
-    assert view.verification_labels[2].text() == "待验证"
+    assert view.verification_labels[2].text() == "待现场确认"
 
 
 def test_mapping_edit_requires_reverification_and_disables_verification_intent(qtbot) -> None:
@@ -203,6 +205,8 @@ def test_settings_uses_two_section_information_architecture(qtbot, qt_app) -> No
     assert len(view.overview_buttons) == 20
     assert isinstance(view.section_pivot, Pivot)
     assert isinstance(view.section_stack, QStackedWidget)
+    assert view.section_stack.currentWidget() is view.settings_home
+    view.open_port_settings()
     assert view.section_stack.currentWidget() is view.port_section
     assert not view.preset_table.isVisibleTo(view)
     view.overview_buttons[2].click()
@@ -210,11 +214,11 @@ def test_settings_uses_two_section_information_architecture(qtbot, qt_app) -> No
     assert view.editor_card.headerLabel.text() == "气口 02"
     assert isinstance(view.overview_card, HeaderCardWidget)
     assert isinstance(view.editor_card, HeaderCardWidget)
-    view.section_pivot.items["hardware"].click()
+    view.open_hardware_settings()
     assert view.section_stack.currentWidget() is view.hardware_section
     assert view.preset_table.isVisibleTo(view)
     assert view.settings_scroll.widgetResizable()
-    assert view.save_button.isVisibleTo(view) is False
+    assert view.save_button.isVisibleTo(view) is True
 
 
 def test_save_and_rollback_emit_candidate_with_expected_revision(qtbot) -> None:
@@ -237,6 +241,7 @@ def test_save_and_rollback_emit_candidate_with_expected_revision(qtbot) -> None:
     view.save_requested.connect(lambda candidate, revision: saves.append((candidate, revision)))
     view.rollback_requested.connect(rollbacks.append)
 
+    view.name_inputs[2].setText("新薄荷")
     view.save_button.click()
     view.rollback_button.click()
 
@@ -245,7 +250,7 @@ def test_save_and_rollback_emit_candidate_with_expected_revision(qtbot) -> None:
     assert rollbacks == [11]
 
 
-def test_settings_readonly_state_blocks_channel_edits_and_keeps_connections_readonly(qtbot) -> None:
+def test_settings_readonly_state_blocks_channel_and_connection_edits(qtbot) -> None:
     view = HardwareSettingsView()
     qtbot.addWidget(view)
     view.render_profile(_profile(), revision=5, can_save=False, message="设备已连接")
@@ -268,12 +273,12 @@ def test_settings_readonly_state_blocks_channel_edits_and_keeps_connections_read
     )
 
     assert not view.name_inputs[2].isEnabled()
-    assert view.serial_port_input.isEnabled()
-    assert view.ni_device_ids_input.isEnabled()
-    assert view.alicat_unit_inputs["A"].isEnabled()
-    assert not isinstance(view.serial_port_input, QLineEdit)
-    assert not isinstance(view.ni_device_ids_input, QLineEdit)
-    assert not isinstance(view.alicat_unit_inputs["A"], QLineEdit)
+    assert not view.serial_port_input.isEnabled()
+    assert not view.ni_device_ids_input.isEnabled()
+    assert not view.alicat_unit_inputs["A"].isEnabled()
+    assert isinstance(view.serial_port_input, QLineEdit)
+    assert isinstance(view.ni_device_ids_input, QLineEdit)
+    assert isinstance(view.alicat_unit_inputs["A"], QLineEdit)
     assert not view.mock_buttons[2].isEnabled()
     assert not view.save_button.isEnabled()
     assert not view.rollback_button.isEnabled()
@@ -282,7 +287,7 @@ def test_settings_readonly_state_blocks_channel_edits_and_keeps_connections_read
     assert rollbacks == []
 
 
-def test_settings_connections_are_readonly_values_in_two_bounded_columns(qtbot) -> None:
+def test_settings_connections_are_editable_values_in_two_bounded_columns(qtbot) -> None:
     view = HardwareSettingsView()
     qtbot.addWidget(view)
     view.render_profile(_profile(), revision=6, can_save=True)
@@ -292,9 +297,45 @@ def test_settings_connections_are_readonly_values_in_two_bounded_columns(qtbot) 
     assert candidates == []
     assert view.serial_port_input.text() == "COM6"
     assert view.ni_device_ids_input.text() == "Dev1, Dev2"
-    assert all(not isinstance(control, QLineEdit) for control in view.alicat_unit_inputs.values())
+    assert all(isinstance(control, QLineEdit) for control in view.alicat_unit_inputs.values())
+    assert view.serial_port_input.maximumWidth() == 320
+    assert view.ni_device_ids_input.maximumWidth() == 420
     assert len(view.connection_cards) == 2
     assert all(card.maximumWidth() == 420 for card in view.connection_cards)
+
+    candidates = []
+    saves = []
+    view.candidate_changed.connect(candidates.append)
+    view.save_requested.connect(lambda profile, revision: saves.append((profile, revision)))
+    view.profile_name_input.setText("现场连接方案")
+    view.serial_port_input.setText("COM12")
+    view.ni_device_ids_input.setText("DevA, DevB")
+    view.alicat_unit_inputs["A"].setText("x")
+    view.alicat_unit_inputs["B"].setText("y")
+    view.alicat_unit_inputs["C"].setText("z")
+
+    candidate = candidates[-1]
+    assert candidate.profile_name == "现场连接方案"
+    assert candidate.connections.serial_port == "COM12"
+    assert candidate.connections.ni_device_ids == ("DevA", "DevB")
+    assert candidate.connections.alicat_unit_ids == {"A": "x", "B": "y", "C": "z"}
+    view._request_save()
+    assert saves == [(candidate, 6)]
+
+
+def test_settings_scroll_surfaces_reveal_the_product_page_background(qtbot) -> None:
+    view = HardwareSettingsView()
+    qtbot.addWidget(view)
+
+    surfaces = (
+        view.settings_scroll,
+        view.settings_scroll.viewport(),
+        view.settings_scroll.widget(),
+        view.hardware_scroll,
+        view.hardware_scroll.viewport(),
+        view.hardware_scroll.widget(),
+    )
+    assert all("background: transparent" in surface.styleSheet() for surface in surfaces)
 
 
 def test_permission_only_refresh_preserves_unsaved_draft(qtbot) -> None:
@@ -341,6 +382,9 @@ def test_normal_channel_edit_resolves_preset_and_blocks_duplicate_immediately(qt
     assert view.draft.to_profile().registry.by_external_port(4).verification.status is (
         VerificationStatus.MAPPING_CHANGED
     )
+    occupied_index = view.internal_inputs[6].findData(10)
+    assert not view.internal_inputs[6].items[occupied_index].isEnabled
+    assert "已用于气口 04" in view.internal_inputs[6].items[occupied_index].text
 
     view.internal_inputs[6].setValue(10)
     assert "控制通道 10 已被气口 04 使用" in view.validation_label.text()
@@ -359,9 +403,14 @@ def test_advanced_mapping_and_rollback_are_not_exposed_as_normal_controls(qtbot)
     assert not isinstance(view.polarity_inputs[2], ComboBox)
     assert view.rollback_button.isHidden()
     assert isinstance(view.preset_table, TableWidget)
-    assert view.preset_table.rowCount() == 20
-    assert view.preset_table.columnCount() == 2
-    assert view.preset_target_labels[20].text() == "Dev2/P0.7"
+    assert view.preset_table.rowCount() == 10
+    assert view.preset_table.columnCount() == 4
+    assert all(field.isHidden() for field in view.preset_target_inputs.values())
+    assert all(not label.isHidden() for label in view.preset_target_labels.values())
+    view.edit_lines_button.click()
+    assert all(not field.isHidden() for field in view.preset_target_inputs.values())
+    assert all(label.isHidden() for label in view.preset_target_labels.values())
+    assert view.preset_target_inputs[20].text() == "Dev2/P0.7"
 
 
 def test_current_line_control_channel_tracks_selection_and_draft(qtbot) -> None:
@@ -379,6 +428,67 @@ def test_current_line_control_channel_tracks_selection_and_draft(qtbot) -> None:
     assert view.current_channel_labels[4].text() == "10"
     assert view.target_inputs[4].text() == "Dev1/P1.1"
     assert view.current_channel_labels[2].text() == "02"
+
+
+def test_line_edit_updates_bound_descriptor_and_preserves_other_custom_target(qtbot) -> None:
+    profile = HardwareProfile.from_config(
+        json.loads(Path("config/default_config.json").read_text(encoding="utf-8"))
+    )
+    channels = list(profile.channels)
+    channels[1] = replace(channels[1], target="Dev2/P1.2")
+    profile = replace(profile, channels=tuple(channels))
+    view = HardwareSettingsView()
+    qtbot.addWidget(view)
+    view.render_profile(profile, revision=1, can_save=True)
+    view.edit_lines_button.click()
+
+    view.preset_target_inputs[3].setText("Dev2/P1.1")
+
+    candidate = view.draft.to_profile()
+    assert candidate.registry.by_external_port(4).target == "Dev2/P1.1"
+    assert candidate.registry.by_external_port(2).target == "Dev2/P1.2"
+    assert candidate.target_preset.target_for(3) == "Dev2/P1.1"
+
+
+def test_invalid_line_text_cannot_save_a_different_hidden_target(qtbot) -> None:
+    profile = HardwareProfile.from_config(
+        json.loads(Path("config/default_config.json").read_text(encoding="utf-8"))
+    )
+    view = HardwareSettingsView()
+    qtbot.addWidget(view)
+    view.render_profile(profile, revision=1, can_save=True)
+    view.edit_lines_button.click()
+    saves = []
+    view.save_requested.connect(lambda candidate, revision: saves.append((candidate, revision)))
+
+    view.preset_target_inputs[3].clear()
+    view.name_inputs[4].setText("仍不能保存")
+
+    assert 3 in view._invalid_preset_targets
+    assert not view.save_button.isEnabled()
+    assert view._validate_draft() is None
+    view._request_save()
+    assert saves == []
+
+
+def test_reverting_mapping_field_restores_original_verified_state(qtbot) -> None:
+    view = HardwareSettingsView()
+    qtbot.addWidget(view)
+    view.render_profile(
+        _profile(status=VerificationStatus.PHYSICAL_VERIFIED),
+        revision=3,
+        can_save=True,
+        can_mock_verify=True,
+    )
+
+    view.polarity_inputs[2].setChecked(False)
+    assert view.draft.channels[1].mapping_changed
+    assert view.overview_buttons[2].property("portState") == "pending"
+    view.polarity_inputs[2].setChecked(True)
+
+    assert not view.draft.channels[1].mapping_changed
+    assert view.overview_buttons[2].property("portState") == "physical"
+    assert view.mock_buttons[2].isEnabled()
 
 
 def test_clean_revert_restores_verification_permission(qtbot) -> None:
@@ -417,8 +527,18 @@ def test_verification_progress_is_owned_by_selected_port_editor(qtbot) -> None:
         revision=3,
         can_save=False,
         can_mock_verify=True,
-        verification_port=2,
-        message="验证气口 02：测试中，剩余 17 秒",
+        verification=HardwareVerificationSnapshot(
+            phase=HardwareVerificationPhase.RUNNING,
+            external_port=2,
+            started_ns=1,
+            deadline_ns=20_000_000_001,
+            duration_s=20,
+            can_stop=True,
+            awaiting_user_confirmation=False,
+            run_identity="run-2",
+            revision=3,
+            fingerprint=_profile().registry.by_external_port(2).mapping_fingerprint,
+        ),
     )
 
     assert view.editor_stack.parentWidget() is not None
@@ -428,7 +548,6 @@ def test_verification_progress_is_owned_by_selected_port_editor(qtbot) -> None:
     assert not view.verification_stop_button.isHidden()
     assert view.verification_task_title.text() == "正在验证气口 02"
     assert view.verification_task_detail.text() == "请确认气口 02 是否有气流"
-    assert view.verification_remaining_label.text() == "剩余 17 秒"
     assert view.verification_stop_button.text() == "立即停止"
     assert view.editor_stack.isHidden()
     assert all(not control.isEnabled() for control in view.name_inputs.values())
@@ -436,7 +555,7 @@ def test_verification_progress_is_owned_by_selected_port_editor(qtbot) -> None:
     assert all(not control.isEnabled() for control in view.enabled_checks.values())
     assert not view.section_pivot.isEnabled()
     assert all(not tile.isEnabled() for tile in view.overview_buttons.values())
-    view.section_pivot.items["hardware"].click()
+    view.open_hardware_settings()
     view.overview_buttons[4].click()
     view.select_port(4)
     assert view.section_stack.currentWidget() is view.port_section
@@ -454,16 +573,113 @@ def test_verification_progress_is_owned_by_selected_port_editor(qtbot) -> None:
     assert all(tile.isEnabled() for tile in view.overview_buttons.values())
 
 
-@pytest.mark.parametrize("verification_port", (None, 0, 21))
+def test_awaiting_confirmation_only_offers_result_actions(qtbot) -> None:
+    profile = _profile()
+    channel = profile.registry.by_external_port(2)
+    view = HardwareSettingsView()
+    qtbot.addWidget(view)
+    view.render_profile(
+        profile,
+        revision=3,
+        can_save=False,
+        verification=HardwareVerificationSnapshot(
+            phase=HardwareVerificationPhase.AWAITING_CONFIRMATION,
+            external_port=2,
+            started_ns=1,
+            deadline_ns=30_000_000_001,
+            duration_s=30,
+            can_stop=False,
+            awaiting_user_confirmation=True,
+            run_identity="run-2",
+            revision=3,
+            fingerprint=channel.mapping_fingerprint,
+        ),
+    )
+
+    assert view.verification_stop_button.isHidden()
+    assert not view.verification_negative_button.isHidden()
+    assert not view.verification_positive_button.isHidden()
+    assert view.verification_task_title.text() == "气口 02 是否正确出气？"
+    assert view.verification_task_detail.text() == "请选择刚才观察到的结果"
+
+
+def test_countdown_uses_one_deadline_and_never_resets_on_status_refresh(qtbot) -> None:
+    now = [1_000_000_000]
+    profile = _profile()
+    channel = profile.registry.by_external_port(2)
+    verification = HardwareVerificationSnapshot(
+        phase=HardwareVerificationPhase.RUNNING,
+        external_port=2,
+        started_ns=now[0],
+        deadline_ns=now[0] + 20_000_000_000,
+        duration_s=20,
+        can_stop=True,
+        awaiting_user_confirmation=False,
+        run_identity="countdown-run",
+        revision=3,
+        fingerprint=channel.mapping_fingerprint,
+    )
+    view = HardwareSettingsView(monotonic_ns=lambda: now[0])
+    qtbot.addWidget(view)
+    values = []
+
+    for second in range(21):
+        now[0] = 1_000_000_000 + second * 1_000_000_000
+        view.render_profile(
+            profile,
+            revision=3,
+            can_save=False,
+            message="无关状态刷新",
+            verification=verification,
+        )
+        values.append(int(view.verification_remaining_label.text().split()[1]))
+
+    assert values == list(range(20, -1, -1))
+    assert view.verification_progress.value() == 100
+
+
+@pytest.mark.parametrize("external_port", (None, 0, 21))
 def test_verification_snapshot_rejects_missing_or_out_of_range_port(
-    verification_port,
+    external_port,
 ) -> None:
     with pytest.raises(ValueError, match="1–20"):
-        HardwareSettingsSnapshot(
-            profile=_profile(),
-            can_save=True,
-            verification_in_progress=True,
-            verification_port=verification_port,
+        HardwareVerificationSnapshot(
+            phase=HardwareVerificationPhase.RUNNING,
+            external_port=external_port,
+            started_ns=1,
+            deadline_ns=2,
+            duration_s=1,
+            can_stop=True,
+            awaiting_user_confirmation=False,
+            run_identity="invalid-port",
+            fingerprint="0" * 64,
+        )
+
+
+def test_verification_snapshot_rejects_inconsistent_timing_and_result_phase() -> None:
+    with pytest.raises(ValueError, match="时长"):
+        HardwareVerificationSnapshot(
+            phase=HardwareVerificationPhase.RUNNING,
+            external_port=2,
+            started_ns=1,
+            deadline_ns=2,
+            duration_s=1,
+            can_stop=True,
+            run_identity="bad-timing",
+            fingerprint="0" * 64,
+        )
+    with pytest.raises(ValueError, match="完成阶段"):
+        HardwareVerificationSnapshot(
+            phase=HardwareVerificationPhase.FINISHED,
+            external_port=2,
+            duration_s=20,
+            run_identity="missing-result",
+            fingerprint="0" * 64,
+        )
+    with pytest.raises(ValueError, match="完成阶段"):
+        HardwareVerificationSnapshot(
+            phase=HardwareVerificationPhase.IDLE,
+            result=VerificationStatus.FAILED,
         )
 
 
@@ -483,11 +699,35 @@ def test_validate_draft_never_reenables_save_in_progress(qtbot) -> None:
     assert not view.save_button.isEnabled()
 
 
+def test_save_in_progress_closes_line_edit_mode(qtbot) -> None:
+    profile = HardwareProfile.from_config(
+        json.loads(Path("config/default_config.json").read_text(encoding="utf-8"))
+    )
+    view = HardwareSettingsView()
+    qtbot.addWidget(view)
+    view.render_profile(profile, revision=1, can_save=True)
+    view.edit_lines_button.click()
+    assert any(not field.isHidden() for field in view.preset_target_inputs.values())
+
+    view.render_snapshot(
+        HardwareSettingsSnapshot(
+            profile=profile,
+            revision=1,
+            can_edit=True,
+            can_save=True,
+            save_in_progress=True,
+        )
+    )
+
+    assert not view.edit_lines_button.isChecked()
+    assert all(field.isHidden() for field in view.preset_target_inputs.values())
+
+
 @pytest.mark.parametrize(
     ("message", "save_feedback", "verification_feedback"),
     (
-        ("保存成功。请连接设备后验证已保存的气口配置。", "设置已保存", ""),
-        ("已保存连接设置，请关闭并重新启动程序后再连接设备。", "已保存，请重新启动", ""),
+            ("设置已保存。", "设置已保存", ""),
+            ("设置已保存，重启后生效。", "设置已保存，重启后生效", ""),
         ("验证未完成：已立即停止，结果已保存；映射保持不变。", "", "验证已停止"),
         ("现场验证未开放：气口 02 未执行任何动作。", "", "现场验证暂不可用"),
         ("检查已结束；此气口仍待现场验证。", "", ""),
@@ -508,6 +748,30 @@ def test_settings_shows_only_contextual_action_feedback(
     assert view.save_feedback_label.isHidden() is (not save_feedback)
     assert view.verification_hints[2].text() == verification_feedback
     assert view.verification_hints[2].isHidden() is (not verification_feedback)
+
+
+def test_new_save_feedback_restarts_its_single_timer(qtbot) -> None:
+    view = HardwareSettingsView()
+    qtbot.addWidget(view)
+    profile = _profile()
+    view.render_profile(
+        profile,
+        revision=1,
+        can_save=True,
+        message="设置已保存。",
+    )
+    QTest.qWait(30)
+    previous_remaining = view._save_feedback_timer.remainingTime()
+
+    view.render_profile(
+        profile,
+        revision=2,
+        can_save=True,
+        message="设置已保存。",
+    )
+
+    assert view._save_feedback_timer.isActive()
+    assert view._save_feedback_timer.remainingTime() > previous_remaining
 
 
 def test_physical_request_uses_same_concise_confirmation(qtbot, monkeypatch) -> None:
@@ -604,7 +868,7 @@ def test_settings_tile_preserves_accessible_selection_and_keyboard_activation(
 
     view.select_port(2)
     assert tile.focusPolicy() == Qt.FocusPolicy.StrongFocus
-    assert tile.accessibleName() == "薄荷 气口 02"
+    assert tile.accessibleName() == "气口 02 薄荷"
     assert "已选择" in tile.accessibleDescription()
     tile.setFocus()
     QTest.keyClick(tile, Qt.Key.Key_Return)
@@ -630,16 +894,19 @@ def test_settings_visible_copy_excludes_internal_and_removed_terms(qtbot, qt_app
             if widget.isVisibleTo(view)
         )
 
+    home_text = visible_text()
+    assert "气口配置" in home_text
+    assert "线路与设备" in home_text
+    view.open_port_settings()
+    qt_app.processEvents()
     ports_text = visible_text()
-    assert "气口配置" in ports_text
-    assert "线路与设备" in ports_text
     assert "气口总览" in ports_text
     assert "保存设置" in ports_text
     assert "控制通道表" not in ports_text
 
-    view.section_pivot.items["hardware"].click()
+    view.open_hardware_settings()
     hardware_text = visible_text()
-    assert "控制通道表" in hardware_text
+    assert "控制线路" in hardware_text
     assert "设备连接" in hardware_text
     combined = f"{ports_text}\n{hardware_text}"
     assert all(
@@ -654,13 +921,13 @@ def test_settings_visible_copy_excludes_internal_and_removed_terms(qtbot, qt_app
     )
 
 
-def test_settings_owns_four_state_tiles_and_selection_does_not_replace_status(qtbot) -> None:
+def test_settings_owns_five_state_tiles_and_selection_does_not_replace_status(qtbot) -> None:
     view = HardwareSettingsView()
     qtbot.addWidget(view)
 
     for status, expected in (
         (VerificationStatus.PENDING, "pending"),
-        (VerificationStatus.MOCK_VERIFIED, "pending"),
+            (VerificationStatus.MOCK_VERIFIED, "mock"),
         (VerificationStatus.PHYSICAL_VERIFIED, "physical"),
         (VerificationStatus.FAILED, "failed"),
     ):
@@ -674,4 +941,4 @@ def test_settings_owns_four_state_tiles_and_selection_does_not_replace_status(qt
         assert tile.property("portState") == expected
 
     assert view.overview_buttons[1].property("portState") == "unused"
-    assert view.overview_buttons[1].status_text == "未使用"
+    assert view.overview_buttons[1].status_text == "未启用"

@@ -102,7 +102,12 @@ def test_settings_is_bottom_navigation_and_manual_shortcut_opens_same_view(
     window.manual_experiment_view.port_settings_button.click()
     qt_app.processEvents()
     assert window.stackedWidget.currentWidget() is window.hardware_settings_view
+    assert window.hardware_settings_view.page_stack.currentWidget() is window.hardware_settings_view.port_section
     assert window.findChildren(HardwareSettingsView) == [window.hardware_settings_view]
+
+    window._settings_navigation_item.click()
+    qt_app.processEvents()
+    assert window.hardware_settings_view.page_stack.currentWidget() is window.hardware_settings_view.settings_home
 
 
 def test_settings_visible_copy_uses_two_clear_sections_without_removed_terms(
@@ -119,17 +124,20 @@ def test_settings_visible_copy_uses_two_clear_sections_without_removed_terms(
         qt_app.processEvents()
         settings = window.hardware_settings_view
 
+        home_text = "\n".join(_visible_texts(settings))
+        assert "气口配置" in home_text
+        assert "线路与设备" in home_text
+        settings.open_port_settings()
+        qt_app.processEvents()
         ports_text = "\n".join(_visible_texts(settings))
-        assert "气口配置" in ports_text
-        assert "线路与设备" in ports_text
         assert "气口总览" in ports_text
         assert "保存设置" in ports_text
         assert "控制通道表" not in ports_text
 
-        settings.section_pivot.items["hardware"].click()
+        settings.open_hardware_settings()
         qt_app.processEvents()
         hardware_text = "\n".join(_visible_texts(settings))
-        assert "控制通道表" in hardware_text
+        assert "控制线路" in hardware_text
         assert "设备连接" in hardware_text
         combined = f"{ports_text}\n{hardware_text}"
         assert not any(term in combined for term in FORBIDDEN_SETTINGS_TERMS)

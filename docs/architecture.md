@@ -147,12 +147,21 @@ Auto external-trigger ingress 与 canonical execution core 必须解耦。USB-65
 
 ### 配置、清洗与验证
 
-- HardwareProfile 只来自 `default_config.json + local_config.json`；UI 编辑 candidate，保存需断开安全态、schema/唯一性校验和原子替换。
+- HardwareProfile 只来自 `default_config.json + local_config.json`；UI 编辑 candidate，保存需断开安全态、schema/唯一性校验和原子替换。Store/HardwareProfile 是唯一 authority；成功 commit 后 Controller 以同一 revision 一次刷新 `state.hardware_profile`、`state.channel_registry`、Settings 与 Manual presentation，View 不自行重读配置文件或持有第二份 profile state。
 - 映射或极性变化使相关气口重新待验证；仅修改显示名称保留验证状态。
 - 清洗继续保留 `CLEANING`、maintenance lease、`maintenance-v1` bundle、owner deadline 与 recovery 资产，但必须改用 selector、SafeStopPlan 和 HardwareProfile，不再使用 21-target 终态。
 - 跨 owner 交错使用 fake clock、Event/Barrier、cancellation token、fake filesystem 和 fault injection；禁止 sleep-only 竞态断言。
 - 修改 selector、SafeStopPlan、ActuationWorker/FlowWorker、NI/serial、deadline、映射或 shutdown 时执行范围触发式真实 Windows/NI HIL；Mock 和 `daqmx_write_ack` 不能替代机械/出口证据。
-- `valve_mapping.variants["20-channel"]` 仅作为普通编辑器的标准 target preset；`HardwareProfile` 中的 descriptor 仍是运行和持久化 authority。控制通道变化必须同步解析 target，历史偏差只读标为高级自定义。
+- `HardwareProfile.target_preset` 是可持久化的标准线路表；兼容读取旧 `valve_mapping.variants["20-channel"]`，保存时同步旧字段。`HardwareProfile` descriptor 仍是运行 authority。控制通道变化必须同步解析 target，target 或 polarity 变化必须使对应验证指纹失效。
 - 验证结果通过独立 CAS/atomic evidence 事务写入：revision 与单口 mapping fingerprint 任一不匹配即拒绝，事务只能更新该口 verification，不能改变 `external_port/internal_valve/target/active_high`。
 - 三层路由为面板气口 `external_port` → 控制通道 `internal_valve` → resolved NI `target`。默认八路关系是 02→02、04→03、06→04、08→05、12→06、14→07、16→08、18→09；运行时不从面板编号推导控制通道，也不把 preset 作为第二份可变 runtime authority。
-- verification 使用独立 lease。simulation 只在 connected/ready/safe idle、clean saved revision 时运行单口 Mock 并持久化 `MOCK_VERIFIED/INCOMPLETE/FAILED`；production physical handler 在 HIL commissioning 前保持 no-actuation stub，且不能写入 `PHYSICAL_VERIFIED`。
+- verification 使用独立 lease 和结构化 presentation snapshot，phase 至少包含 IDLE、RUNNING、AWAITING_CONFIRMATION 与 FINISHED，并携带 external port、monotonic started/deadline、duration、can-stop、结果和 revision/fingerprint。用户文案不是程序状态来源，UI timer 只按 deadline 更新显示。
+- simulation 只在 connected/ready/safe idle、clean saved revision 时运行单口 Mock；控制动作完成后保留 lease 并等待用户确认。正向确认持久化 `MOCK_VERIFIED`，负向确认持久化 `FAILED`，立即停止持久化 `INCOMPLETE`。production physical handler 在 HIL commissioning 前保持 no-actuation stub，不能写入 `PHYSICAL_VERIFIED`；后续物理实现必须同时提交可信 action-completed、safe-closed、authorized 与 user-confirmed 合同。
+
+### C.3 HIL commissioning checklist
+
+- 用真实气路逐口确认面板编号、控制通道、NI target 和实际出口一致，并确认 target/polarity 编辑后实际输出及验证失效行为。
+- 接入真实 NI/Alicat/串口后确认保存连接字段提示“重启后生效”，重启创建的新 HAL 使用最新已保存配置，连接期间不热加载硬件对象。
+- 确认 RUNNING deadline 由 Controller/Worker 关闭阀门，UI timer 停止或卡顿不影响安全关闭；核对 open/close receipt、超时和故障路径。
+- 完成真实 physical verification：动作完成并安全关闭后由用户确认“出气正确”，只有完整可信合同写入 `PHYSICAL_VERIFIED`；错误出口、无气流和立即停止分别保留 FAILED/INCOMPLETE evidence。
+- 在真实 telemetry 下确认 Manual 的 unavailable、available、selected、actual-open 和 fault 状态，以及 profile 保存后的别名/启用/映射 presentation 与下一次连接行为一致。

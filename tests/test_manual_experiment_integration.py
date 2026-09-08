@@ -14,6 +14,7 @@ from app.main import DEFAULT_CONFIG, build_application
 from app.models import (
     AppState,
     DeviceLeaseKind,
+    HardwareVerificationPhase,
     ManualExperimentIntent,
     ManualExperimentStatus,
     ManualSupplyIntent,
@@ -460,6 +461,75 @@ def test_hardware_profile_controller_gate_revision_and_rollback(tmp_path, qtbot)
     assert controller.valve_service.resolve_target(2) == ("Dev1", "P0.1")
 
 
+def test_profile_save_refreshes_alias_disabled_state_in_manual_and_settings(
+    tmp_path, qtbot
+) -> None:
+    controller, _ = _controller(tmp_path)
+    window = MainWindow(controller, controller.state)
+    qtbot.addWidget(window)
+    controller.bind_view(window)
+    controller.state.telemetry.connected = False
+    controller.state.hardware_ready = False
+    profile = controller.state.hardware_profile
+    channels = list(profile.channels)
+    channels[3] = replace(channels[3], display_name="柠檬", enabled=False)
+
+    assert controller.handle_hardware_profile_save_requested(
+        replace(profile, channels=tuple(channels)), 0
+    )
+
+    manual_port = window.manual_experiment_view.snapshot.ports[3]
+    manual_tile = window.manual_experiment_view.port_buttons[4]
+    settings = window.hardware_settings_view
+    assert manual_port.display_name == "柠檬"
+    assert manual_port.available is False
+    assert manual_tile.text() == "气口 04\n柠檬"
+    assert manual_tile.property("portState") == "disabled"
+    assert settings.name_inputs[4].text() == "柠檬"
+    assert not settings.enabled_checks[4].isChecked()
+    assert settings.overview_buttons[4].text() == "气口 04\n柠檬"
+    assert window.manual_experiment_view.profile_revision == 1
+    assert settings.draft.revision == 1
+
+
+def test_mapping_save_publishes_one_revision_to_every_consumer(tmp_path, qtbot) -> None:
+    controller, _ = _controller(tmp_path)
+    window = MainWindow(controller, controller.state)
+    qtbot.addWidget(window)
+    controller.bind_view(window)
+    controller.state.telemetry.connected = False
+    controller.state.hardware_ready = False
+    profile = controller.state.hardware_profile
+    channels = list(profile.channels)
+    channels[3] = replace(
+        channels[3],
+        internal_valve=10,
+        target=profile.resolved_target_for(10),
+    )
+
+    assert controller.handle_hardware_profile_save_requested(
+        replace(profile, channels=tuple(channels)), 0
+    )
+
+    store_channel = controller._hardware_profile_store.profile.registry.by_external_port(4)
+    state_channel = controller.state.hardware_profile.registry.by_external_port(4)
+    registry_channel = controller.state.channel_registry.by_external_port(4)
+    settings_channel = window.hardware_settings_view.draft.to_profile().registry.by_external_port(4)
+    manual_channel = window.manual_experiment_view._registry.by_external_port(4)
+    assert {
+        store_channel.internal_valve,
+        state_channel.internal_valve,
+        registry_channel.internal_valve,
+        settings_channel.internal_valve,
+        manual_channel.internal_valve,
+    } == {10}
+    assert store_channel.verification.status is VerificationStatus.MAPPING_CHANGED
+    assert controller.valve_service.resolve_target(10) == ("Dev1", "P1.1")
+    assert controller._runtime_hardware_profile_revision == 1
+    assert window.manual_experiment_view.profile_revision == 1
+    assert window.hardware_settings_view.draft.revision == 1
+
+
 def test_profile_runtime_bind_failure_rolls_disk_and_all_runtime_consumers_back(
     tmp_path,
     monkeypatch,
@@ -607,14 +677,24 @@ def test_mock_verification_requires_isolated_correlated_open_close_receipts(
 
     controller.handle_hardware_mock_verify_requested(2, candidate)
 
+    assert controller._hardware_verification_run.phase is (
+        HardwareVerificationPhase.AWAITING_CONFIRMATION
+    )
+    assert controller.device_lease.snapshot.kind is DeviceLeaseKind.VERIFICATION
+    assert controller.handle_hardware_verification_result_requested(2, True)
+
     verified = controller.state.hardware_profile.channels[1]
     assert verified.verification.status is VerificationStatus.MOCK_VERIFIED
     assert verified.verification.fingerprint == verified.mapping_fingerprint
+    finished = controller._hardware_verification_snapshot()
+    assert finished.phase is HardwareVerificationPhase.FINISHED
+    assert finished.result is VerificationStatus.MOCK_VERIFIED
+    assert window.hardware_settings_view.snapshot.verification == finished
     assert json.loads((tmp_path / "local_config.json").read_text(encoding="utf-8"))["hardware_profile_revision"] == 1
     assert not window.hardware_settings_view.name_inputs[2].isEnabled()
     coordinator = window.manual_experiment_view._notification_coordinator
     assert "hardware-settings" not in coordinator._events
-    assert window.hardware_settings_view.verification_labels[2].text() == "待验证"
+    assert window.hardware_settings_view.verification_labels[2].text() == "待现场确认"
     assert window.hardware_settings_view.verification_panel.isHidden()
     assert not window.hardware_settings_view.editor_stack.isHidden()
 
@@ -760,6 +840,21 @@ def test_successful_save_clears_dismissed_failure_before_reentry(
     assert window.manual_experiment_view.current_notice_title == "保存失败"
 
 
+def test_failed_profile_save_preserves_unsaved_settings_draft(tmp_path, qtbot) -> None:
+    controller, _ = _controller(tmp_path)
+    window = MainWindow(controller, controller.state)
+    qtbot.addWidget(window)
+    controller.bind_view(window)
+    settings = window.hardware_settings_view
+    settings.name_inputs[4].setText("尚未保存的柠檬")
+    candidate = settings.draft.to_profile()
+    controller.state.telemetry.connected = True
+
+    assert not controller.handle_hardware_profile_save_requested(candidate, 0)
+    assert settings.draft.channels[3].display_name == "尚未保存的柠檬"
+    assert settings.name_inputs[4].text() == "尚未保存的柠檬"
+
+
 def test_nonfailure_verification_clears_dismissed_failure_before_reentry(
     tmp_path, qtbot, monkeypatch
 ) -> None:
@@ -780,6 +875,7 @@ def test_nonfailure_verification_clears_dismissed_failure_before_reentry(
     controller.handle_hardware_mock_verify_requested(
         2, controller.state.hardware_profile, expected_revision=1
     )
+    assert controller.handle_hardware_verification_result_requested(2, True)
 
     assert "hardware-settings" not in (
         window.manual_experiment_view._notification_coordinator._events
@@ -811,6 +907,7 @@ def test_verification_evidence_save_failure_uses_concise_global_copy(
     controller.handle_hardware_mock_verify_requested(
         2, controller.state.hardware_profile, expected_revision=0
     )
+    assert controller.handle_hardware_verification_result_requested(2, True)
 
     notice = window.manual_experiment_view._notification_coordinator.current
     assert notice is not None
@@ -849,7 +946,7 @@ def test_production_verification_stub_never_persists_physical_evidence(
     )
     controller._render_hardware_profile()
 
-    assert window.hardware_settings_view.mock_buttons[2].isEnabled()
+    assert not window.hardware_settings_view.mock_buttons[2].isEnabled()
     assert not window.hardware_settings_view.name_inputs[2].isEnabled()
     window.hardware_settings_view.select_port(2)
 
@@ -880,10 +977,55 @@ def test_short_nonzero_verification_timer_completes_and_releases(
     )
     controller._handle_hardware_verification_tick()
 
+    assert controller.device_lease.snapshot.kind is DeviceLeaseKind.VERIFICATION
+    assert controller._hardware_verification_run.phase is (
+        HardwareVerificationPhase.AWAITING_CONFIRMATION
+    )
+    assert controller.handle_hardware_verification_result_requested(2, True)
     assert controller.device_lease.snapshot.kind is DeviceLeaseKind.IDLE
     assert (
         controller.state.hardware_profile.registry.by_external_port(2).verification.status
         is VerificationStatus.MOCK_VERIFIED
+    )
+
+
+def test_verification_waits_for_current_user_result_and_rejects_duplicate(tmp_path) -> None:
+    controller, _ = _controller(tmp_path)
+    controller.handle_hardware_mock_verify_requested(
+        2, controller.state.hardware_profile, expected_revision=0
+    )
+
+    assert controller._hardware_verification_run.phase is (
+        HardwareVerificationPhase.AWAITING_CONFIRMATION
+    )
+    assert not (tmp_path / "local_config.json").exists()
+    assert controller.handle_hardware_verification_result_requested(2, False)
+    assert (
+        controller.state.hardware_profile.registry.by_external_port(2).verification.status
+        is VerificationStatus.FAILED
+    )
+    assert controller._hardware_profile_store.revision == 1
+    assert not controller.handle_hardware_verification_result_requested(2, True)
+    assert controller._hardware_profile_store.revision == 1
+
+
+def test_awaiting_confirmation_expires_as_incomplete(tmp_path) -> None:
+    controller, _ = _controller(tmp_path)
+    controller.handle_hardware_mock_verify_requested(
+        2, controller.state.hardware_profile, expected_revision=0
+    )
+    controller._hardware_verification_run = replace(
+        controller._hardware_verification_run,
+        deadline_ns=0,
+    )
+
+    controller._handle_hardware_verification_tick()
+
+    assert controller._hardware_verification_run is None
+    assert controller.device_lease.snapshot.kind is DeviceLeaseKind.IDLE
+    assert (
+        controller.state.hardware_profile.registry.by_external_port(2).verification.status
+        is VerificationStatus.INCOMPLETE
     )
 
 
@@ -904,6 +1046,9 @@ def test_enabled_button_confirmation_and_main_window_wiring(
     assert button.isEnabled()
     button.click()
 
+    assert controller._hardware_profile_store.revision == 0
+    assert not window.hardware_settings_view.verification_positive_button.isHidden()
+    window.hardware_settings_view.verification_positive_button.click()
     assert controller._hardware_profile_store.revision == 1
     assert (
         controller.state.hardware_profile.registry.by_external_port(2).verification.status
@@ -948,6 +1093,7 @@ def test_save_then_reconnect_keeps_revision_synchronized_for_verification(
     controller.handle_hardware_mock_verify_requested(
         2, controller.state.hardware_profile, expected_revision=1
     )
+    assert controller.handle_hardware_verification_result_requested(2, True)
 
     assert controller._hardware_profile_store.revision == 2
     assert controller._runtime_hardware_profile_revision == 2

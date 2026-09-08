@@ -15,6 +15,7 @@ from app.models.hardware_profile import (
     HardwareProfile,
     VerificationStatus,
 )
+from app.models.hardware_verification import PhysicalVerificationContract
 from app.models.safe_stop import normalize_digital_target
 
 
@@ -73,8 +74,16 @@ class HardwareProfileStore:
             self._revision = _read_revision(local)
             last_good_raw = local.get("hardware_profile_last_known_good")
             self._last_known_good = (
-                HardwareProfile.from_config(last_good_raw)
-                if isinstance(last_good_raw, Mapping)
+                HardwareProfile.from_config(
+                    _merge(self._effective_config, {"hardware_profile": last_good_raw})
+                )
+                if (
+                    isinstance(last_good_raw, Mapping)
+                    and (
+                        "target_preset" in last_good_raw
+                        or self._profile.target_preset is None
+                    )
+                )
                 else None
             )
 
@@ -122,10 +131,9 @@ class HardwareProfileStore:
                 target_preset=candidate.target_preset or self._profile.target_preset,
             )
         elif isinstance(candidate, Mapping):
-            parsed = replace(
-                HardwareProfile.from_config(candidate),
-                target_preset=self._profile.target_preset,
-            )
+            parsed = HardwareProfile.from_config(candidate)
+            if parsed.target_preset is None:
+                parsed = replace(parsed, target_preset=self._profile.target_preset)
         else:
             raise ValueError("HardwareProfile 候选必须是对象或 HardwareProfile。")
         current_by_port = {
@@ -188,13 +196,68 @@ class HardwareProfileStore:
         if not isinstance(verification, ChannelVerification):
             raise ValueError("verification 必须是 ChannelVerification。")
         if verification.status is VerificationStatus.PHYSICAL_VERIFIED:
-            raise ValueError("现场授权不可用：physical backend 未开放，拒绝写入证据。")
+            raise ValueError("普通验证接口不能写入现场验证证据。")
         if verification.status not in {
             VerificationStatus.MOCK_VERIFIED,
             VerificationStatus.FAILED,
             VerificationStatus.INCOMPLETE,
         }:
             raise ValueError("verification-only 事务不接受该验证状态。")
+        return self._commit_verification(
+            external_port,
+            verification,
+            expected_revision=expected_revision,
+            expected_fingerprint=expected_fingerprint,
+        )
+
+    def update_physical_verification(
+        self,
+        external_port: int,
+        *,
+        contract: PhysicalVerificationContract,
+        user_confirmed: bool,
+        run_identity: str,
+        expected_revision: int,
+        expected_fingerprint: str,
+        verified_at: str,
+        note: str = "现场确认出气正确",
+    ) -> HardwareProfile:
+        """Commit physical evidence only from a matching completed safe contract."""
+
+        if not isinstance(contract, PhysicalVerificationContract):
+            raise ValueError("缺少可信现场验证完成契约。")
+        if type(user_confirmed) is not bool:
+            raise ValueError("用户确认状态必须是布尔值。")
+        if not user_confirmed:
+            raise ValueError("用户尚未正向确认出气正确。")
+        if not contract.permits(
+            external_port=external_port,
+            revision=expected_revision,
+            fingerprint=expected_fingerprint,
+            run_identity=run_identity,
+        ):
+            raise ValueError("现场验证完成契约与当前运行不匹配。")
+        evidence = ChannelVerification(
+            status=VerificationStatus.PHYSICAL_VERIFIED,
+            fingerprint=expected_fingerprint,
+            verified_at=verified_at,
+            note=note,
+        )
+        return self._commit_verification(
+            external_port,
+            evidence,
+            expected_revision=expected_revision,
+            expected_fingerprint=expected_fingerprint,
+        )
+
+    def _commit_verification(
+        self,
+        external_port: int,
+        verification: ChannelVerification,
+        *,
+        expected_revision: int,
+        expected_fingerprint: str,
+    ) -> HardwareProfile:
         with self._lock:
             expected = self._expected_revision(expected_revision)
             local = self._read_local()
@@ -381,7 +444,9 @@ class HardwareProfileStore:
     ) -> None:
         del effective_config
         devices = {device.casefold() for device in profile.connections.ni_device_ids}
-        targets = [channel.target for channel in profile.channels if channel.enabled]
+        targets = [channel.target for channel in profile.channels if channel.target]
+        if profile.target_preset is not None:
+            targets.extend(profile.target_preset.targets)
         if profile.selector is not None:
             targets.append(profile.selector.target)
         missing = sorted(
@@ -468,6 +533,23 @@ def _with_connection_aliases(
     merged["serial_port"] = connections.serial_port
     merged["ni_devices"] = list(connections.ni_device_ids)
     merged["alicat_unit_ids"] = connections.alicat_unit_ids
+    valve_mapping = copy.deepcopy(dict(merged.get("valve_mapping") or {}))
+    if profile.target_preset is not None:
+        variants = copy.deepcopy(dict(valve_mapping.get("variants") or {}))
+        variants[profile.target_preset.variant] = {
+            str(port): profile.target_preset.target_for(port)
+            for port in range(1, 21)
+        }
+        valve_mapping["variants"] = variants
+    if profile.selector is not None:
+        valve_mapping["selector"] = {
+            "target": profile.selector.target,
+            "safe_route": profile.selector.safe_route.value,
+            "safe_level": profile.selector.safe_level,
+            "odor_level": profile.selector.odor_level,
+        }
+        valve_mapping["master_valve"] = profile.selector.target
+    merged["valve_mapping"] = valve_mapping
     return merged
 
 

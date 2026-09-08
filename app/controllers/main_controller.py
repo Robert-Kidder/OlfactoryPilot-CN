@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from PySide6.QtCore import QObject, Qt, QThread, QTimer, Signal, Slot
+from shiboken6 import isValid
 
 from app.models import (
     ActuationAction,
@@ -34,6 +35,8 @@ from app.models import (
     DeviceLeaseToken,
     ExclusiveDeviceLease,
     HardwareProfile,
+    HardwareVerificationPhase,
+    HardwareVerificationSnapshot,
     MaintenanceLeaseReleaseEvidence,
     ManualExperimentIdentity,
     ManualExperimentIntent,
@@ -44,6 +47,7 @@ from app.models import (
     ManualExperimentStatus,
     ManualPresentationSnapshot,
     ManualSupplyIntent,
+    PhysicalVerificationContract,
     ProtocolExecutionReadiness,
     ProtocolExecutionSnapshot,
     ProtocolExecutionStatus,
@@ -104,8 +108,12 @@ class _HardwareVerificationRun:
     target: str
     revision: int
     fingerprint: str
+    started_ns: int
     deadline_ns: int
+    duration_s: float
     token: DeviceLeaseToken
+    phase: HardwareVerificationPhase = HardwareVerificationPhase.RUNNING
+    physical_contract: PhysicalVerificationContract | None = None
 
 
 class RecoveryScanWorker(QThread):
@@ -410,6 +418,7 @@ class MainController(QObject):
         self._hardware_profile_store: HardwareProfileStore | None = None
         self._runtime_hardware_profile_revision = 0
         self._hardware_verification_run: _HardwareVerificationRun | None = None
+        self._hardware_verification_result: HardwareVerificationSnapshot | None = None
         self._last_hardware_settings_signature: tuple[object, ...] | None = None
         try:
             verification_duration = float(
@@ -420,6 +429,15 @@ class MainController(QObject):
         if not math.isfinite(verification_duration) or verification_duration < 0:
             verification_duration = 20.0
         self._hardware_verification_duration_s = verification_duration
+        try:
+            confirmation_timeout = float(
+                self.config.get("verification_confirmation_timeout_s", 30.0)
+            )
+        except (TypeError, ValueError):
+            confirmation_timeout = 30.0
+        if not math.isfinite(confirmation_timeout) or confirmation_timeout <= 0:
+            confirmation_timeout = 30.0
+        self._hardware_verification_confirmation_timeout_s = confirmation_timeout
         local_profile_path = (
             self.config.get("_local_config_path")
             or self.config.get("_config_write_path")
@@ -3496,11 +3514,20 @@ class MainController(QObject):
         self._render_manual_snapshot()
 
     def _render_manual_snapshot(self) -> None:
-        if self.view is None or not hasattr(self.view, "manual_experiment_view"):
+        if (
+            self.view is None
+            or not isValid(self.view)
+            or not hasattr(self.view, "manual_experiment_view")
+            or not isValid(self.view.manual_experiment_view)
+        ):
             return
         manual = self.view.manual_experiment_view
         if hasattr(manual, "set_registry") and self.state.channel_registry is not None:
-            manual.set_registry(self.state.channel_registry, allow_mock=self.simulation_mode)
+            manual.set_registry(
+                self.state.channel_registry,
+                allow_mock=self.simulation_mode,
+                revision=self._runtime_hardware_profile_revision,
+            )
         base = manual.snapshot
         status = self._manual_snapshot.status
         idle = status in {
@@ -3774,7 +3801,7 @@ class MainController(QObject):
             reason = "没有可写的 local_config.json"
         if reason:
             message = f"保存失败：{reason}；安全动作：旧配置保持发布；下一步：安全停止并断开后重试。"
-            self._render_hardware_profile(message, preserve_draft=True)
+            self._refresh_profile_presentation(message, preserve_draft=True)
             self._notify_hardware_settings(
                 "保存失败", "请重新保存。", severity="error", actionable=True
             )
@@ -3786,7 +3813,7 @@ class MainController(QObject):
         )
         if token is None:
             message = "保存失败：设备正在执行其他操作；旧配置保持不变。"
-            self._render_hardware_profile(message, preserve_draft=True)
+            self._refresh_profile_presentation(message, preserve_draft=True)
             self._notify_hardware_settings(
                 "保存失败", "请稍后重新保存。", severity="error", actionable=True
             )
@@ -3830,7 +3857,7 @@ class MainController(QObject):
                         f"候选发布失败且运行时补偿失败：{restore_error}"
                     )
             message = f"保存失败：{exc}；安全动作：磁盘与运行时旧配置保持不变；下一步：修正候选或重新加载 revision。"
-            self._render_hardware_profile(message, preserve_draft=True)
+            self._refresh_profile_presentation(message, preserve_draft=True)
             self._notify_hardware_settings(
                 "保存失败", "请重新保存。", severity="error", actionable=True
             )
@@ -3839,10 +3866,10 @@ class MainController(QObject):
             self.device_lease.release(token)
         if connections_changed:
             self._configuration_restart_required = True
-            message = "已保存连接设置，请关闭并重新启动程序后再连接设备。"
+            message = "设置已保存，重启后生效。"
         else:
-            message = "保存成功。请连接设备后验证已保存的气口配置。"
-        self._render_hardware_profile(message)
+            message = "设置已保存。"
+        self._refresh_profile_presentation(message)
         self._clear_hardware_settings_notice()
         return True
 
@@ -3853,7 +3880,7 @@ class MainController(QObject):
         if store is None:
             reason = "没有可回滚的配置存储"
         if reason:
-            self._render_hardware_profile(f"回滚失败：{reason}；安全动作：当前配置保持不变；下一步：完成断开与 owner handoff。")
+            self._refresh_profile_presentation(f"回滚失败：{reason}；安全动作：当前配置保持不变；下一步：完成断开与 owner handoff。")
             return False
         token = self.device_lease.acquire(
             DeviceLeaseKind.CONFIG_CHANGE,
@@ -3897,7 +3924,7 @@ class MainController(QObject):
                     self._latch_configuration_divergence(
                         f"回滚候选发布失败且补偿失败：{restore_error}"
                     )
-            self._render_hardware_profile(f"回滚失败：{exc}；安全动作：当前配置保持不变；下一步：检查 revision 与 last-known-good。")
+            self._refresh_profile_presentation(f"回滚失败：{exc}；安全动作：当前配置保持不变；下一步：检查 revision 与 last-known-good。")
             return False
         finally:
             self.device_lease.release(token)
@@ -3906,7 +3933,7 @@ class MainController(QObject):
             message = "回滚已保存，重启程序后生效；安全动作：本进程不重建旧 HAL；下一步：关闭并重启程序。"
         else:
             message = "回滚成功：已恢复上一版 HardwareProfile；安全动作：保持断开；下一步：重新检查映射。"
-        self._render_hardware_profile(message)
+        self._refresh_profile_presentation(message)
         return True
 
     @Slot(int, object, int)
@@ -3974,7 +4001,8 @@ class MainController(QObject):
         if token is None:
             self._render_hardware_profile("验证失败：设备正在执行其他操作；未发送任何硬件动作。")
             return
-        deadline_ns = time.monotonic_ns() + int(
+        started_ns = time.monotonic_ns()
+        deadline_ns = started_ns + int(
             self._hardware_verification_duration_s * 1_000_000_000
         )
         self._hardware_verification_run = _HardwareVerificationRun(
@@ -3983,9 +4011,12 @@ class MainController(QObject):
             target=channel.target,
             revision=revision,
             fingerprint=fingerprint,
+            started_ns=started_ns,
             deadline_ns=deadline_ns,
+            duration_s=self._hardware_verification_duration_s,
             token=token,
         )
+        self._hardware_verification_result = None
         self.actuation_interlock.update(device_lease=DeviceLeaseKind.VERIFICATION.value)
         try:
             self._render_manual_snapshot()
@@ -4019,7 +4050,14 @@ class MainController(QObject):
             )
             return
         if time.monotonic_ns() >= run.deadline_ns:
-            self._complete_hardware_mock_verification()
+            if run.phase is HardwareVerificationPhase.RUNNING:
+                self._render_hardware_verification_progress()
+                self._complete_hardware_mock_verification()
+            else:
+                self._finish_hardware_verification(
+                    VerificationStatus.INCOMPLETE,
+                    "用户确认已过期",
+                )
             return
         self._render_hardware_verification_progress()
 
@@ -4027,13 +4065,14 @@ class MainController(QObject):
         run = self._hardware_verification_run
         if run is None:
             return
-        remaining = max(
-            0,
-            math.ceil((run.deadline_ns - time.monotonic_ns()) / 1_000_000_000),
+        remaining = max(0, math.ceil((run.deadline_ns - time.monotonic_ns()) / 1_000_000_000))
+        phase_text = (
+            f"测试中，剩余 {remaining} 秒"
+            if run.phase is HardwareVerificationPhase.RUNNING
+            else "等待确认"
         )
         self._render_hardware_profile(
-            f"验证气口 {run.external_port:02d}：测试中，剩余 {remaining} 秒",
-            verification_port=run.external_port,
+            f"验证气口 {run.external_port:02d}：{phase_text}",
         )
 
     def _complete_hardware_mock_verification(self) -> None:
@@ -4064,10 +4103,17 @@ class MainController(QObject):
                 f"模拟验证执行失败：{exc}",
             )
             return
-        self._finish_hardware_verification(
-            VerificationStatus.MOCK_VERIFIED,
-            "模拟验证，不代表物理气路验证",
+        confirmation_started_ns = time.monotonic_ns()
+        self._hardware_verification_run = replace(
+            run,
+            phase=HardwareVerificationPhase.AWAITING_CONFIRMATION,
+            started_ns=confirmation_started_ns,
+            deadline_ns=confirmation_started_ns
+            + int(self._hardware_verification_confirmation_timeout_s * 1_000_000_000),
+            duration_s=self._hardware_verification_confirmation_timeout_s,
         )
+        self._hardware_verification_timer.start()
+        self._render_hardware_verification_progress()
 
     def _execute_isolated_mock_verification(
         self,
@@ -4149,10 +4195,48 @@ class MainController(QObject):
             "用户立即停止了模拟验证",
         )
 
+    @Slot(int, bool)
+    def handle_hardware_verification_result_requested(
+        self, external_port: int, positive: bool
+    ) -> bool:
+        run = self._hardware_verification_run
+        if (
+            run is None
+            or run.external_port != int(external_port)
+            or run.phase is not HardwareVerificationPhase.AWAITING_CONFIRMATION
+        ):
+            return False
+        invalid_reason = self._active_verification_invalid_reason(run)
+        if invalid_reason or time.monotonic_ns() >= run.deadline_ns:
+            self._finish_hardware_verification(
+                VerificationStatus.INCOMPLETE,
+                "确认已过期" if not invalid_reason else f"确认条件已失效：{invalid_reason}",
+            )
+            return False
+        if not positive:
+            self._finish_hardware_verification(
+                VerificationStatus.FAILED,
+                "用户确认没有出气或位置不正确",
+            )
+            return True
+        status = (
+            VerificationStatus.MOCK_VERIFIED
+            if self.state.simulation_mode
+            else VerificationStatus.PHYSICAL_VERIFIED
+        )
+        self._finish_hardware_verification(
+            status,
+            "模拟检查已确认" if self.state.simulation_mode else "现场确认出气正确",
+            user_confirmed=True,
+        )
+        return True
+
     def _finish_hardware_verification(
         self,
         status: VerificationStatus,
         note: str,
+        *,
+        user_confirmed: bool = False,
     ) -> None:
         run = self._hardware_verification_run
         store = self._hardware_profile_store
@@ -4163,27 +4247,51 @@ class MainController(QObject):
         try:
             if store is None:
                 raise RuntimeError("本机配置存储不可用")
-            evidence = ChannelVerification(
-                status=status,
-                fingerprint=run.fingerprint,
-                verified_at=datetime.now().astimezone().isoformat(timespec="seconds"),
-                note=note,
-            )
-            updated = store.update_verification(
-                run.external_port,
-                evidence,
-                expected_revision=run.revision,
-                expected_fingerprint=run.fingerprint,
-            )
+            verified_at = datetime.now().astimezone().isoformat(timespec="seconds")
+            if status is VerificationStatus.PHYSICAL_VERIFIED:
+                if run.physical_contract is None:
+                    raise RuntimeError("缺少可信现场验证完成契约")
+                updated = store.update_physical_verification(
+                    run.external_port,
+                    contract=run.physical_contract,
+                    user_confirmed=user_confirmed,
+                    run_identity=run.token.operation_id,
+                    expected_revision=run.revision,
+                    expected_fingerprint=run.fingerprint,
+                    verified_at=verified_at,
+                    note=note,
+                )
+            else:
+                evidence = ChannelVerification(
+                    status=status,
+                    fingerprint=run.fingerprint,
+                    verified_at=verified_at,
+                    note=note,
+                )
+                updated = store.update_verification(
+                    run.external_port,
+                    evidence,
+                    expected_revision=run.revision,
+                    expected_fingerprint=run.fingerprint,
+                )
             self._publish_verification_profile(updated, revision=store.revision)
         except Exception as exc:
             error = exc
         finally:
             self._release_hardware_verification_lease(run.token)
             self._hardware_verification_run = None
+            self._hardware_verification_result = HardwareVerificationSnapshot(
+                phase=HardwareVerificationPhase.FINISHED,
+                external_port=run.external_port,
+                duration_s=run.duration_s,
+                result=status,
+                run_identity=run.token.operation_id,
+                revision=run.revision,
+                fingerprint=run.fingerprint,
+            )
         if error is not None:
             try:
-                self._render_hardware_profile(
+                self._refresh_profile_presentation(
                     f"验证结果保存失败：{error}；映射保持不变，请重新加载配置。"
                 )
                 self._notify_hardware_settings(
@@ -4207,15 +4315,19 @@ class MainController(QObject):
         try:
             if status is VerificationStatus.MOCK_VERIFIED:
                 message = "检查已结束；此气口仍待现场验证。"
-                self._render_hardware_profile(message)
+                self._refresh_profile_presentation(message)
+                self._clear_hardware_settings_notice()
+            elif status is VerificationStatus.PHYSICAL_VERIFIED:
+                message = "现场验证已确认；此气口现在可用。"
+                self._refresh_profile_presentation(message)
                 self._clear_hardware_settings_notice()
             elif status is VerificationStatus.INCOMPLETE:
                 message = "验证未完成：已立即停止，结果已保存；映射保持不变。"
-                self._render_hardware_profile(message)
+                self._refresh_profile_presentation(message)
                 self._clear_hardware_settings_notice()
             else:
                 message = f"验证失败：{note}；失败结果已保存，映射保持不变。"
-                self._render_hardware_profile(message)
+                self._refresh_profile_presentation(message)
                 self._notify_hardware_settings(
                     "验证失败",
                     "请检查气口后重试。",
@@ -4233,10 +4345,6 @@ class MainController(QObject):
             LOG.error("验证专用 Flow lease 释放失败：%s", token.operation_id)
             return
         self.actuation_interlock.update(device_lease=DeviceLeaseKind.IDLE.value)
-        try:
-            self._render_manual_snapshot()
-        except Exception:
-            LOG.exception("验证 lease 已释放，但 Manual snapshot 刷新失败")
 
     @Slot(int)
     def handle_hardware_physical_verify_requested(self, external_port: int) -> None:
@@ -4283,7 +4391,6 @@ class MainController(QObject):
                 self.state.master_valve_line = previous.selector.target
                 self._publish_profile_config_aliases(previous)
             raise
-        self._render_manual_snapshot()
 
     def _publish_verification_profile(
         self,
@@ -4300,6 +4407,15 @@ class MainController(QObject):
         self.state.channel_registry = profile.registry
         self.config["hardware_profile"] = profile.to_dict()
         self._runtime_hardware_profile_revision = int(revision)
+
+    def _refresh_profile_presentation(
+        self, message: str = "", *, preserve_draft: bool = False
+    ) -> None:
+        """Render Manual and Settings from one committed profile revision."""
+
+        self._render_manual_snapshot()
+        self._last_hardware_settings_signature = None
+        self._render_hardware_profile(message, preserve_draft=preserve_draft)
 
     def _notify_hardware_settings(
         self,
@@ -4346,6 +4462,13 @@ class MainController(QObject):
             "odor_level": selector.odor_level,
         }
         valve_mapping["master_valve"] = selector.target
+        if profile.target_preset is not None:
+            variants = dict(valve_mapping.get("variants") or {})
+            variants[profile.target_preset.variant] = {
+                str(port): profile.target_preset.target_for(port)
+                for port in range(1, 21)
+            }
+            valve_mapping["variants"] = variants
         self.config["valve_mapping"] = valve_mapping
 
     def _render_hardware_profile(
@@ -4356,10 +4479,15 @@ class MainController(QObject):
         preserve_draft: bool = False,
         verification_port: int | None = None,
     ) -> None:
-        if self.view is None or not hasattr(self.view, "hardware_settings_view"):
+        if (
+            self.view is None
+            or not isValid(self.view)
+            or not hasattr(self.view, "hardware_settings_view")
+            or not isValid(self.view.hardware_settings_view)
+        ):
             return
-        if verification_port is None and self._hardware_verification_run is not None:
-            verification_port = self._hardware_verification_run.external_port
+        del verification_port
+        verification = self._hardware_verification_snapshot()
         store = self._hardware_profile_store
         active = profile or (self.state.hardware_profile if store is None else store.profile)
         if active is None:
@@ -4385,7 +4513,7 @@ class MainController(QObject):
             verification_reason = "存在未保存且无效的配置，请先修正并保存"
         can_verify = not verification_reason
         can_mock_verify = can_verify and self.state.simulation_mode
-        can_physical_verify = can_verify and not self.state.simulation_mode
+        can_physical_verify = False
         permission_signature = (
             id(settings_view),
             revision,
@@ -4394,7 +4522,7 @@ class MainController(QObject):
             can_mock_verify,
             can_physical_verify,
             message,
-            verification_port,
+            verification,
             self._hardware_verification_duration_s,
             invalid_draft,
         )
@@ -4410,7 +4538,7 @@ class MainController(QObject):
                 can_request_physical_verification=can_physical_verify,
                 message=message,
                 rollback_available=False if store is None else store.rollback_available,
-                verification_port=verification_port,
+                verification=verification,
                 simulation_verification_duration_s=self._hardware_verification_duration_s,
             )
         else:
@@ -4422,10 +4550,31 @@ class MainController(QObject):
                 can_request_physical_verification=can_physical_verify,
                 message=message,
                 rollback_available=False if store is None else store.rollback_available,
-                verification_port=verification_port,
+                verification=verification,
                 simulation_verification_duration_s=self._hardware_verification_duration_s,
             )
         self._last_hardware_settings_signature = permission_signature
+
+    def _hardware_verification_snapshot(self) -> HardwareVerificationSnapshot:
+        run = self._hardware_verification_run
+        if run is None:
+            return self._hardware_verification_result or HardwareVerificationSnapshot(
+                duration_s=self._hardware_verification_duration_s
+            )
+        awaiting = run.phase is HardwareVerificationPhase.AWAITING_CONFIRMATION
+        return HardwareVerificationSnapshot(
+            phase=run.phase,
+            external_port=run.external_port,
+            started_ns=run.started_ns,
+            deadline_ns=run.deadline_ns,
+            duration_s=run.duration_s,
+            can_stop=run.phase is HardwareVerificationPhase.RUNNING,
+            awaiting_user_confirmation=awaiting,
+            result=None,
+            run_identity=run.token.operation_id,
+            revision=run.revision,
+            fingerprint=run.fingerprint,
+        )
 
     def stop_hardware(self) -> None:
         if self._hardware_verification_run is not None:

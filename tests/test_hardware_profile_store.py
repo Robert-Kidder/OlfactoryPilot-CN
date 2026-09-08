@@ -8,7 +8,12 @@ from pathlib import Path
 
 import pytest
 
-from app.models import ChannelVerification, HardwareProfile, VerificationStatus
+from app.models import (
+    ChannelVerification,
+    HardwareProfile,
+    PhysicalVerificationContract,
+    VerificationStatus,
+)
 from app.services import HardwareProfileStore, StaleHardwareProfileRevisionError
 
 
@@ -110,6 +115,32 @@ def test_explicit_rollback_is_persistent_and_swaps_last_known_good(tmp_path) -> 
     assert restarted.profile.profile_name == "默认 8 气口方案"
     assert restarted.rollback_available is True
     assert restarted.revision == 2
+
+
+def test_legacy_last_known_good_without_wiring_snapshot_is_not_rollbackable(
+    tmp_path,
+) -> None:
+    config = _default_config()
+    current = HardwareProfile.from_config(config).to_dict()
+    legacy_last_good = json.loads(json.dumps(current))
+    legacy_last_good.pop("target_preset")
+    local_path = tmp_path / "local_config.json"
+    local_path.write_text(
+        json.dumps(
+            {
+                "hardware_profile": current,
+                "hardware_profile_last_known_good": legacy_last_good,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    store = HardwareProfileStore(
+        default_config=config,
+        local_config_path=local_path,
+    )
+
+    assert store.rollback_available is False
 
 
 def test_rename_keeps_verification_while_mapping_change_forces_reverification(tmp_path) -> None:
@@ -223,6 +254,10 @@ def test_connections_share_profile_revision_atomic_save_restart_and_rollback(tmp
     for channel in candidate["channels"]:
         if channel["target"]:
             channel["target"] = channel["target"].replace("Dev1", "RackA")
+    candidate["target_preset"]["targets"] = {
+        key: value.replace("Dev1", "RackA").replace("Dev2", "RackB")
+        for key, value in candidate["target_preset"]["targets"].items()
+    }
 
     saved = store.save(candidate, expected_revision=0)
 
@@ -378,6 +413,29 @@ def test_default_mapping_and_remap_survive_restart_with_verification_invalidated
     } == set(expected)
 
 
+def test_unbound_line_edit_persists_and_is_used_by_later_mapping(tmp_path) -> None:
+    local_path = tmp_path / "local_config.json"
+    store = HardwareProfileStore(
+        default_config=_default_config(), local_config_path=local_path
+    )
+    candidate = store.profile.to_dict()
+    candidate["target_preset"]["targets"]["10"] = "Dev2/P1.1"
+    first = store.save(candidate, expected_revision=0)
+    assert first.target_preset.target_for(10) == "Dev2/P1.1"
+
+    restarted = HardwareProfileStore(
+        default_config=_default_config(), local_config_path=local_path
+    )
+    mapped = restarted.profile.to_dict()
+    mapped["channels"][3]["internal_valve"] = 10
+    mapped["channels"][3]["target"] = restarted.profile.resolved_target_for(10)
+    saved = restarted.save(mapped, expected_revision=1)
+
+    assert saved.registry.by_external_port(4).target == "Dev2/P1.1"
+    persisted = json.loads(local_path.read_text(encoding="utf-8"))
+    assert persisted["valve_mapping"]["variants"]["20-channel"]["10"] == "Dev2/P1.1"
+
+
 def test_verification_transaction_rejects_unconfirmed_physical_status(tmp_path) -> None:
     store = HardwareProfileStore(
         default_config=_default_config(),
@@ -389,13 +447,139 @@ def test_verification_transaction_rejects_unconfirmed_physical_status(tmp_path) 
         fingerprint=channel.mapping_fingerprint,
     )
 
-    with pytest.raises(ValueError, match="现场授权"):
+    with pytest.raises(ValueError, match="普通验证接口"):
         store.update_verification(
             2,
             evidence,
             expected_revision=0,
             expected_fingerprint=channel.mapping_fingerprint,
         )
+
+
+def test_physical_evidence_requires_matching_completed_safe_contract_and_confirmation(
+    tmp_path,
+) -> None:
+    store = HardwareProfileStore(
+        default_config=_default_config(),
+        local_config_path=tmp_path / "local_config.json",
+    )
+    channel = store.profile.registry.by_external_port(2)
+    contract = PhysicalVerificationContract(
+        run_identity="physical-run-1",
+        external_port=2,
+        revision=0,
+        fingerprint=channel.mapping_fingerprint,
+        action_completed=True,
+        safe_closed=True,
+        authorized=True,
+    )
+
+    with pytest.raises(ValueError, match="尚未正向确认"):
+        store.update_physical_verification(
+            2,
+            contract=contract,
+            user_confirmed=False,
+            run_identity="physical-run-1",
+            expected_revision=0,
+            expected_fingerprint=channel.mapping_fingerprint,
+            verified_at="2026-09-08T12:00:00+08:00",
+        )
+
+    with pytest.raises(ValueError, match="布尔值"):
+        store.update_physical_verification(
+            2,
+            contract=contract,
+            user_confirmed="false",
+            run_identity="physical-run-1",
+            expected_revision=0,
+            expected_fingerprint=channel.mapping_fingerprint,
+            verified_at="2026-09-08T12:00:00+08:00",
+        )
+
+    updated = store.update_physical_verification(
+        2,
+        contract=contract,
+        user_confirmed=True,
+        run_identity="physical-run-1",
+        expected_revision=0,
+        expected_fingerprint=channel.mapping_fingerprint,
+        verified_at="2026-09-08T12:00:00+08:00",
+    )
+    verified = updated.registry.by_external_port(2)
+    assert verified.verification.status is VerificationStatus.PHYSICAL_VERIFIED
+    assert verified.available is True
+
+
+@pytest.mark.parametrize(
+    "contract_change,call_change",
+    (
+        ({"authorized": False}, {}),
+        ({"action_completed": False}, {}),
+        ({"safe_closed": False}, {}),
+        ({"external_port": 4}, {}),
+        ({"revision": 1}, {}),
+        ({"fingerprint": "f" * 64}, {}),
+        ({"run_identity": "other-run"}, {}),
+        ({}, {"run_identity": "other-run"}),
+        ({}, {"expected_revision": 1}),
+        ({}, {"expected_fingerprint": "f" * 64}),
+    ),
+)
+def test_physical_evidence_rejects_each_incomplete_or_mismatched_contract_field(
+    tmp_path,
+    contract_change,
+    call_change,
+) -> None:
+    store = HardwareProfileStore(
+        default_config=_default_config(),
+        local_config_path=tmp_path / "local_config.json",
+    )
+    channel = store.profile.registry.by_external_port(2)
+    original_verification = channel.verification
+    contract = PhysicalVerificationContract(
+        run_identity="physical-run-1",
+        external_port=2,
+        revision=0,
+        fingerprint=channel.mapping_fingerprint,
+        action_completed=True,
+        safe_closed=True,
+        authorized=True,
+    )
+    contract = replace(contract, **contract_change)
+    call = {
+        "run_identity": "physical-run-1",
+        "expected_revision": 0,
+        "expected_fingerprint": channel.mapping_fingerprint,
+        **call_change,
+    }
+
+    with pytest.raises(ValueError, match="不匹配"):
+        store.update_physical_verification(
+            2,
+            contract=contract,
+            user_confirmed=True,
+            verified_at="2026-09-08T12:00:00+08:00",
+            **call,
+        )
+    assert store.revision == 0
+    assert store.profile.registry.by_external_port(2).verification == original_verification
+
+
+@pytest.mark.parametrize("field", ("authorized", "action_completed", "safe_closed"))
+def test_physical_contract_requires_strict_boolean_state(field) -> None:
+    values = {
+        "run_identity": "physical-run-1",
+        "external_port": 2,
+        "revision": 0,
+        "fingerprint": "a" * 64,
+        "action_completed": True,
+        "safe_closed": True,
+        "authorized": True,
+    }
+    values[field] = "false"
+
+    with pytest.raises(ValueError, match="布尔值"):
+        PhysicalVerificationContract(**values)
 
 
 def test_normal_save_cannot_inject_or_replace_verification_evidence(tmp_path) -> None:

@@ -25,17 +25,21 @@
 
 - 固定显示机外气口 1–20，不根据“10/20 通道变体”改变布局；当前未接入位置变灰且不能产生硬件 intent。
 - 可用气口显示机外编号和可选别名；default、hover、pressed、selected、actually open、fault、disabled 必须可区分。
-- 有别名时以别名为主信息，并用较弱 Caption 固定显示零补齐编号（如“气口 01”）；无别名时只显示编号，不保留空副标题。
-- 别名单行显示，按实际像素宽度使用 `QFontMetrics.elidedText()` 尾部省略；只有发生截断时才使用 QFluentWidgets ToolTip 显示完整别名和气口编号。别名不得改变字体、卡片高度或 2×10 布局。
+- Manual 与 Settings 始终以零补齐的面板编号（如“气口 04”）作为主信息；有别名时才在第二行显示别名，无别名时不保留空副标题。
+- 别名单行显示，按实际像素宽度使用 `QFontMetrics.elidedText()` 尾部省略；只有发生截断时才使用 QFluentWidgets ToolTip 显示完整别名。别名不得改变字体、卡片高度或 2×10 布局。
 - 当前初始化可用位置为 2/4/6/8/12/14/16/18，但界面只消费 HardwareProfile，不得在 View 中写死。
-- A 样品流量、B 主气流、C 真空和刺激时长均支持独立输入与步进；A+B 只作弱化的派生总送风显示，不是可编辑 authority。
+- A 样品流量、B 主气流、C 真空和刺激时长均支持独立输入与步进；“总流量 1500 ml/min”只作弱化的派生信息，不是可编辑 authority。
 - 供气和释放按钮只发送 intent；按钮文案、使能、倒计时和完成状态全部由 immutable Snapshot 驱动。
 - 手动刺激从全部目标 open receipt 的共同就绪时刻起算，由 `ActuationWorker` 自动关闭；UI 定时器仅刷新显示。
 - 气流图必须准确标注当前实际可观测量。只有 A 路 telemetry 时，不得称为 A+B 总流量，也不得显示未经观测证明的“稳定”。
 - `InfoBar` 只提示新异常或用户需要知道的操作结果；每个窗口只有一个 sticky winner，按 critical > error > warning > info > success 抢占，同 identity 的文案或严重度变化原地更新。actionable 通知不受视觉 severity 影响，保持到用户关闭或 condition resolved；用户关闭 winner 后，该 episode 不轮播已有 lower/equal backlog，只有新 higher condition 可以再次提示。actionable 存在时到达的 non-actionable success/info/warning 直接退休，condition 解除后不得回放。普通连接成功和无操作价值的正常阶段不创建提示。只有真正阻断当前操作的问题才使用 Fluent Dialog，不使用 `QMessageBox`。
-- 后续 Manual Product UI Build 统一把派生值写作“总流量 1500 ml/min”，不把领域公式 `A+B` 当作产品文案；“本次已完成”只作瞬时成功反馈，不长期占据 idle 控制区。Header、实时曲线、流量设置、实验控制、气口 Tile 和停止按钮的其余视觉问题也统一留到该轮处理。
+- “本次已完成”只作瞬时成功反馈，不长期占据 idle 控制区。Header、实时曲线、流量设置、实验控制和停止按钮的最终美术仍留给 HIL 后的 Manual Product UI Build。
 
-Settings 使用 Pivot 划分“气口配置”和“线路与设备”两个独立区，拥有独立于 Manual 的 Tile/presentation。“气口配置”包含固定 2×10 气口总览、单口详情、页内验证任务和保存动作；Tile 固定显示“未使用 / 待验证 / 可用 / 异常”四态及对应图标，selected 只作琥珀选择强调，不覆盖状态。`MOCK_VERIFIED`、changed 和 incomplete 都显示“待验证”，只有与当前 mapping 匹配的 `PHYSICAL_VERIFIED` 才显示“可用”，Badge 不显示日期。“线路与设备”不使用可展开高级区，只读显示当前气口的控制通道、输出线路和开启方式，以及 1–20 控制通道表和两列设备连接信息，不新增编辑能力。连接后 mapping 只读；只有 clean saved profile 且设备 connected/ready/safe idle 时才显示可用的单口验证动作。dirty draft 在验证按钮附近只提示“保存后验证”。验证确认只显示面板气口和约 20 秒，不显示控制通道、流量值或底层线路；进行中锁定区段和全部气口选择，在单口验证面板显示进度、剩余时间和“立即停止”，不另设页级 status。模拟检查结束后仍回到“待验证”，不显示绿色成功或“验证完成”。保存及停止等结果只在对应动作附近给出简短反馈。rollback 后端继续保留，但普通页面不显示 rollback。
+Settings 默认进入设置首页，以“气口配置”和“线路与设备”两个入口卡片进入子页，并用紧凑 breadcrumb 返回；主导航不再直接打开 2×10 总览，Manual 的“气口设置”快捷入口仍直接进入气口配置。“气口配置”包含固定 2×10 气口总览、单口详情、页内验证任务和保存动作。Tile 同时表达未启用、待验证、待现场确认、可用、需检查和独立 selected；selected 只使用琥珀轮廓，不能替代状态。`MOCK_VERIFIED` 显示“待现场确认”，只有与当前 mapping 匹配的 `PHYSICAL_VERIFIED` 才显示“可用”。未启用的 Settings Tile 仍可选择编辑；Manual 未验证或未启用 Tile 必须明确 unavailable 且不能驱动动作。
+
+“线路与设备”默认以两列紧凑表从控制通道 01 开始展示线路映射；断开设备后，用户可显式点击“编辑线路”修改 target，设备连接参数可直接编辑。连接设备后这些控件 disabled。名称、控制通道、串口、设备和 Alicat 输入均有内容驱动的 maximum width，不横跨桌面窗口。Settings、Manual、滚动 viewport 与 Card 使用统一 page/primary surface/secondary surface/border/amber/text/success/warning/error tokens，Mica 保持关闭。
+
+验证确认只显示面板气口和约 20 秒；RUNNING 使用结构化 monotonic deadline 驱动单调递减倒计时和 determinate progress，UI timer 不承担关阀。控制动作结束后进入 AWAITING_CONFIRMATION，用户必须选择“没有或位置不对”或“出气正确”。simulation 的正向结果只写 `MOCK_VERIFIED` 并显示“待现场确认”，不能形成 production availability；真实物理流程只有在动作完成、安全关闭和用户正向确认的可信合同全部成立时才能写 `PHYSICAL_VERIFIED`。保存及停止等结果只在对应动作附近给出简短反馈；rollback 后端继续保留，但普通页面不显示 rollback。
 
 Auto 的具体布局不在本轮设计或实现；立项时应从上述用户任务与已验证领域契约继续设计。清洗、配置等既有服务层安全约束仍以 PRD 与架构为准。
 

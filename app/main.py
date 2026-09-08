@@ -127,7 +127,9 @@ def configure_product_theme() -> None:
     """Apply the product-wide Fluent dark theme without persisting host settings."""
 
     setTheme(Theme.DARK, save=False, lazy=False)
-    setThemeColor("#E2AD50", save=False, lazy=False)
+    from app.views.product_theme import COLORS
+
+    setThemeColor(COLORS.amber, save=False, lazy=False)
 
 
 def build_application(

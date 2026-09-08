@@ -137,8 +137,9 @@ def test_manual_port_state_has_text_and_visual_distinction(qtbot) -> None:
     )
 
     text = view.port_buttons[2].text()
-    assert text == "薄荷\n气口 02"
+    assert text == "气口 02\n薄荷"
     assert view.port_buttons[2].property("portState") == "fault"
+    assert view.port_buttons[2]._normalBackgroundColor().red() > 200
     assert "故障" in view.port_buttons[2].accessibleDescription()
     assert not view.port_buttons[2].selection_accent.isHidden()
     assert not view.port_buttons[2].open_group.isHidden()
@@ -146,6 +147,26 @@ def test_manual_port_state_has_text_and_visual_distinction(qtbot) -> None:
     assert view.port_buttons[1].text() == "气口 01"
     assert "不可用" in view.port_buttons[1].accessibleDescription()
     assert view.port_buttons[1].property("portState") == "disabled"
+
+
+def test_manual_actual_open_green_overrides_selected_amber(qtbot) -> None:
+    view = ManualExperimentView()
+    qtbot.addWidget(view)
+    ports = list(_port_snapshots())
+    ports[1] = replace(ports[1], fault="", actually_open=True)
+    view.render_snapshot(
+        ManualExperimentViewSnapshot(
+            controls_enabled=True,
+            ports=tuple(ports),
+            draft=ManualExperimentDraft(selected_external_ports=(2,)),
+        )
+    )
+
+    tile = view.port_buttons[2]
+    color = tile._normalBackgroundColor()
+    assert tile.property("portState") == "open"
+    assert color.green() > color.red()
+    assert not tile.selection_accent.isHidden()
 
 
 def test_manual_port_alias_fallback_never_duplicates_number(qtbot) -> None:
@@ -169,7 +190,7 @@ def test_manual_port_long_alias_is_elided_and_keeps_full_tooltip(qtbot) -> None:
 
     button = view.port_buttons[2]
     assert long_alias in button.toolTip()
-    assert "气口 02" in button.toolTip()
+    assert button.toolTip() == long_alias
     assert button.elided_alias(54).endswith("…")
     assert button.minimumHeight() == button.maximumHeight() == 82
 
@@ -181,7 +202,8 @@ def test_manual_port_short_alias_has_no_redundant_tooltip(qtbot) -> None:
     ports[1] = replace(ports[1], display_name="薄荷")
     view.render_snapshot(ManualExperimentViewSnapshot(controls_enabled=True, ports=tuple(ports)))
 
-    assert view.port_buttons[2].title_label.text() == "薄荷"
+    assert view.port_buttons[2].title_label.text() == "气口 02"
+    assert view.port_buttons[2].port_label.text() == "薄荷"
     assert view.port_buttons[2].toolTip() == ""
 
 
@@ -213,7 +235,7 @@ def test_manual_flow_fields_edit_independent_abc_and_emit_domain_intents(qtbot) 
     view.sample_a_input.setValue(300)
     view.main_b_input.setValue(900)
     assert view.main_b_input.value() == 900
-    assert view.derived_total_label.text() == "A+B：1200 ml/min"
+    assert view.derived_total_label.text() == "总流量 1200 ml/min"
     view.apply_flow_button.click()
     view.release_button.click()
 

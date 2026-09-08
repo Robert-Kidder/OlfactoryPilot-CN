@@ -42,6 +42,41 @@ class ValveTargetPreset:
             raise ValueError("控制通道必须位于 1–20。")
         return self.targets[valve - 1]
 
+    def with_target(self, internal_valve: int, target: str) -> ValveTargetPreset:
+        valve = _strict_int(internal_valve, "控制通道")
+        if valve not in EXTERNAL_PORTS:
+            raise ValueError("控制通道必须位于 1–20。")
+        targets = list(self.targets)
+        targets[valve - 1] = str(target).strip()
+        return ValveTargetPreset(variant=self.variant, targets=tuple(targets))
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "variant": self.variant,
+            "targets": {
+                str(port): self.targets[port - 1] for port in EXTERNAL_PORTS
+            },
+        }
+
+    @classmethod
+    def from_value(cls, raw: Any) -> ValveTargetPreset | None:
+        if raw is None:
+            return None
+        if not isinstance(raw, Mapping):
+            raise ValueError("hardware_profile.target_preset 必须是对象或 null。")
+        _reject_unknown_keys(raw, {"variant", "targets"}, "target_preset")
+        variant = str(raw.get("variant", "20-channel"))
+        targets = raw.get("targets")
+        if not isinstance(targets, Mapping):
+            raise ValueError("target_preset.targets 必须是对象。")
+        expected = {str(port) for port in EXTERNAL_PORTS}
+        if set(targets) != expected:
+            raise ValueError("target_preset.targets 必须且只能包含控制通道 1–20。")
+        return cls(
+            variant=variant,
+            targets=tuple(str(targets[str(port)]) for port in EXTERNAL_PORTS),
+        )
+
     @classmethod
     def from_config(cls, config: Mapping[str, Any]) -> ValveTargetPreset | None:
         valve_mapping = config.get("valve_mapping")
@@ -467,6 +502,11 @@ class HardwareProfile:
                 for channel in normalized_channels
             ):
                 raise ValueError("selector target 不得与任何气味阀 NI target 重复。")
+            if self.target_preset is not None and any(
+                normalize_digital_target(target) == selector_identity
+                for target in self.target_preset.targets
+            ):
+                raise ValueError("selector target 不得与控制线路表重复。")
         object.__setattr__(
             self,
             "max_total_sccm",
@@ -571,7 +611,7 @@ class HardwareProfile:
                 "safe_level": self.selector.safe_level,
                 "odor_level": self.selector.odor_level,
             }
-        return {
+        value = {
             "schema_version": self.schema_version,
             "profile_name": self.profile_name,
             "flow_limits_sccm": {
@@ -583,6 +623,9 @@ class HardwareProfile:
             "connections": self.connections.to_dict(),
             "channels": [channel.to_dict() for channel in self.channels],
         }
+        if self.target_preset is not None:
+            value["target_preset"] = self.target_preset.to_dict()
+        return value
 
     @classmethod
     def from_config(
@@ -603,6 +646,7 @@ class HardwareProfile:
                 "selector",
                 "connections",
                 "channels",
+                "target_preset",
             },
             "hardware_profile",
         )
@@ -616,13 +660,15 @@ class HardwareProfile:
             raise ValueError("flow_limits_sccm 必须是 JSON 对象。")
         _reject_unknown_keys(limits, {"total", "sample_a", "vacuum_c"}, "flow_limits_sccm")
         connections = _parse_connections(raw.get("connections"), legacy_config=config)
-        try:
-            target_preset = ValveTargetPreset.from_config(config)
-        except ValueError:
-            # HardwareProfile remains the runtime authority.  A broken legacy
-            # preset blocks ordinary remapping, but must not rewrite or disable
-            # an already valid saved profile during startup.
-            target_preset = None
+        if "target_preset" in raw:
+            target_preset = ValveTargetPreset.from_value(raw.get("target_preset"))
+        else:
+            try:
+                target_preset = ValveTargetPreset.from_config(config)
+            except ValueError:
+                # Compatibility input can enable the editor for legacy files,
+                # but it is never a second mutable runtime authority.
+                target_preset = None
         return cls(
             schema_version=raw.get("schema_version"),
             profile_name=raw.get("profile_name", "默认硬件方案"),

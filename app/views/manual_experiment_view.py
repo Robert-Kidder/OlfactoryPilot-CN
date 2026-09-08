@@ -8,7 +8,7 @@ from dataclasses import dataclass, replace
 
 import pyqtgraph as pg
 from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QFontMetrics, QKeyEvent, QMouseEvent
+from PySide6.QtGui import QColor, QKeyEvent, QMouseEvent
 from PySide6.QtWidgets import (
     QFrame,
     QGridLayout,
@@ -48,12 +48,18 @@ from app.models import (
     ManualSupplyIntent,
 )
 from app.views.notification_coordinator import NotificationCoordinator
+from app.views.port_formatting import (
+    format_port_number,
+    format_port_text,
+    normalize_port_alias,
+)
 from app.views.product_text import user_facing_text
+from app.views.product_theme import COLORS
 
 FLOW_STEP_ML_MIN = 500.0
 DURATION_STEP_S = 5.0
 DURATION_MIN_S = 1.0
-AMBER = "#E2AD50"
+AMBER = COLORS.amber
 SAFETY_NOTICE_TITLES = frozenset(
     {"气流不足", "设备数据中断", "当前状态不允许操作"}
 )
@@ -121,14 +127,14 @@ class PortTile(CardWidget):
         self.title_label = StrongBodyLabel(self)
         self.title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.title_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
-        self.title_label.installEventFilter(
-            ToolTipFilter(self.title_label, showDelay=300, position=ToolTipPosition.TOP)
-        )
         layout.addWidget(self.title_label)
 
         self.port_label = CaptionLabel(self)
         self.port_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.port_label.setStyleSheet("color: #858F8B;")
+        self.port_label.setStyleSheet(f"color: {COLORS.secondary};")
+        self.port_label.installEventFilter(
+            ToolTipFilter(self.port_label, showDelay=300, position=ToolTipPosition.TOP)
+        )
         layout.addWidget(self.port_label)
 
         state_row = QWidget(self)
@@ -172,6 +178,10 @@ class PortTile(CardWidget):
     def _normalBackgroundColor(self) -> QColor:
         if self._configuration_mode and not self._available:
             return QColor(255, 255, 255, 9)
+        if self._fault:
+            return QColor(255, 145, 138, 38)
+        if self._actually_open:
+            return QColor(119, 201, 157, 38)
         if not self.isEnabled():
             return QColor(255, 255, 255, 5)
         if self._selected:
@@ -179,11 +189,19 @@ class PortTile(CardWidget):
         return super()._normalBackgroundColor()
 
     def _hoverBackgroundColor(self) -> QColor:
+        if self._fault:
+            return QColor(255, 145, 138, 52)
+        if self._actually_open:
+            return QColor(119, 201, 157, 52)
         if self._selected:
             return QColor(226, 173, 80, 58)
         return super()._hoverBackgroundColor()
 
     def _pressedBackgroundColor(self) -> QColor:
+        if self._fault:
+            return QColor(255, 145, 138, 28)
+        if self._actually_open:
+            return QColor(119, 201, 157, 28)
         if self._selected:
             return QColor(226, 173, 80, 28)
         return super()._pressedBackgroundColor()
@@ -193,15 +211,14 @@ class PortTile(CardWidget):
         return self._alias
 
     def set_port_content(self, display_name: str) -> None:
-        alias = _normalize_alias(display_name)
-        if alias in {f"气口 {self.external_port}", f"气口 {self.external_port:02d}"}:
-            alias = ""
+        alias = normalize_port_alias(display_name, self.external_port)
         if alias == self._alias and self.title_label.text():
             return
         self._visual_state = None
         self._alias = alias
-        number = f"气口 {self.external_port:02d}"
-        self.port_label.setText(number)
+        number = format_port_number(self.external_port)
+        self.title_label.setText(number)
+        self.port_label.setText(alias)
         self.port_label.setVisible(bool(alias))
         self._refresh_elision()
 
@@ -209,24 +226,31 @@ class PortTile(CardWidget):
         if not self._alias:
             return ""
         available = max(20, width if width is not None else self.title_label.width())
-        return QFontMetrics(self.title_label.font()).elidedText(
+        return format_port_text(
+            self.external_port,
             self._alias,
-            Qt.TextElideMode.ElideRight,
-            available,
-        )
+            font=self.port_label.font(),
+            width=available,
+        ).elided_alias
 
     def _refresh_elision(self) -> None:
-        number = f"气口 {self.external_port:02d}"
+        number = format_port_number(self.external_port)
+        self.title_label.setText(number)
         if not self._alias:
-            self.title_label.setText(number)
+            self.port_label.setText("")
             self.title_label.setToolTip("")
+            self.port_label.setToolTip("")
             return
         available = max(20, self.width() - 18)
-        elided = self.elided_alias(available)
-        self.title_label.setText(elided)
-        self.title_label.setToolTip(
-            f"{self._alias}\n{number}" if elided != self._alias else ""
+        formatted = format_port_text(
+            self.external_port,
+            self._alias,
+            font=self.port_label.font(),
+            width=available,
         )
+        self.port_label.setText(formatted.elided_alias)
+        self.port_label.setToolTip(formatted.tooltip)
+        self.title_label.setToolTip(formatted.tooltip)
 
     def set_state(
         self,
@@ -337,11 +361,11 @@ class PortTile(CardWidget):
             self.clicked.emit()
 
     def text(self) -> str:
-        number = f"气口 {self.external_port:02d}"
-        return f"{self._alias}\n{number}" if self._alias else number
+        number = format_port_number(self.external_port)
+        return f"{number}\n{self._alias}" if self._alias else number
 
     def toolTip(self) -> str:  # noqa: N802 - compatibility for tests/accessibility
-        return self.title_label.toolTip()
+        return self.port_label.toolTip()
 
     def resizeEvent(self, event) -> None:  # noqa: N802 - Qt override
         super().resizeEvent(event)
@@ -437,19 +461,15 @@ class StopManualExperimentIntent:
 
 
 def port_button_text_from_values(external_port: int, display_name: str) -> str:
-    alias = _normalize_alias(display_name)
-    number = f"气口 {external_port:02d}"
-    if alias in {f"气口 {external_port}", number}:
-        alias = ""
-    return f"{alias}，{number}" if alias else number
+    alias = normalize_port_alias(display_name, external_port)
+    number = format_port_number(external_port)
+    return f"{number}，{alias}" if alias else number
 
 
 def port_button_text(port: ManualPortSnapshot) -> str:
-    alias = _normalize_alias(port.display_name)
-    number = f"气口 {port.external_port:02d}"
-    if alias in {f"气口 {port.external_port}", number}:
-        alias = ""
-    return f"{alias}\n{number}" if alias else number
+    alias = normalize_port_alias(port.display_name, port.external_port)
+    number = format_port_number(port.external_port)
+    return f"{number}\n{alias}" if alias else number
 
 
 class ManualExperimentView(QWidget):
@@ -474,6 +494,7 @@ class ManualExperimentView(QWidget):
         self._snapshot = ManualExperimentViewSnapshot()
         self._draft = self._snapshot.draft
         self._registry: ChannelRegistry | None = None
+        self._profile_revision = 0
         self._registry_signature: tuple[object, ...] | None = None
         self._allow_mock = False
         self._flow_history: deque[tuple[float, float]] = deque(maxlen=1000)
@@ -602,7 +623,7 @@ class ManualExperimentView(QWidget):
         self.sample_a_input = self._flow_input()
         self.main_b_input = self._flow_input()
         self.vacuum_c_input = self._flow_input()
-        self.derived_total_label = CaptionLabel("A+B：1500 ml/min", card)
+        self.derived_total_label = CaptionLabel("总流量 1500 ml/min", card)
         fields.addWidget(self._field("样品流量 A", self.sample_a_input), 0, 0)
         fields.addWidget(self._field("主气流 B", self.main_b_input), 0, 1)
         fields.addWidget(self._field("真空流量 C", self.vacuum_c_input), 0, 2)
@@ -703,14 +724,25 @@ class ManualExperimentView(QWidget):
     def snapshot(self) -> ManualExperimentViewSnapshot:
         return self._snapshot
 
-    def set_registry(self, registry: ChannelRegistry, allow_mock: bool) -> None:
+    @property
+    def profile_revision(self) -> int:
+        return self._profile_revision
+
+    def set_registry(
+        self,
+        registry: ChannelRegistry,
+        allow_mock: bool,
+        revision: int | None = None,
+    ) -> None:
         if not isinstance(registry, ChannelRegistry):
             raise TypeError("手动实验需要有效的气口映射。")
-        signature = (registry.channels, bool(allow_mock))
+        resolved_revision = self._profile_revision if revision is None else int(revision)
+        signature = (registry.channels, bool(allow_mock), resolved_revision)
         if signature == self._registry_signature:
             return
         self._registry_signature = signature
         self._registry = registry
+        self._profile_revision = resolved_revision
         self._allow_mock = bool(allow_mock)
         ports = tuple(
             ManualPortSnapshot(
@@ -819,7 +851,7 @@ class ManualExperimentView(QWidget):
             self._set_value_if_changed(self.vacuum_c_input, snapshot.draft.vacuum_c_sccm)
             self._set_value_if_changed(self.duration_input, snapshot.draft.duration_s)
             self.derived_total_label.setText(
-                f"A+B：{snapshot.draft.derived_total_sccm:g} ml/min"
+                f"总流量 {snapshot.draft.derived_total_sccm:g} ml/min"
             )
         finally:
             self._rendering = False
@@ -1401,6 +1433,6 @@ class ManualExperimentView(QWidget):
         )
         self._snapshot = replace(self._snapshot, draft=self._draft)
         self.derived_total_label.setText(
-            f"A+B：{self._draft.derived_total_sccm:g} ml/min"
+            f"总流量 {self._draft.derived_total_sccm:g} ml/min"
         )
         self.draft_changed.emit(ManualDraftChangedIntent(self._draft))

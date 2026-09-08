@@ -4,8 +4,7 @@ import time
 from typing import TYPE_CHECKING
 
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QColor, QPalette
-from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QHBoxLayout, QSizePolicy, QVBoxLayout, QWidget
 from qfluentwidgets import (
     BodyLabel,
     CaptionLabel,
@@ -29,6 +28,7 @@ from app.models import (
 from app.views.hardware_settings_view import HardwareSettingsView
 from app.views.manual_experiment_view import SAFETY_NOTICE_TITLES, ManualExperimentView
 from app.views.product_text import user_facing_text
+from app.views.product_theme import apply_page_palette
 
 if TYPE_CHECKING:
     from app.controllers import MainController
@@ -117,10 +117,7 @@ class MainWindow(FluentWindow):
     def _build_manual_interface(self) -> None:
         interface = QWidget(self)
         interface.setObjectName("manualExperimentInterface")
-        palette = interface.palette()
-        palette.setColor(QPalette.ColorRole.Window, QColor("#101613"))
-        interface.setPalette(palette)
-        interface.setAutoFillBackground(True)
+        apply_page_palette(interface)
         layout = QVBoxLayout(interface)
         layout.setContentsMargins(20, 14, 20, 18)
         layout.setSpacing(12)
@@ -143,6 +140,9 @@ class MainWindow(FluentWindow):
 
         self._connection_badge = InfoBadge.error("设备未连接", parent=header)
         self._connection_badge.setAccessibleName("设备连接状态")
+        self._connection_badge.setSizePolicy(
+            QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed
+        )
         self._connection_action_label = CaptionLabel("", header)
         self._connection_action_label.setStyleSheet("color: #FF9A92;")
         self._connection_action_label.setMaximumWidth(220)
@@ -152,11 +152,11 @@ class MainWindow(FluentWindow):
         connection_layout = QHBoxLayout(self._connection_status_slot)
         connection_layout.setContentsMargins(0, 0, 0, 0)
         connection_layout.setSpacing(8)
-        self._connection_action_label.setFixedWidth(220)
         connection_layout.addWidget(
             self._connection_badge, 0, Qt.AlignmentFlag.AlignVCenter
         )
         connection_layout.addWidget(self._connection_action_label)
+        connection_layout.addStretch(1)
         header_layout.addWidget(self._connection_status_slot)
 
         self._connection_action_slot = QWidget(header)
@@ -200,14 +200,21 @@ class MainWindow(FluentWindow):
         self.hardware_settings_view.verification_stop_requested.connect(
             self.controller.handle_hardware_verification_stop_requested
         )
+        self.hardware_settings_view.verification_result_requested.connect(
+            self.controller.handle_hardware_verification_result_requested
+        )
         self._settings_navigation_item = self.addSubInterface(
             self.hardware_settings_view,
             FIF.SETTING,
             "设置",
             position=NavigationItemPosition.BOTTOM,
         )
+        self._settings_navigation_item.clicked.connect(
+            lambda _triggered_by_user: self.hardware_settings_view.open_home()
+        )
 
     def open_hardware_settings(self) -> None:
+        self.hardware_settings_view.open_port_settings()
         self.switchTo(self.hardware_settings_view)
 
     def _format_shutdown(self, event: dict | None) -> str:

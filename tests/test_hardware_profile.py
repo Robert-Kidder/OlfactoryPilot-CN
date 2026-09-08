@@ -257,5 +257,17 @@ def test_standard_preset_resolves_controller_channel_and_flags_historical_custom
     assert custom.channel_uses_custom_target(4) is True
 
 
+def test_canonical_target_preset_round_trips_without_legacy_mapping() -> None:
+    profile = _default_profile()
+    raw = profile.to_dict()
+
+    assert raw["target_preset"]["variant"] == "20-channel"
+    assert raw["target_preset"]["targets"]["10"] == "Dev1/P1.1"
+    parsed = HardwareProfile.from_config(raw)
+    assert parsed.target_preset == profile.target_preset
+
+
+
+
 def _default_profile_config() -> dict:
     return json.loads(Path("config/default_config.json").read_text(encoding="utf-8"))

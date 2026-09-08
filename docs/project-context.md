@@ -24,8 +24,9 @@ OlfactoryPilot-CN 是用于嗅觉刺激实验的 Windows 桌面控制软件，�
 - 当前产品范围包含“手动实验”“自动实验”两个实验工作页面和“设置”工具页；设置不是第三种实验模式。尚未实现的页面不加占位入口，预测试、协议模式、校准、清洗和呼吸实验不恢复为正式导航；呼吸触发未来属于 Auto trigger strategy。
 - 产品界面优先使用 QFluentWidgets 原生 Card、Label、数字输入、Button、Badge、ToolTip 和 InfoBar；不使用旧 QWidget/QSS 控制台作为未来标准，不引入 superqt。
 - selected 使用琥珀强调；真实开启使用绿色图标状态；故障使用红色且形态不同的图标状态。重要状态不得只靠颜色或 Tooltip 表达。
-- “设置”位于正式导航底部；手动实验页只提供一个“气口设置”快捷入口，并切换到同一页面。普通设置固定显示 2×10 面板气口，只允许按 `20-channel` preset 选择控制通道，resolved NI target 与极性在高级区只读。
-- Settings 与 Manual 分别拥有自己的 Tile/presentation：Settings 四态固定为“未使用 / 待验证 / 可用 / 异常”，selected 只表示当前编辑选择；`MOCK_VERIFIED`、changed、incomplete 均不得显示为生产可用，只有匹配当前 mapping 的 `PHYSICAL_VERIFIED` 可显示“可用”。
+- “设置”位于正式导航底部并默认进入设置首页，首页只提供“气口配置”和“线路与设备”两个入口；手动实验页的“气口设置”快捷入口直接进入气口配置。线路映射默认紧凑查看，断开设备后显式进入“编辑线路”；连接字段在断开时可维护，连接时 disabled。
+- Settings 与 Manual 共享 profile revision 和气口名称格式，但各自拥有符合任务的 Tile presentation：面板编号始终是主标题，别名只作第二行；Settings 区分未启用、待验证、待现场确认、可用、需检查与 selected，Manual 区分 unavailable、available、selected、actual-open 与 fault。`MOCK_VERIFIED` 不得显示为生产可用，只有匹配当前 mapping 的 `PHYSICAL_VERIFIED` 可显示“可用”。
+- 产品 UI 的 page、primary/secondary surface、border、amber、primary/secondary text、success、warning 和 error 使用同一组 tokens；ScrollArea viewport 与内容容器透明，表单控件使用适合桌面内容的最大宽度。
 - 每个产品窗口的全局通知只有一个 sticky winner；严格按 critical > error > warning > info > success 抢占。同 identity 原地更新，dismiss 后不轮播已有 lower/equal backlog；被 actionable 阻挡的 transient 直接退休且不得在 condition 解除后回放。
 - 气口配置始终区分三层：面板气口 `external_port` → 控制通道 `internal_valve` → NI/芯片接口 `target`。当前默认八路为 02→02、04→03、06→04、08→05、12→06、14→07、16→08、18→09；它只是默认 HardwareProfile，不是永久硬编码规则。
 
@@ -44,8 +45,8 @@ OlfactoryPilot-CN 是用于嗅觉刺激实验的 Windows 桌面控制软件，�
 - Protocol、Manual、Maintenance 是三个互斥执行域；每个域只接受能够由 lease、command category/identity、executor context 或 safe-transition identity 明确归属本域的证据。
 - Protocol lease 是 Protocol ownership 的最强证据。仅加载文档、非零 epoch、任意 non-idle lease、普通 flow ready、active valve 或 possibly-open 状态都不能单独证明 Protocol 正在执行。
 - Manual/Maintenance 的 lease、pending command、valve、possibly-open 和 readiness 不得触发 Protocol invalidation；真正 active Protocol 的 readiness 丢失仍按现有 fail-closed 路径处理。
-- 单口验证使用独立 Verification ownership，只接受已保存且 revision/fingerprint 与运行时一致的 profile；模拟验证可生成 `MOCK_VERIFIED`，production stub 不得生成 `PHYSICAL_VERIFIED`。
-- 配置编辑与验证是两种权限：mapping 及普通保存仅允许设备断开且 owner 全部 handoff；验证则要求设备已连接、ready、safe idle、无未保存 draft 和竞争 owner。验证 evidence 只更新匹配 revision/fingerprint 的单口状态，不触发 connected mapping hot reload。
+- 单口验证使用独立 Verification ownership 和结构化 phase/deadline/result presentation，只接受已保存且 revision/fingerprint 与运行时一致的 profile。动作结束必须进入用户确认；模拟正向确认可生成 `MOCK_VERIFIED`，production stub 不得生成 `PHYSICAL_VERIFIED`。
+- 配置编辑与验证是两种权限：mapping 及普通保存仅允许设备断开且 owner 全部 handoff；验证则要求设备已连接、ready、safe idle、无未保存 draft 和竞争 owner。验证 evidence 只更新匹配 revision/fingerprint 的单口状态，不触发 connected mapping hot reload。成功保存后只由 Controller 从 Store commit 发布一次新 revision，同步 state registry、Settings 和 Manual；View 不自行读取配置文件。
 
 ## 目标用户
 
