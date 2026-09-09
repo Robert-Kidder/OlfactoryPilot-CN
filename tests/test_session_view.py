@@ -7,6 +7,8 @@ from datetime import datetime
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import pytest
+
 import app.controllers.main_controller as controller_module
 from app.controllers.main_controller import MainController, RecoveryScanWorker
 from app.models import AppState, ProtocolDocument, ProtocolTrial, TriggerMode
@@ -14,7 +16,11 @@ from app.models.session import SessionStatus, SessionViewSnapshot
 from app.services.mock_hal import MockHAL
 from app.views.session_view import SessionView
 from app.workers.hardware_worker import HardwareWorker
-from tests.legacy_ui_harness import build_legacy_test_window as MainWindow
+from tests.controller_regression_harness import (
+    build_controller_regression_window as MainWindow,
+)
+
+pytestmark = pytest.mark.slow
 
 
 def _controller_and_window(tmp_path: Path):

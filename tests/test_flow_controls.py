@@ -7,7 +7,11 @@ from app.main import DEFAULT_CONFIG, load_config
 from app.models import AppState
 from app.services import MockHAL, SafetyManager
 from app.workers import HardwareWorker
-from tests.legacy_ui_harness import build_legacy_test_window as MainWindow
+from tests.controller_regression_harness import (
+    build_controller_regression_window as MainWindow,
+)
+
+pytestmark = pytest.mark.slow
 
 
 def _build_flow_context(low_flow_threshold: float = 0.2):

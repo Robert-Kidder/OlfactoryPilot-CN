@@ -14,14 +14,14 @@ OlfactoryPilot-CN 是用于嗅觉刺激实验的 Windows 桌面控制软件，�
 - 实时图形：pyqtgraph。
 - 硬件接口：nidaqmx、pyserial。
 - 打包：PyInstaller。
-- 测试：pytest、pytest-qt。
+- 测试：pytest、项目自带 Qt fixture 与 `PySide6.QtTest`；当前依赖文件不包含 pytest-qt。
 - 代码检查：ruff，目标版本为 `py311`。
 - 依赖管理：使用 `requirements.txt` 和 `requirements-dev.txt`，不使用 Poetry 作为当前项目基线。
 
 ### 正式 UI 基线
 
 - 使用 QFluentWidgets Dark Theme：近黑、深墨绿/石墨色，主题强调色为 `#E2AD50`。
-- 当前产品范围包含“手动实验”“自动实验”两个实验工作页面和“设置”工具页；设置不是第三种实验模式。尚未实现的页面不加占位入口，预测试、协议模式、校准、清洗和呼吸实验不恢复为正式导航；呼吸触发未来属于 Auto trigger strategy。
+- 当前正式 runtime 只包含“手动实验”和“设置”工具页；设置不是实验模式。自动实验尚未进入 runtime，预测试、协议模式、校准、清洗和呼吸实验也不恢复为正式导航；未来 Auto 将成为第二个实验工作页，呼吸触发属于其 trigger strategy。
 - 产品界面优先使用 QFluentWidgets 原生 Card、Label、数字输入、Button、Badge、ToolTip 和 InfoBar；不使用旧 QWidget/QSS 控制台作为未来标准，不引入 superqt。
 - selected 使用琥珀强调；真实开启使用绿色图标状态；故障使用红色且形态不同的图标状态。重要状态不得只靠颜色或 Tooltip 表达。
 - “设置”位于正式导航底部并默认进入设置首页，首页只提供“气口配置”和“线路与设备”两个入口；手动实验页的“气口设置”快捷入口直接进入气口配置。线路映射默认紧凑查看，断开设备后显式进入“编辑线路”；连接字段在断开时可维护，连接时 disabled。
@@ -67,6 +67,8 @@ OlfactoryPilot-CN 是用于嗅觉刺激实验的 Windows 桌面控制软件，�
 - `.raw` 信号文件和 `.log` 事件日志输出。
 - 清洗流程、配置持久化、中文界面。
 - Mock HAL 硬件模拟模式。
+
+以上范围同时包含已实现底层资产与未来产品目标；当前用户可见 runtime 以“手动实验 + 设置”为准，Auto/Breath 不得因服务或测试文件已存在而宣称可用。
 
 范围外：
 

@@ -1,6 +1,6 @@
 {
-  "hal_mode": "real",
-  "serial_port": "COM6",
+  "hal_mode": "mock",
+  "serial_port": "COM256",
   "baud_rate": 19200,
   "ni_devices": [
     "Dev1",
@@ -8,8 +8,13 @@
   ],
   "ai0_channel": "Dev1/ai0",
   "ttl_input_channel": "Dev1/ai6",
-  "signal_offset": 3.0472976569884125e-07,
-  "signal_gain": 10.000009535533744,
+  "alicat_unit_ids": {
+    "A": "a",
+    "B": "b",
+    "C": "c"
+  },
+  "signal_offset": 0.0,
+  "signal_gain": 1.0,
   "cleaning": {
     "selected_channels": [
       2,
@@ -30,6 +35,18 @@
       "flow_sccm": 1500,
       "duration_s": 20,
       "max_approved_flow_sccm": 1500
+    },
+    "connections": {
+      "serial_port": "COM256",
+      "ni_devices": [
+        "Dev1",
+        "Dev2"
+      ],
+      "alicat_unit_ids": {
+        "A": "a",
+        "B": "b",
+        "C": "c"
+      }
     }
   }
 }

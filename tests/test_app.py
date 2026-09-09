@@ -26,7 +26,11 @@ from app.services import MockHAL, SafetyManager, ShutdownService
 from app.services.hardware_check_service import HardwareCheckService, SelfCheckResult
 from app.services.real_hal import RealHAL
 from app.workers import HardwareWorker
-from tests.legacy_ui_harness import build_legacy_test_window as MainWindow
+from tests.controller_regression_harness import (
+    build_controller_regression_window as MainWindow,
+)
+
+pytestmark = pytest.mark.slow
 
 
 @pytest.fixture(scope="session")

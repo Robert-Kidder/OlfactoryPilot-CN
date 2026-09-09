@@ -30,6 +30,18 @@ dist/
 _bmad/
 _bmad-output/
 
+# Node/BMAD installer caches
+node_modules/
+npm-debug.log*
+
+# Windows Explorer and shell artifacts
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+*.stackdump
+
 # Keep the shared BMAD artifact-routing override under version control.
 !_bmad/
 _bmad/*
@@ -43,6 +55,8 @@ config/local_config.json
 # Runtime state
 logs/
 last_shutdown_event.json
+*.session.part/
+recovery/
 
 # Local tree export
 structure.txt

@@ -4,6 +4,7 @@ import json
 import time
 from pathlib import Path
 
+import pytest
 from PySide6.QtCore import Qt
 from PySide6.QtTest import QTest
 
@@ -17,7 +18,11 @@ from app.models import (
 from app.services.mock_hal import MockHAL
 from app.views.cleaning_view import CleaningView
 from app.workers.hardware_worker import HardwareWorker
-from tests.legacy_ui_harness import build_legacy_test_window as MainWindow
+from tests.controller_regression_harness import (
+    build_controller_regression_window as MainWindow,
+)
+
+pytestmark = pytest.mark.slow
 
 
 def _config(local_path: Path, *, duration_s: float = 0.01) -> dict:

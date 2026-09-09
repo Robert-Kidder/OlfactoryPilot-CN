@@ -86,55 +86,55 @@ context:
 **线程顺序与安全收敛**
 
 - 从受限跨线程入口开始
-  [`actuation_worker.py:1220`](../../app/workers/actuation_worker.py#L1220)
+  [`actuation_worker.py:1220`](../../../app/workers/actuation_worker.py#L1220)
 
 - 按到达序仲裁安全消息
-  [`actuation_worker.py:2745`](../../app/workers/actuation_worker.py#L2745)
+  [`actuation_worker.py:2745`](../../../app/workers/actuation_worker.py#L2745)
 
 - 回执仅由 owner 消费
-  [`actuation_worker.py:4844`](../../app/workers/actuation_worker.py#L4844)
+  [`actuation_worker.py:4844`](../../../app/workers/actuation_worker.py#L4844)
 
 - 恢复后等待新鲜 SAFE
-  [`actuation_worker.py:4918`](../../app/workers/actuation_worker.py#L4918)
+  [`actuation_worker.py:4918`](../../../app/workers/actuation_worker.py#L4918)
 
 **一致 presentation 与稳定布局**
 
 - 合成单一状态帧
-  [`main_controller.py:3459`](../../app/controllers/main_controller.py#L3459)
+  [`main_controller.py:3459`](../../../app/controllers/main_controller.py#L3459)
 
 - 合并并拒绝旧 generation
-  [`main_window.py:327`](../../app/views/main_window.py#L327)
+  [`main_window.py:327`](../../../app/views/main_window.py#L327)
 
 - 固定连接区几何占位
-  [`main_window.py:147`](../../app/views/main_window.py#L147)
+  [`main_window.py:147`](../../../app/views/main_window.py#L147)
 
 - 默认关闭窗口 Mica
-  [`main_window.py:54`](../../app/views/main_window.py#L54)
+  [`main_window.py:54`](../../../app/views/main_window.py#L54)
 
 **通知与幂等渲染**
 
 - 统一语义 episode 仲裁
-  [`notification_coordinator.py:49`](../../app/views/notification_coordinator.py#L49)
+  [`notification_coordinator.py:49`](../../../app/views/notification_coordinator.py#L49)
 
 - 单帧驱动页面渲染
-  [`manual_experiment_view.py:870`](../../app/views/manual_experiment_view.py#L870)
+  [`manual_experiment_view.py:870`](../../../app/views/manual_experiment_view.py#L870)
 
 - PortTile 缓存视觉状态
-  [`manual_experiment_view.py:90`](../../app/views/manual_experiment_view.py#L90)
+  [`manual_experiment_view.py:90`](../../../app/views/manual_experiment_view.py#L90)
 
 - 曲线只接收真实新样本
-  [`manual_experiment_view.py:948`](../../app/views/manual_experiment_view.py#L948)
+  [`manual_experiment_view.py:948`](../../../app/views/manual_experiment_view.py#L948)
 
 **回归证据**
 
 - 三线程三循环真实 soak
-  [`test_manual_runtime_stability.py:103`](../../tests/test_manual_runtime_stability.py#L103)
+  [`test_manual_runtime_stability.py:103`](../../../tests/test_manual_runtime_stability.py#L103)
 
 - 验证 ingress 只入队
-  [`test_manual_runtime_stability.py:66`](../../tests/test_manual_runtime_stability.py#L66)
+  [`test_manual_runtime_stability.py:66`](../../../tests/test_manual_runtime_stability.py#L66)
 
 - 锁定恢复气流超时
-  [`test_manual_experiment.py:846`](../../tests/test_manual_experiment.py#L846)
+  [`test_manual_experiment.py:846`](../../../tests/test_manual_experiment.py#L846)
 
 - 锁定通知 episode 语义
-  [`test_notification_coordinator.py:4`](../../tests/test_notification_coordinator.py#L4)
+  [`test_notification_coordinator.py:4`](../../../tests/test_notification_coordinator.py#L4)

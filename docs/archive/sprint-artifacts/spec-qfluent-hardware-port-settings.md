@@ -89,43 +89,43 @@ preset 表示标准接线，descriptor.target 表示当前运行值；普通 UI 
 **安全权限与验证事务**
 
 - 先看配置编辑与验证权限如何独立判定并持续复核。
-  [`main_controller.py:3644`](../../app/controllers/main_controller.py#L3644)
+  [`main_controller.py:3644`](../../../app/controllers/main_controller.py#L3644)
 
 - Mock 单口验证取得专用 ownership，production 保持无动作 stub。
-  [`main_controller.py:3915`](../../app/controllers/main_controller.py#L3915)
+  [`main_controller.py:3915`](../../../app/controllers/main_controller.py#L3915)
 
 - evidence-only CAS 只更新匹配 revision 与 fingerprint 的证据。
-  [`hardware_profile_store.py:178`](../../app/services/hardware_profile_store.py#L178)
+  [`hardware_profile_store.py:178`](../../../app/services/hardware_profile_store.py#L178)
 
 **三层映射与一致性**
 
 - preset 定义稳定的控制通道到 NI target 关系。
-  [`hardware_profile.py:21`](../../app/models/hardware_profile.py#L21)
+  [`hardware_profile.py:21`](../../../app/models/hardware_profile.py#L21)
 
 - 映射 fingerprint 变化沿用既有验证失效机制。
-  [`hardware_profile.py:537`](../../app/models/hardware_profile.py#L537)
+  [`hardware_profile.py:537`](../../../app/models/hardware_profile.py#L537)
 
 - 普通改控制通道同步 preset target，缺失 preset 即阻断。
-  [`hardware_settings_view.py:697`](../../app/views/hardware_settings_view.py#L697)
+  [`hardware_settings_view.py:697`](../../../app/views/hardware_settings_view.py#L697)
 
 **正式 Settings 产品界面**
 
 - 页面组织固定 2×10 总览、单口详情和只读高级区。
-  [`hardware_settings_view.py:187`](../../app/views/hardware_settings_view.py#L187)
+  [`hardware_settings_view.py:187`](../../../app/views/hardware_settings_view.py#L187)
 
 - Settings 固定置于 FluentWindow 底部导航。
-  [`main_window.py:189`](../../app/views/main_window.py#L189)
+  [`main_window.py:189`](../../../app/views/main_window.py#L189)
 
 - Manual 快捷入口切换到同一 Settings 页面。
-  [`manual_experiment_view.py:661`](../../app/views/manual_experiment_view.py#L661)
+  [`manual_experiment_view.py:661`](../../../app/views/manual_experiment_view.py#L661)
 
 **回归证据与长期约束**
 
 - 默认八路、修改映射、失效与重启恢复集中回归。
-  [`test_hardware_profile_store.py:333`](../../tests/test_hardware_profile_store.py#L333)
+  [`test_hardware_profile_store.py:333`](../../../tests/test_hardware_profile_store.py#L333)
 
 - clean saved、竞争 owner 与 actuation 前拒绝形成端到端验收。
-  [`test_manual_experiment_integration.py:679`](../../tests/test_manual_experiment_integration.py#L679)
+  [`test_manual_experiment_integration.py:679`](../../../tests/test_manual_experiment_integration.py#L679)
 
 - 三层 authority 与默认映射写入长期架构约束。
-  [`architecture.md:155`](../architecture.md#L155)
+  [`architecture.md:155`](../../architecture.md#L155)

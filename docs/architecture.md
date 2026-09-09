@@ -11,7 +11,7 @@
 - 图形显示：pyqtgraph。
 - NI 设备：nidaqmx。
 - RS232：pyserial。
-- 测试：pytest、pytest-qt。
+- 测试：pytest、项目自带 Qt fixture 与 `PySide6.QtTest`；当前不依赖 pytest-qt。
 - 代码检查：ruff，目标版本 `py311`。
 - 打包：PyInstaller。
 - 依赖管理：`requirements.txt` 和 `requirements-dev.txt`。
@@ -46,7 +46,7 @@ tests/                 # 自动化测试
 
 ### 正式产品 UI
 
-- 正式运行树只构造已验收的 QFluentWidgets `FluentWindow` 产品页面；不得 import、隐藏托管或提供旧 UI 兼容入口。未验收能力不预设页面或占位导航。
+- 当前正式运行树只构造已验收的 QFluentWidgets 手动实验页与设置页；不得 import、隐藏托管或提供旧 UI 兼容入口。Auto/Breath 等未验收能力不预设页面或占位导航。
 - 全局使用 Dark Theme 与 `#E2AD50` 主题色，实时曲线继续使用 pyqtgraph。产品组件优先采用 QFluentWidgets 原生 Card、Label、SpinBox、Button、Badge、ToolTip 和 InfoBar。
 - 气口选择属于 View draft；真实开启和故障来自 immutable Snapshot。UI `QTimer` 只刷新倒计时和显示，不提交自动关闭动作。
 

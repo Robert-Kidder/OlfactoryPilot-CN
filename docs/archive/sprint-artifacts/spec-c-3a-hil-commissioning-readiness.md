@@ -101,43 +101,43 @@ context:
 **执行入口与所有权**
 
 - 从生产入口核对门禁、lease 与 plan 构造。
-  [`main_controller.py:4469`](../../app/controllers/main_controller.py#L4469)
+  [`main_controller.py:4469`](../../../app/controllers/main_controller.py#L4469)
 - Worker 依 receipt 推进冻结的启动偏序。
-  [`actuation_worker.py:4024`](../../app/workers/actuation_worker.py#L4024)
+  [`actuation_worker.py:4024`](../../../app/workers/actuation_worker.py#L4024)
 - Controller 在安全收口后提交最终证据。
-  [`main_controller.py:4584`](../../app/controllers/main_controller.py#L4584)
+  [`main_controller.py:4584`](../../../app/controllers/main_controller.py#L4584)
 
 **安全执行与证据**
 
 - A-only 启动与两级归零保持安全偏序。
-  [`actuation_worker.py:4159`](../../app/workers/actuation_worker.py#L4159)
+  [`actuation_worker.py:4159`](../../../app/workers/actuation_worker.py#L4159)
 - 回执身份、时限和状态推进集中校验。
-  [`actuation_worker.py:4481`](../../app/workers/actuation_worker.py#L4481)
+  [`actuation_worker.py:4481`](../../../app/workers/actuation_worker.py#L4481)
 - 安全收口完成后才生成可信合同。
-  [`actuation_worker.py:4748`](../../app/workers/actuation_worker.py#L4748)
+  [`actuation_worker.py:4748`](../../../app/workers/actuation_worker.py#L4748)
 - Alicat 回读不再使用目标值回显。
-  [`real_hal.py:341`](../../app/services/real_hal.py#L341)
+  [`real_hal.py:341`](../../../app/services/real_hal.py#L341)
 - 完整合同绑定运行、映射、流量与时间。
-  [`hardware_verification.py:178`](../../app/models/hardware_verification.py#L178)
+  [`hardware_verification.py:178`](../../../app/models/hardware_verification.py#L178)
 - Store 仅以 CAS 写入现场证据。
-  [`hardware_profile_store.py:213`](../../app/services/hardware_profile_store.py#L213)
+  [`hardware_profile_store.py:213`](../../../app/services/hardware_profile_store.py#L213)
 
 **Settings 与交互**
 
 - 参数编辑保留非法输入并阻断启动。
-  [`hardware_settings_view.py:928`](../../app/views/hardware_settings_view.py#L928)
+  [`hardware_settings_view.py:928`](../../../app/views/hardware_settings_view.py#L928)
 - 高级 polarity 与危险控件权限集中收口。
-  [`hardware_settings_view.py:1245`](../../app/views/hardware_settings_view.py#L1245)
+  [`hardware_settings_view.py:1245`](../../../app/views/hardware_settings_view.py#L1245)
 
 **验证与现场交接**
 
 - fake-HAL 断言完整启动、收口及证据。
-  [`test_physical_verification.py:71`](../../tests/test_physical_verification.py#L71)
+  [`test_physical_verification.py:71`](../../../tests/test_physical_verification.py#L71)
 - 非默认参数重启后仍驱动实际 plan。
-  [`test_hardware_profile_store.py:52`](../../tests/test_hardware_profile_store.py#L52)
+  [`test_hardware_profile_store.py:52`](../../../tests/test_hardware_profile_store.py#L52)
 - 长期架构记录 production 安全合同。
-  [`architecture.md:159`](../architecture.md#L159)
+  [`architecture.md:159`](../../architecture.md#L159)
 - C.3b 清单明确未执行及现场门禁。
-  [`c-3b-hil-commissioning-checklist.md:3`](evidence/c-3b-hil-commissioning-checklist.md#L3)
+  [`c-3b-hil-commissioning-checklist.md:3`](../../sprint-artifacts/evidence/c-3b-hil-commissioning-checklist.md#L3)
 - HIL 后视觉债务集中留在单一 backlog。
-  [`ux-design.md:44`](../ux-design.md#L44)
+  [`ux-design.md:44`](../../ux-design.md#L44)

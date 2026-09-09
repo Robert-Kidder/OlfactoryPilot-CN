@@ -1,4 +1,4 @@
-"""Explicit legacy View host for controller regressions, never used by app runtime."""
+"""Controller regression View host, never used by the product runtime."""
 
 from __future__ import annotations
 
@@ -13,12 +13,12 @@ from app.views.protocol_view import ProtocolView
 from app.views.session_view import SessionView
 
 
-def build_legacy_test_window(controller, state) -> MainWindow:
-    """Attach old Views only when a regression test explicitly asks for them."""
+def build_controller_regression_window(controller, state) -> MainWindow:
+    """Attach compatibility Views only for explicit Controller regression tests."""
 
     window = MainWindow(controller, state)
     host = QWidget(window)
-    host.setObjectName("legacyControllerTestHost")
+    host.setObjectName("controllerRegressionTestHost")
     host.hide()
     window._legacy_test_host = host
     window.tabs = QTabWidget(host)

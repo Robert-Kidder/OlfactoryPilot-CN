@@ -8,7 +8,7 @@ from PyInstaller.utils.hooks import collect_submodules, copy_metadata
 spec_path = Path(globals().get("__file__", "pyinstaller.spec")).resolve()
 project_root = spec_path.parent
 config_file = project_root / "config" / "default_config.json"
-docs_dir = project_root / "docs"
+manual_file = project_root / "docs" / "ManuelUtilisation_ProgOlfacto.pdf"
 
 # Limit PySide6 surface to shrink bundle and avoid unnecessary WinRT modules.
 hidden_imports = [
@@ -89,7 +89,7 @@ block_cipher = None
 
 datas = [
     (str(config_file), "config"),
-    (str(docs_dir), "docs"),
+    (str(manual_file), "docs"),
 ]
 datas += copy_metadata("nidaqmx")
 datas += copy_metadata("PySide6-Fluent-Widgets")

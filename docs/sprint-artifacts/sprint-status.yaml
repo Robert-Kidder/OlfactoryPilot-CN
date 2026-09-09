@@ -1,7 +1,7 @@
 # Sprint 状态文件
 # 唯一动态 Epic/Story 状态源；历史行动项见归档快照。
 generated: 2026-07-09 16:54
-last_updated: 2026-08-25
+last_updated: 2026-09-09
 project: OlfactoryPilot-CN
 project_key: OLFACTORY
 tracking_system: file-system
@@ -45,8 +45,7 @@ development_status:
   4-6-manual-experiment-v3-replacement: review
   epic-4-retrospective: optional
 
-active_specs:
-  - docs/sprint-artifacts/spec-manual-protocol-domain-boundary-docs-alignment.md
+active_specs: []
 
 current_gates:
   - scope: 4-6-manual-experiment-v3-replacement

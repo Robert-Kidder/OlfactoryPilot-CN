@@ -94,46 +94,46 @@ Protocol lease 是最强权威证明。其他补充 predicate 必须能通过 pr
 **执行域边界**
 
 - 先看 Protocol-scoped ownership predicate 如何消除跨域失效。
-  [`actuation_worker.py:3382`](../../app/workers/actuation_worker.py#L3382)
+  [`actuation_worker.py:3382`](../../../app/workers/actuation_worker.py#L3382)
 
 - 架构层固定三域证据与两条安全收敛路径。
-  [`architecture.md:64`](../architecture.md#L64)
+  [`architecture.md:64`](../../architecture.md#L64)
 
 **完整生命周期证据**
 
 - 04/06 五秒链断言真实 receipt 偏序和精确 lease 释放。
-  [`test_manual_experiment_integration.py:103`](../../tests/test_manual_experiment_integration.py#L103)
+  [`test_manual_experiment_integration.py:103`](../../../tests/test_manual_experiment_integration.py#L103)
 
 - Manual 三个排队窗口证明 Protocol 状态不被改写。
-  [`test_manual_experiment_integration.py:189`](../../tests/test_manual_experiment_integration.py#L189)
+  [`test_manual_experiment_integration.py:189`](../../../tests/test_manual_experiment_integration.py#L189)
 
 - Maintenance 复用同一反串扰矩阵。
-  [`test_cleaning_state_machine.py:271`](../../tests/test_cleaning_state_machine.py#L271)
+  [`test_cleaning_state_machine.py:271`](../../../tests/test_cleaning_state_machine.py#L271)
 
 **用户状态与日志**
 
 - 顶部将内部状态映射为持续、可行动的自然中文。
-  [`main_window.py:167`](../../app/views/main_window.py#L167)
+  [`main_window.py:167`](../../../app/views/main_window.py#L167)
 
 - 恢复提示隐藏 receipt 与内部终态术语。
-  [`manual_experiment_view.py:63`](../../app/views/manual_experiment_view.py#L63)
+  [`manual_experiment_view.py:63`](../../../app/views/manual_experiment_view.py#L63)
 
 - 普通阈值 crossing 降噪但保留正式安全审计路径。
-  [`main_controller.py:4021`](../../app/controllers/main_controller.py#L4021)
+  [`main_controller.py:4021`](../../../app/controllers/main_controller.py#L4021)
 
 **文档层级与外围门禁**
 
 - UX 权威改为可用性、任务和行动导向。
-  [`ux-design.md:5`](../ux-design.md#L5)
+  [`ux-design.md:5`](../../ux-design.md#L5)
 
 - 索引只保留权威、状态、证据与历史入口。
-  [`index.md:3`](../index.md#L3)
+  [`index.md:3`](../../index.md#L3)
 
 - 归档声明历史资料不覆盖当前事实。
-  [`README.md:1`](../archive/README.md#L1)
+  [`README.md:1`](../../archive/README.md#L1)
 
 - 动态状态双路径由自动化测试保持一致。
-  [`test_documentation_status.py:7`](../../tests/test_documentation_status.py#L7)
+  [`test_documentation_status.py:7`](../../../tests/test_documentation_status.py#L7)
 
 - 构建门禁确保 PyInstaller 非零退出不被旧产物掩盖。
-  [`run-ci.ps1:24`](../../scripts/run-ci.ps1#L24)
+  [`run-ci.ps1:24`](../../../scripts/run-ci.ps1#L24)

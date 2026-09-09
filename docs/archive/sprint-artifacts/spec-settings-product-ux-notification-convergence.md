@@ -80,55 +80,55 @@ context:
 **Settings 信息架构**
 
 - 双区与全宽详情
-  [`hardware_settings_view.py:362`](../../app/views/hardware_settings_view.py#L362)
+  [`hardware_settings_view.py:362`](../../../app/views/hardware_settings_view.py#L362)
 
 - 四态专用气口块
-  [`hardware_settings_view.py:204`](../../app/views/hardware_settings_view.py#L204)
+  [`hardware_settings_view.py:204`](../../../app/views/hardware_settings_view.py#L204)
 
 - 紧凑线路设备页
-  [`hardware_settings_view.py:617`](../../app/views/hardware_settings_view.py#L617)
+  [`hardware_settings_view.py:617`](../../../app/views/hardware_settings_view.py#L617)
 
 - 权限任务各归其位
-  [`hardware_settings_view.py:850`](../../app/views/hardware_settings_view.py#L850)
+  [`hardware_settings_view.py:850`](../../../app/views/hardware_settings_view.py#L850)
 
 **验证语义**
 
 - 统一产品确认入口
-  [`hardware_settings_view.py:1099`](../../app/views/hardware_settings_view.py#L1099)
+  [`hardware_settings_view.py:1099`](../../../app/views/hardware_settings_view.py#L1099)
 
 - Mock 证据保持隔离
-  [`main_controller.py:3913`](../../app/controllers/main_controller.py#L3913)
+  [`main_controller.py:3913`](../../../app/controllers/main_controller.py#L3913)
 
 - 任务结束安全收尾
-  [`main_controller.py:4152`](../../app/controllers/main_controller.py#L4152)
+  [`main_controller.py:4152`](../../../app/controllers/main_controller.py#L4152)
 
 **通知仲裁**
 
 - 单槽赢家状态机
-  [`notification_coordinator.py:56`](../../app/views/notification_coordinator.py#L56)
+  [`notification_coordinator.py:56`](../../../app/views/notification_coordinator.py#L56)
 
 - 关闭后页面安静
-  [`notification_coordinator.py:236`](../../app/views/notification_coordinator.py#L236)
+  [`notification_coordinator.py:236`](../../../app/views/notification_coordinator.py#L236)
 
 - 同身份原地更新
-  [`manual_experiment_view.py:1102`](../../app/views/manual_experiment_view.py#L1102)
+  [`manual_experiment_view.py:1102`](../../../app/views/manual_experiment_view.py#L1102)
 
 **资源与回归**
 
 - 同步释放 FluentWindow
-  [`conftest.py:77`](../../tests/conftest.py#L77)
+  [`conftest.py:77`](../../../tests/conftest.py#L77)
 
 - 四态选中独立验证
-  [`test_hardware_settings_view.py:657`](../../tests/test_hardware_settings_view.py#L657)
+  [`test_hardware_settings_view.py:657`](../../../tests/test_hardware_settings_view.py#L657)
 
 - 通知不回放积压
-  [`test_notification_coordinator.py:388`](../../tests/test_notification_coordinator.py#L388)
+  [`test_notification_coordinator.py:388`](../../../tests/test_notification_coordinator.py#L388)
 
 - Manual 语义保持不变
-  [`test_manual_experiment_integration.py:697`](../../tests/test_manual_experiment_integration.py#L697)
+  [`test_manual_experiment_integration.py:697`](../../../tests/test_manual_experiment_integration.py#L697)
 
 - 真实窗口单槽集成
-  [`test_product_ui.py:266`](../../tests/test_product_ui.py#L266)
+  [`test_product_ui.py:266`](../../../tests/test_product_ui.py#L266)
 
 - 产品窗口清理契约
-  [`test_test_environment.py:52`](../../tests/test_test_environment.py#L52)
+  [`test_test_environment.py:52`](../../../tests/test_test_environment.py#L52)

@@ -100,57 +100,57 @@ context:
 **配置发布**
 
 - 从保存入口理解边界
-  [`main_controller.py:3797`](../../app/controllers/main_controller.py#L3797)
+  [`main_controller.py:3797`](../../../app/controllers/main_controller.py#L3797)
 
 - 提交后统一刷新
-  [`main_controller.py:4411`](../../app/controllers/main_controller.py#L4411)
+  [`main_controller.py:4411`](../../../app/controllers/main_controller.py#L4411)
 
 - 线路表成为持久配置
-  [`hardware_profile.py:21`](../../app/models/hardware_profile.py#L21)
+  [`hardware_profile.py:21`](../../../app/models/hardware_profile.py#L21)
 
 **验证闭环**
 
 - 结构化生命周期模型
-  [`hardware_verification.py:20`](../../app/models/hardware_verification.py#L20)
+  [`hardware_verification.py:20`](../../../app/models/hardware_verification.py#L20)
 
 - 现场证据受控提交
-  [`hardware_profile_store.py:213`](../../app/services/hardware_profile_store.py#L213)
+  [`hardware_profile_store.py:213`](../../../app/services/hardware_profile_store.py#L213)
 
 - Controller 发布终态
-  [`main_controller.py:4558`](../../app/controllers/main_controller.py#L4558)
+  [`main_controller.py:4558`](../../../app/controllers/main_controller.py#L4558)
 
 **设置体验**
 
 - 设置中心主入口
-  [`hardware_settings_view.py:384`](../../app/views/hardware_settings_view.py#L384)
+  [`hardware_settings_view.py:384`](../../../app/views/hardware_settings_view.py#L384)
 
 - 首页两类设置
-  [`hardware_settings_view.py:606`](../../app/views/hardware_settings_view.py#L606)
+  [`hardware_settings_view.py:606`](../../../app/views/hardware_settings_view.py#L606)
 
 - 线路设备紧凑编辑
-  [`hardware_settings_view.py:750`](../../app/views/hardware_settings_view.py#L750)
+  [`hardware_settings_view.py:750`](../../../app/views/hardware_settings_view.py#L750)
 
 - 占用通道仍可理解
-  [`hardware_settings_view.py:195`](../../app/views/hardware_settings_view.py#L195)
+  [`hardware_settings_view.py:195`](../../../app/views/hardware_settings_view.py#L195)
 
 **共享呈现**
 
 - 编号始终优先
-  [`port_formatting.py:29`](../../app/views/port_formatting.py#L29)
+  [`port_formatting.py:29`](../../../app/views/port_formatting.py#L29)
 
 - 产品色彩集中定义
-  [`product_theme.py:10`](../../app/views/product_theme.py#L10)
+  [`product_theme.py:10`](../../../app/views/product_theme.py#L10)
 
 - Manual 状态分层
-  [`manual_experiment_view.py:96`](../../app/views/manual_experiment_view.py#L96)
+  [`manual_experiment_view.py:96`](../../../app/views/manual_experiment_view.py#L96)
 
 **回归证据**
 
 - alias 停用即时同步
-  [`test_manual_experiment_integration.py:464`](../../tests/test_manual_experiment_integration.py#L464)
+  [`test_manual_experiment_integration.py:464`](../../../tests/test_manual_experiment_integration.py#L464)
 
 - mapping 同版本发布
-  [`test_manual_experiment_integration.py:495`](../../tests/test_manual_experiment_integration.py#L495)
+  [`test_manual_experiment_integration.py:495`](../../../tests/test_manual_experiment_integration.py#L495)
 
 - deadline 单调倒计时
-  [`test_hardware_settings_view.py:606`](../../tests/test_hardware_settings_view.py#L606)
+  [`test_hardware_settings_view.py:606`](../../../tests/test_hardware_settings_view.py#L606)

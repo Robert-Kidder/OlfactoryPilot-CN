@@ -4,7 +4,7 @@
 
 OlfactoryPilot-CN 用于替代原有法国软件 **ProgOlfactoTao**，服务本地嗅觉刺激实验。旧软件依赖 LabView 生态和法文说明，维护、培训和本地化成本较高。新软件需要用 Python 3.11 和 PySide6 实现中文桌面应用，保留旧系统的核心实验能力，并提高安全性、可测试性和可维护性。
 
-产品应让实验人员在 Windows 电脑上安全完成设备连接、硬件方案配置、手动实验、自动实验和数据记录。正式产品范围包含“手动实验”“自动实验”两个实验工作页面，以及作为工具页的“设置”；设置不是第三种实验模式。预测试、协议模式、校准、清洗和呼吸实验不作为当前正式导航页面，呼吸触发未来属于自动实验的一种 trigger strategy。
+产品目标是让实验人员在 Windows 电脑上安全完成设备连接、硬件方案配置、手动实验、未来自动实验和数据记录。当前正式 runtime 只包含“手动实验”和作为工具页的“设置”；设置不是实验模式。未来 Auto 验收后才成为第二个实验工作页。预测试、协议模式、校准、清洗和呼吸实验不作为当前正式导航页面，呼吸触发未来属于自动实验的一种 trigger strategy。
 
 ## 2. 用户与场景
 
@@ -67,7 +67,7 @@ OlfactoryPilot-CN 用于替代原有法国软件 **ProgOlfactoTao**，服务本�
 - FR7.2：界面、错误、提示、日志摘要和帮助入口使用简体中文。
 - FR7.3：最终产品只保留新版界面，不提供新旧界面切换；旧 `PreTestView`、旧 View 计时、重复状态和确认无用的弹窗/代码在新链验收后删除。
 - FR7.4：Settings 后续允许为气口 1–20 配置 enable/disable、alias、external port、internal valve/control channel、NI target、polarity 和 verification state，并继续使用 HardwareProfile/ChannelRegistry/HardwareProfileStore 的 revision、atomic save、last-known-good、rollback 与 verification fingerprint；保存结果必须跨重启生效。
-- FR7.5：“验证此气口”一次只验证一个气口，使用专用 Maintenance/Verification ownership 与 Worker monotonic deadline，始终允许立即安全停止。默认意向约 20 秒、2500 ml/min，但必须服从实际 MFC 上限；只有用户在实体设备端明确确认后才记录 `PHYSICAL_VERIFIED`，mapping 改变后自动失效。本轮不实现该流程。
+- FR7.5：“验证此气口”一次只验证一个气口，使用专用 Maintenance/Verification ownership 与 Worker monotonic deadline，始终允许立即安全停止。默认约 20 秒、1500 ml/min，但必须服从实际 MFC 上限；只有用户在实体设备端明确确认后才记录 `PHYSICAL_VERIFIED`，mapping 改变后自动失效。当前代码已实现基于 fake-real HAL 的完整安全链，production 资格仍必须等待 C.3b 实体 HIL evidence。
 
 ## 4. 非功能需求
 

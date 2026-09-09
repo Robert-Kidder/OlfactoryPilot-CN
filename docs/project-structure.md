@@ -4,7 +4,7 @@
 
 ## 1. 项目目标
 
-OlfactoryPilot-CN 是 Windows 桌面嗅觉刺激实验控制软件，目标是替代原有法国软件 ProgOlfactoTao。项目使用 Python 3.11、PySide6、NI-DAQmx 和 pyserial 实现中文本地化、硬件安全联锁、呼吸校准、阀门控制、协议执行和数据记录。
+OlfactoryPilot-CN 是 Windows 桌面嗅觉刺激实验控制软件，目标是替代原有法国软件 ProgOlfactoTao。项目使用 Python 3.11、PySide6、NI-DAQmx 和 pyserial。当前正式 runtime 只构造手动实验与设置；Auto/Breath、清洗、校准和协议相关模块作为未来或兼容回归资产保留，不代表当前导航已交付。
 
 原法国软件说明书保存在：
 
@@ -80,7 +80,7 @@ app/
 - `config/local_config.example.json`：提交到 Git，作为真实硬件电脑的本机覆盖配置模板。
 - `config/local_config.json`：不提交到 Git，用于保存某台电脑自己的真实 COM 端口、NI 设备名、Alicat 配置和现场校准值。
 
-应用启动时按“默认配置 + 本机覆盖”的顺序合并配置。现场或个人机器特有的值写入本机覆盖配置，通用项目约定才进入 `default_config.json`；这条边界不依赖未来页面设计。
+源码启动时按仓库内“`config/default_config.json` + `config/local_config.json`”的顺序合并配置。打包程序不写安装目录：首次启动在 `%USERPROFILE%/.olfactorypilot/default_config.json` 创建可写配置，后续从该位置读取。现场或个人机器特有的值写入对应可写配置，通用项目约定才进入仓库的 `default_config.json`；这条边界不依赖未来页面设计。
 
 ## 5. docs 目录
 
@@ -104,7 +104,7 @@ app/
 
 ## 6. scripts 目录
 
-- `scripts/run-ci.ps1`：本地执行 `lint`、`test`、`build` 或完整 `ci` 流程。
+- `scripts/run-ci.ps1`：本地执行 `lint`、`test-fast`、`test`、`build` 或完整 `ci` 流程，并传播 Python 原生退出码。
 - `scripts/probe_alicat.py`：Alicat 串口设备探测辅助脚本。
 - `scripts/hil_actuation_benchmark.py`：真实 NI HIL 动作时延与抖动基准脚本。
 
@@ -146,7 +146,7 @@ python -m pytest
 python -m pip install -r requirements.txt
 ```
 
-`requirements-dev.txt` 是开发、测试、检查和打包所需依赖。它先引用 `requirements.txt`，再额外安装 pytest、pytest-qt、ruff、PyInstaller 等工具。
+`requirements-dev.txt` 是开发、测试、检查和打包所需依赖。它先引用 `requirements.txt`，再额外安装 pytest、ruff、PyInstaller 等工具；Qt 测试使用项目 fixture 与 `PySide6.QtTest`，当前未声明 pytest-qt。
 
 安装：
 
@@ -218,7 +218,15 @@ python -m PyInstaller pyinstaller.spec
 - `_bmad/`
 - `_bmad-output/`
 
-`.agents/` 和 `_bmad/` 主要是工具安装、技能和本机配置目录。团队共享的 `_bmad/custom/config.toml` 是唯一纳入 Git 的 `_bmad/` 文件，用于把长期 planning/implementation artifacts 路由到 `docs/`。`_bmad-output/` 是临时工作区，不是长期项目资料的权威来源。
+`.agents/` 和 `_bmad/` 主要是工具安装、技能和本机配置目录。团队共享的 `_bmad/custom/config.toml` 是唯一纳入 Git 的 `_bmad/` 文件，用于把长期 planning/implementation artifacts 路由到 `docs/`。`_bmad-output/` 是临时工作区，不是长期项目资料的权威来源。当前工具基线是 BMAD Method 6.12，实施入口为 `bmad-build`；Node/BMAD 均不属于产品 runtime 或 CI 依赖。
+
+全新 clone 如需该可选工作流，可另行执行：
+
+```powershell
+npx bmad-method@6.12.0 install
+```
+
+若 Windows PowerShell 的 execution policy 拦截 `npx.ps1`，改用 `npx.cmd bmad-method@6.12.0 install`；安装内容仍是固定的 BMAD 6.12.0 工具链。Node/BMAD 始终是可选开发工具，不参与产品 runtime 或 CI。
 
 长期项目资料应整理并保存在：
 
@@ -265,10 +273,13 @@ python -m PyInstaller pyinstaller.spec
 python -m pip install -r requirements-dev.txt
 python -m app.main
 python -m app.main --simulation
+python -m pytest -m "not slow"
 python -m pytest
 python -m ruff check .
 python -m PyInstaller pyinstaller.spec
 ```
+
+也可以使用 `scripts/run-ci.ps1 test-fast|test|lint|build|ci`。PyInstaller 只携带默认配置与本地帮助 PDF，不携带内部 `docs/` 知识库。
 
 ## 14. 文档维护门禁
 

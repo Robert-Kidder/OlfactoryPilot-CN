@@ -86,32 +86,32 @@ pytest 的重定向只处理解析后位于项目根内的 basetemp。相对路�
 **临时目录策略**
 
 - 早期重定向入口
-  [`conftest.py:21`](../../tests/conftest.py#L21)
+  [`conftest.py:21`](../../../tests/conftest.py#L21)
 
 - 会话所有权清理
-  [`conftest.py:53`](../../tests/conftest.py#L53)
+  [`conftest.py:53`](../../../tests/conftest.py#L53)
 
 **30ms 时序契约**
 
 - 确定性 deadline 仲裁
-  [`test_session_writer.py:818`](../../tests/test_session_writer.py#L818)
+  [`test_session_writer.py:818`](../../../tests/test_session_writer.py#L818)
 
 - 隔离 fake clock
-  [`test_session_writer.py:841`](../../tests/test_session_writer.py#L841)
+  [`test_session_writer.py:841`](../../../tests/test_session_writer.py#L841)
 
 **验收覆盖**
 
 - 验证真实 factory
-  [`test_test_environment.py:22`](../../tests/test_test_environment.py#L22)
+  [`test_test_environment.py:22`](../../../tests/test_test_environment.py#L22)
 
 - 覆盖重定向清理
-  [`test_test_environment.py:44`](../../tests/test_test_environment.py#L44)
+  [`test_test_environment.py:44`](../../../tests/test_test_environment.py#L44)
 
 - 拒绝仓库内 temp
-  [`test_test_environment.py:73`](../../tests/test_test_environment.py#L73)
+  [`test_test_environment.py:73`](../../../tests/test_test_environment.py#L73)
 
 - 保留仓库外目录
-  [`test_test_environment.py:88`](../../tests/test_test_environment.py#L88)
+  [`test_test_environment.py:88`](../../../tests/test_test_environment.py#L88)
 
 - 隔离并发会话
-  [`test_test_environment.py:107`](../../tests/test_test_environment.py#L107)
+  [`test_test_environment.py:107`](../../../tests/test_test_environment.py#L107)
