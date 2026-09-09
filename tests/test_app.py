@@ -840,6 +840,7 @@ def test_real_hal_set_flow_verifies_setpoint_readback(monkeypatch):
 
     assert hal.set_flow("A", 123.0) is True
     assert serial_instances[0].commands[0] == b"as0.123\r"
+    assert hal.last_setpoint_readback_sccm("A") == 123.0
 
 
 def test_real_hal_set_flow_fails_on_setpoint_mismatch(monkeypatch):

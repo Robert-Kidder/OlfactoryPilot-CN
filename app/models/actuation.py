@@ -18,6 +18,7 @@ class ActuationCategory(StrEnum):
     PRETEST = "pretest"
     MASTER = "master"
     CLEANING = "cleaning"
+    VERIFICATION = "verification"
 
 
 class ActuationResult(StrEnum):
@@ -86,13 +87,16 @@ class ActuationCommand:
             raise ValueError("duration_ns 必须位于有效正整数范围。")
         if not math.isfinite(float(self.wall_timestamp)):
             raise ValueError("wall_timestamp 必须为有限值。")
-        if self.category == ActuationCategory.CLEANING and (
+        if self.category in {
+            ActuationCategory.CLEANING,
+            ActuationCategory.VERIFICATION,
+        } and (
             not self.operation_id
             or self.generation is None
             or not self.step_id
             or self.action_kind is None
         ):
-            raise ValueError("CLEANING 命令必须包含完整 maintenance identity。")
+            raise ValueError("CLEANING/VERIFICATION 命令必须包含完整 owner identity。")
         if self.generation is not None and self.generation < 0:
             raise ValueError("generation 必须为非负整数。")
         if self.action_kind is not None and self.action_kind != self.action:

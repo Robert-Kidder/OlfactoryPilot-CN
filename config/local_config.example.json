@@ -24,5 +24,12 @@
     "flow_sccm": 1500,
     "open_duration_s": 10,
     "cycles": 3
+  },
+  "hardware_profile": {
+    "verification_config": {
+      "flow_sccm": 1500,
+      "duration_s": 20,
+      "max_approved_flow_sccm": 1500
+    }
   }
 }

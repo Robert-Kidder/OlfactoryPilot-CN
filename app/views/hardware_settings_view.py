@@ -24,6 +24,7 @@ from qfluentwidgets import (
     CaptionLabel,
     CardWidget,
     ComboBox,
+    DoubleSpinBox,
     HeaderCardWidget,
     IconInfoBadge,
     InfoBadge,
@@ -52,6 +53,7 @@ from app.models import (
     HardwareVerificationSnapshot,
     SelectorConfig,
     ValveTargetPreset,
+    VerificationConfig,
     VerificationStatus,
 )
 from app.views.port_formatting import (
@@ -104,6 +106,7 @@ class HardwareProfileDraft:
     alicat_c_unit_id: str = "c"
     revision: int = 0
     target_preset: ValveTargetPreset | None = None
+    verification_config: VerificationConfig = VerificationConfig()
 
     @classmethod
     def from_profile(
@@ -126,6 +129,7 @@ class HardwareProfileDraft:
             alicat_c_unit_id=profile.connections.alicat_c_unit_id,
             revision=revision,
             target_preset=profile.target_preset,
+            verification_config=profile.verification_config,
         )
 
     def to_profile(self) -> HardwareProfile:
@@ -156,6 +160,7 @@ class HardwareProfileDraft:
             max_sample_a_sccm=self.max_sample_a_sccm,
             max_vacuum_c_sccm=self.max_vacuum_c_sccm,
             target_preset=self.target_preset,
+            verification_config=self.verification_config,
         )
 
 
@@ -402,6 +407,8 @@ class HardwareSettingsView(QWidget):
         self.setObjectName("hardwareSettings")
         apply_page_palette(self)
         self._rendering = False
+        self._verification_config_values: dict[str, float] = {}
+        self._invalid_verification_config_reason = ""
         self._snapshot: HardwareSettingsSnapshot | None = None
         self._draft: HardwareProfileDraft | None = None
         self._base_can_mock_verify = False
@@ -415,6 +422,7 @@ class HardwareSettingsView(QWidget):
         self.current_channel_labels: dict[int, BodyLabel] = {}
         self.target_inputs: dict[int, BodyLabel] = {}
         self.polarity_inputs: dict[int, SwitchButton] = {}
+        self.polarity_labels: dict[int, BodyLabel] = {}
         self.enabled_checks: dict[int, SwitchButton] = {}
         self.verification_labels: dict[int, BodyLabel] = {}
         self.verification_hints: dict[int, CaptionLabel] = {}
@@ -479,6 +487,35 @@ class HardwareSettingsView(QWidget):
             self.overview_layout.addWidget(button, (port - 1) // 10, (port - 1) % 10)
         overview.viewLayout.addLayout(self.overview_layout)
         body.addWidget(overview)
+
+        verification_config_card = HeaderCardWidget("验证参数", scroll_content)
+        verification_config_card.viewLayout.setContentsMargins(20, 10, 20, 14)
+        verification_config_layout = QGridLayout()
+        verification_config_layout.setHorizontalSpacing(12)
+        verification_config_layout.setVerticalSpacing(8)
+        self.verification_flow_input = DoubleSpinBox(verification_config_card)
+        self.verification_flow_input.setRange(0.0, 1_000_000_000.0)
+        self.verification_flow_input.setDecimals(1)
+        self.verification_flow_input.setSuffix(" ml/min")
+        self.verification_flow_input.setMaximumWidth(260)
+        self.verification_duration_input = DoubleSpinBox(verification_config_card)
+        self.verification_duration_input.setRange(0.0, 1_000_000_000.0)
+        self.verification_duration_input.setDecimals(1)
+        self.verification_duration_input.setSuffix(" 秒")
+        self.verification_duration_input.setMaximumWidth(180)
+        verification_config_layout.addWidget(CaptionLabel("验证流量"), 0, 0)
+        verification_config_layout.addWidget(self.verification_flow_input, 0, 1)
+        verification_config_layout.addWidget(CaptionLabel("最长验证时间"), 1, 0)
+        verification_config_layout.addWidget(self.verification_duration_input, 1, 1)
+        verification_config_layout.addWidget(
+            CaptionLabel("每次现场启动前会再次显示气口、流量和时间。"),
+            2,
+            0,
+            1,
+            2,
+        )
+        verification_config_card.viewLayout.addLayout(verification_config_layout)
+        body.addWidget(verification_config_card)
 
         editor = HeaderCardWidget("气口 01", scroll_content)
         self.editor_card = editor
@@ -599,6 +636,12 @@ class HardwareSettingsView(QWidget):
         self.verification_positive_button.clicked.connect(
             lambda: self._request_verification_result(True)
         )
+        self.verification_flow_input.valueChanged.connect(
+            lambda value: self._update_verification_config(flow_sccm=float(value))
+        )
+        self.verification_duration_input.valueChanged.connect(
+            lambda value: self._update_verification_config(duration_s=float(value))
+        )
         self.page_stack.setCurrentWidget(self.settings_home)
         self.port_actions.hide()
         self.select_port(1)
@@ -677,9 +720,7 @@ class HardwareSettingsView(QWidget):
         name_input.setPlaceholderText("例如：薄荷；留空时显示气口编号")
         internal_input = ValveComboBox()
         internal_input.setMaximumWidth(280)
-        polarity = SwitchButton()
-        polarity.setOnText("高电平开启")
-        polarity.setOffText("低电平开启")
+        polarity = BodyLabel("高电平开启")
         verification = InfoBadge.info("需要验证", parent=page)
         verification.setObjectName("verificationStatus")
         test_button = PushButton(FIF.PLAY, "验证气口", page)
@@ -687,7 +728,7 @@ class HardwareSettingsView(QWidget):
         self.name_inputs[port] = name_input
         self.internal_inputs[port] = internal_input
         self.enabled_checks[port] = enabled
-        self.polarity_inputs[port] = polarity
+        self.polarity_labels[port] = polarity
         self.verification_labels[port] = verification
         self.mock_buttons[port] = test_button
         hint = CaptionLabel("", page)
@@ -716,11 +757,6 @@ class HardwareSettingsView(QWidget):
         enabled.checkedChanged.connect(
             lambda value, p=port: self._update_channel(p, enabled=value)
         )
-        polarity.checkedChanged.connect(
-            lambda value, p=port: self._update_channel(
-                p, active_high=value, mapping_changed=True
-            )
-        )
         test_button.clicked.connect(lambda _checked=False, p=port: self._request_mock_verification(p))
         return page
 
@@ -740,8 +776,18 @@ class HardwareSettingsView(QWidget):
         layout.addWidget(channel_value, 0, 1)
         layout.addWidget(CaptionLabel("输出线路"), 1, 0)
         layout.addWidget(target_value, 1, 1)
+        polarity = SwitchButton(page)
+        polarity.setOnText("高电平开启")
+        polarity.setOffText("低电平开启")
+        polarity.setEnabled(False)
+        polarity.checkedChanged.connect(
+            lambda value, p=port: self._update_channel(
+                p, active_high=value, mapping_changed=True
+            )
+        )
+        self.polarity_inputs[port] = polarity
         layout.addWidget(CaptionLabel("开启方式"), 2, 0)
-        layout.addWidget(BodyLabel("在气口配置中编辑", page), 2, 1)
+        layout.addWidget(polarity, 2, 1)
         custom = CaptionLabel("", page)
         self.custom_mapping_labels[port] = custom
         layout.addWidget(custom, 3, 0, 1, 2)
@@ -872,11 +918,37 @@ class HardwareSettingsView(QWidget):
         )
         if enabled and not editable:
             self.edit_lines_button.setChecked(False)
-            return
         for valve, field in self.preset_target_inputs.items():
             field.setVisible(editable)
             self.preset_target_labels[valve].setVisible(not editable)
         self.edit_lines_button.setText("完成编辑" if editable else "编辑线路")
+        for field in self.polarity_inputs.values():
+            field.setEnabled(editable)
+
+    def _update_verification_config(self, **changes) -> None:
+        if self._rendering or self._draft is None:
+            return
+        if not self._verification_config_values:
+            self._verification_config_values = self._draft.verification_config.to_dict()
+        self._verification_config_values.update(changes)
+        try:
+            verification_config = VerificationConfig.from_value(
+                self._verification_config_values
+            )
+        except ValueError as exc:
+            self._invalid_verification_config_reason = str(exc)
+            self.status_label.setText(f"验证参数无效：{exc}")
+            self.save_button.setEnabled(False)
+            for button in self.mock_buttons.values():
+                button.setEnabled(False)
+            return
+        self._invalid_verification_config_reason = ""
+        self._draft = replace(self._draft, verification_config=verification_config)
+        candidate = self._validate_draft()
+        if candidate is not None:
+            self.candidate_changed.emit(candidate)
+        if self._snapshot is not None:
+            self._apply_permissions(self._snapshot)
 
     def _update_connections(self, **changes) -> None:
         if self._rendering or self._draft is None:
@@ -994,6 +1066,16 @@ class HardwareSettingsView(QWidget):
             self.alicat_unit_inputs["A"].setText(self._draft.alicat_a_unit_id)
             self.alicat_unit_inputs["B"].setText(self._draft.alicat_b_unit_id)
             self.alicat_unit_inputs["C"].setText(self._draft.alicat_c_unit_id)
+            self._verification_config_values = (
+                self._draft.verification_config.to_dict()
+            )
+            self._invalid_verification_config_reason = ""
+            self.verification_flow_input.setValue(
+                self._draft.verification_config.flow_sccm
+            )
+            self.verification_duration_input.setValue(
+                self._draft.verification_config.duration_s
+            )
             for channel in self._draft.channels:
                 port = channel.external_port
                 self.name_inputs[port].setText(channel.display_name)
@@ -1005,6 +1087,9 @@ class HardwareSettingsView(QWidget):
                 )
                 self.target_inputs[port].setText(channel.target)
                 self.polarity_inputs[port].setChecked(channel.active_high)
+                self.polarity_labels[port].setText(
+                    "高电平开启" if channel.active_high else "低电平开启"
+                )
                 self.enabled_checks[port].setChecked(channel.enabled)
                 self._render_verification_badge(port, channel)
                 custom = snapshot.profile.channel_uses_custom_target(port)
@@ -1174,7 +1259,6 @@ class HardwareSettingsView(QWidget):
             for control in (
                 self.name_inputs[port],
                 self.internal_inputs[port],
-                self.polarity_inputs[port],
                 self.enabled_checks[port],
             ):
                 control.setEnabled(editable)
@@ -1183,6 +1267,7 @@ class HardwareSettingsView(QWidget):
                 (snapshot.can_mock_verify or snapshot.can_request_physical_verification)
                 and not snapshot.save_in_progress
                 and not snapshot.verification_in_progress
+                and not self._invalid_verification_config_reason
                 and channel is not None
                 and channel.enabled
                 and channel.internal_valve is not None
@@ -1211,13 +1296,18 @@ class HardwareSettingsView(QWidget):
             self.profile_name_input,
             self.serial_port_input,
             self.ni_device_ids_input,
+            self.verification_flow_input,
+            self.verification_duration_input,
             *self.alicat_unit_inputs.values(),
         ):
             control.setEnabled(editable)
         self.edit_lines_button.setEnabled(editable)
         self._set_line_editing(self.edit_lines_button.isChecked())
         self.save_button.setEnabled(
-            snapshot.can_save and dirty and not snapshot.save_in_progress
+            snapshot.can_save
+            and dirty
+            and not snapshot.save_in_progress
+            and not self._invalid_verification_config_reason
         )
         self.rollback_button.setEnabled(
             snapshot.can_save and snapshot.rollback_available and not snapshot.save_in_progress
@@ -1253,8 +1343,8 @@ class HardwareSettingsView(QWidget):
         )
         self.verification_progress.setVisible(running)
         self.verification_stop_button.setVisible(verification.can_stop)
-        self.verification_negative_button.setVisible(awaiting)
-        self.verification_positive_button.setVisible(awaiting)
+        self.verification_negative_button.setVisible(running or awaiting)
+        self.verification_positive_button.setVisible(running or awaiting)
         self.verification_panel.setVisible(snapshot.verification_in_progress)
         self.editor_stack.setVisible(not snapshot.verification_in_progress)
         if snapshot.verification_in_progress:
@@ -1273,6 +1363,14 @@ class HardwareSettingsView(QWidget):
                 self.verification_progress.setValue(
                     min(100, int(elapsed_ns * 100 / duration_ns))
                 )
+            elif verification.phase is HardwareVerificationPhase.PREPARING:
+                self.verification_task_title.setText(
+                    f"正在准备验证气口 {port:02d}"
+                )
+                self.verification_task_detail.setText(
+                    "正在确认全关、验证流量与安全路由，请等待准备完成"
+                )
+                self.verification_remaining_label.setText("准备中")
             else:
                 self.verification_task_title.setText(
                     f"气口 {port:02d} 是否正确出气？"
@@ -1486,6 +1584,8 @@ class HardwareSettingsView(QWidget):
             self.rollback_requested.emit(self._snapshot.revision)
 
     def _request_mock_verification(self, external_port: int) -> None:
+        if self._invalid_verification_config_reason:
+            return
         candidate = self._validate_draft()
         if candidate is None:
             return
@@ -1499,9 +1599,13 @@ class HardwareSettingsView(QWidget):
         if self.isVisible():
             duration = snapshot.simulation_verification_duration_s
             duration_text = f"{duration:g} 秒"
+            flow_text = f"{candidate.verification_config.flow_sccm:g} ml/min"
             dialog = MessageBox(
                 f"验证气口 {external_port:02d}",
-                f"开始后，请确认气口 {external_port:02d} 是否出气。\n\n约 {duration_text}",
+                (
+                    f"开始后，请确认气口 {external_port:02d} 是否出气。\n\n"
+                    f"验证流量：{flow_text}\n最长时间：{duration_text}"
+                ),
                 self.window(),
             )
             dialog.yesButton.setText("开始验证")
@@ -1520,7 +1624,11 @@ class HardwareSettingsView(QWidget):
     def _request_verification_result(self, positive: bool) -> None:
         if (
             self._snapshot is not None
-            and self._snapshot.verification.awaiting_user_confirmation
+            and self._snapshot.verification.phase
+            in {
+                HardwareVerificationPhase.RUNNING,
+                HardwareVerificationPhase.AWAITING_CONFIRMATION,
+            }
             and self._snapshot.verification_port is not None
         ):
             self.verification_result_requested.emit(

@@ -41,12 +41,32 @@ def _channel(port: int, *, status: VerificationStatus = VerificationStatus.PENDI
     )
     if status is VerificationStatus.PENDING:
         return base
+    details = (
+        {
+            "run_identity": "physical-run-1",
+            "profile_revision": 0,
+            "ni_target": base.target,
+            "flow_setpoint_sccm": 1500,
+            "flow_readback_sccm": 1499,
+            "open_command_id": "physical-run-1:open",
+            "close_command_id": "physical-run-1:close",
+            "opened_at_ns": 100,
+            "closed_at_ns": 200,
+            "action_completed": True,
+            "safe_closed": True,
+            "authorized": True,
+            "user_confirmed": True,
+        }
+        if status is VerificationStatus.PHYSICAL_VERIFIED
+        else {}
+    )
     return replace(
         base,
         verification=ChannelVerification(
             status=status,
             fingerprint=base.mapping_fingerprint,
             verified_at="2026-08-18",
+            **details,
         ),
     )
 
@@ -90,6 +110,38 @@ def test_settings_renders_20_port_candidate_and_natural_verification_text(qtbot)
     assert view.serial_port_input.text() == "COM6"
     assert view.ni_device_ids_input.text() == "Dev1, Dev2"
     assert view.alicat_unit_inputs["A"].text() == "a"
+
+
+def test_verification_parameters_reject_without_silent_clamp_then_accept(qtbot) -> None:
+    view = HardwareSettingsView()
+    qtbot.addWidget(view)
+    candidates = []
+    view.candidate_changed.connect(candidates.append)
+    view.render_profile(
+        _profile(),
+        revision=1,
+        can_save=True,
+        can_mock_verify=True,
+        can_request_physical_verification=True,
+    )
+
+    view.verification_flow_input.setValue(2000)
+    assert view.verification_flow_input.value() == 2000
+    assert view._draft.verification_config.flow_sccm == 1500
+    assert not view.save_button.isEnabled()
+    assert all(not button.isEnabled() for button in view.mock_buttons.values())
+    assert "现场证据支持范围" in view.status_label.text()
+
+    view.verification_duration_input.setValue(61)
+    assert view.verification_duration_input.value() == 61
+    assert "1–60 秒" in view.status_label.text()
+    view.verification_flow_input.setValue(1400)
+    assert not candidates
+    view.verification_duration_input.setValue(30)
+
+    assert candidates[-1].verification_config.flow_sccm == 1400
+    assert candidates[-1].verification_config.duration_s == 30
+    assert view.mock_buttons[2].isEnabled()
 
 
 def test_settings_default_profile_keeps_physical_two_by_ten_mapping(qtbot) -> None:
@@ -481,6 +533,9 @@ def test_reverting_mapping_field_restores_original_verified_state(qtbot) -> None
         can_mock_verify=True,
     )
 
+    assert not view.polarity_inputs[2].isEnabled()
+    view.edit_lines_button.click()
+    assert view.polarity_inputs[2].isEnabled()
     view.polarity_inputs[2].setChecked(False)
     assert view.draft.channels[1].mapping_changed
     assert view.overview_buttons[2].property("portState") == "pending"
@@ -489,6 +544,21 @@ def test_reverting_mapping_field_restores_original_verified_state(qtbot) -> None
     assert not view.draft.channels[1].mapping_changed
     assert view.overview_buttons[2].property("portState") == "physical"
     assert view.mock_buttons[2].isEnabled()
+
+
+def test_connected_snapshot_disables_advanced_target_and_polarity(qtbot) -> None:
+    view = HardwareSettingsView()
+    qtbot.addWidget(view)
+    view.render_profile(_profile(), revision=3, can_save=True)
+    view.edit_lines_button.click()
+    assert view.polarity_inputs[2].isEnabled()
+    assert not view.preset_target_inputs[2].isHidden()
+
+    view.render_permissions(can_save=False)
+
+    assert not view.edit_lines_button.isChecked()
+    assert not view.polarity_inputs[2].isEnabled()
+    assert view.preset_target_inputs[2].isHidden()
 
 
 def test_clean_revert_restores_verification_permission(qtbot) -> None:
@@ -571,6 +641,35 @@ def test_verification_progress_is_owned_by_selected_port_editor(qtbot) -> None:
     assert view.editor_card.headerLabel.text() == "气口 02"
     assert view.section_pivot.isEnabled()
     assert all(tile.isEnabled() for tile in view.overview_buttons.values())
+
+
+def test_preparing_verification_shows_only_preparation_and_stop(qtbot) -> None:
+    profile = _profile()
+    channel = profile.registry.by_external_port(2)
+    view = HardwareSettingsView()
+    qtbot.addWidget(view)
+    view.render_profile(
+        profile,
+        revision=3,
+        can_save=False,
+        verification=HardwareVerificationSnapshot(
+            phase=HardwareVerificationPhase.PREPARING,
+            external_port=2,
+            duration_s=20,
+            can_stop=True,
+            awaiting_user_confirmation=False,
+            run_identity="preparing-run",
+            revision=3,
+            fingerprint=channel.mapping_fingerprint,
+        ),
+    )
+
+    assert not view.verification_stop_button.isHidden()
+    assert view.verification_negative_button.isHidden()
+    assert view.verification_positive_button.isHidden()
+    assert view.verification_task_title.text() == "正在准备验证气口 02"
+    assert "正在确认全关" in view.verification_task_detail.text()
+    assert view.verification_remaining_label.text() == "准备中"
 
 
 def test_awaiting_confirmation_only_offers_result_actions(qtbot) -> None:
@@ -774,7 +873,7 @@ def test_new_save_feedback_restarts_its_single_timer(qtbot) -> None:
     assert view._save_feedback_timer.remainingTime() > previous_remaining
 
 
-def test_physical_request_uses_same_concise_confirmation(qtbot, monkeypatch) -> None:
+def test_physical_request_confirms_port_flow_and_maximum_time(qtbot, monkeypatch) -> None:
     captured = {}
 
     class _Button:
@@ -815,7 +914,10 @@ def test_physical_request_uses_same_concise_confirmation(qtbot, monkeypatch) -> 
     assert physical == [2]
     assert mock == []
     assert captured["title"] == "验证气口 02"
-    assert captured["content"] == "开始后，请确认气口 02 是否出气。\n\n约 20 秒"
+    assert captured["content"] == (
+        "开始后，请确认气口 02 是否出气。\n\n"
+        "验证流量：1500 ml/min\n最长时间：20 秒"
+    )
     assert captured["yes"].text == "开始验证"
     assert captured["cancel"].text == "取消"
     assert all(

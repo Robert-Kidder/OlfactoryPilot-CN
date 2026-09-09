@@ -922,43 +922,19 @@ def test_verification_evidence_save_failure_uses_concise_global_copy(
     )
 
 
-def test_production_verification_stub_never_persists_physical_evidence(
-    tmp_path, qtbot, monkeypatch
+def test_production_verification_entry_is_available_after_all_gates(
+    tmp_path, qtbot
 ) -> None:
     controller, _ = _controller(tmp_path)
     controller.state.simulation_mode = False
     window = MainWindow(controller, controller.state)
     qtbot.addWidget(window)
     controller.bind_view(window)
-    monkeypatch.setattr(
-        controller.flow_worker,
-        "acquire_lease",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("production stub must not acquire Flow lease")
-        ),
-    )
-    monkeypatch.setattr(
-        controller,
-        "_execute_isolated_mock_verification",
-        lambda *_args: (_ for _ in ()).throw(
-            AssertionError("production stub must not execute Mock actuation")
-        ),
-    )
     controller._render_hardware_profile()
 
-    assert not window.hardware_settings_view.mock_buttons[2].isEnabled()
+    assert window.hardware_settings_view.mock_buttons[2].isEnabled()
     assert not window.hardware_settings_view.name_inputs[2].isEnabled()
-    window.hardware_settings_view.select_port(2)
-
-    controller.handle_hardware_mock_verify_requested(
-        2, controller.state.hardware_profile
-    )
-
-    assert "现场验证未开放" in window.hardware_settings_view.status_label.text()
-    assert (
-        window.hardware_settings_view.verification_hints[2].text()
-        == "现场验证暂不可用"
-    )
+    assert "现场验证未开放" not in window.hardware_settings_view.status_label.text()
     assert not (tmp_path / "local_config.json").exists()
 
 

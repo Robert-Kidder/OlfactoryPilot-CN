@@ -5,7 +5,7 @@ import json
 import math
 import re
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from typing import Any
 
@@ -15,6 +15,12 @@ HARDWARE_PROFILE_SCHEMA_VERSION = 1
 EXTERNAL_PORTS = tuple(range(1, 21))
 DEFAULT_MAX_FLOW_SCCM = 5000.0
 DEFAULT_NI_DEVICE_IDS = ("Dev1", "Dev2")
+
+
+def _default_verification_config():
+    from .hardware_verification import VerificationConfig
+
+    return VerificationConfig()
 
 
 @dataclass(frozen=True, slots=True)
@@ -185,6 +191,19 @@ class ChannelVerification:
     fingerprint: str = ""
     verified_at: str = ""
     note: str = ""
+    run_identity: str = ""
+    profile_revision: int | None = None
+    ni_target: str = ""
+    flow_setpoint_sccm: float | None = None
+    flow_readback_sccm: float | None = None
+    open_command_id: str = ""
+    close_command_id: str = ""
+    opened_at_ns: int | None = None
+    closed_at_ns: int | None = None
+    action_completed: bool = False
+    safe_closed: bool = False
+    authorized: bool = False
+    user_confirmed: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "status", VerificationStatus(self.status))
@@ -197,6 +216,49 @@ class ChannelVerification:
         object.__setattr__(self, "fingerprint", fingerprint)
         object.__setattr__(self, "verified_at", str(self.verified_at).strip())
         object.__setattr__(self, "note", str(self.note).strip())
+        object.__setattr__(self, "run_identity", str(self.run_identity).strip())
+        object.__setattr__(self, "open_command_id", str(self.open_command_id).strip())
+        object.__setattr__(self, "close_command_id", str(self.close_command_id).strip())
+        if self.profile_revision is not None and (
+            type(self.profile_revision) is not int or self.profile_revision < 0
+        ):
+            raise ValueError("验证证据 profile_revision 无效。")
+        ni_target = str(self.ni_target).strip()
+        if ni_target:
+            normalize_digital_target(ni_target)
+        object.__setattr__(self, "ni_target", ni_target)
+        for name in ("flow_setpoint_sccm", "flow_readback_sccm"):
+            raw = getattr(self, name)
+            if raw is None:
+                continue
+            value = _finite_number(raw, name)
+            if value < 0:
+                raise ValueError(f"{name} 不得为负数。")
+            object.__setattr__(self, name, value)
+        for name in ("opened_at_ns", "closed_at_ns"):
+            raw = getattr(self, name)
+            if raw is not None and (type(raw) is not int or raw < 0):
+                raise ValueError(f"{name} 必须是非负整数或 null。")
+        if (
+            self.opened_at_ns is not None
+            and self.closed_at_ns is not None
+            and self.closed_at_ns < self.opened_at_ns
+        ):
+            raise ValueError("closed_at_ns 不得早于 opened_at_ns。")
+        if (
+            self.open_command_id
+            and self.close_command_id
+            and self.open_command_id == self.close_command_id
+        ):
+            raise ValueError("open_command_id 与 close_command_id 必须不同。")
+        for name in (
+            "action_completed",
+            "safe_closed",
+            "authorized",
+            "user_confirmed",
+        ):
+            if type(getattr(self, name)) is not bool:
+                raise ValueError(f"{name} 必须是 JSON boolean。")
 
     @property
     def verified(self) -> bool:
@@ -205,7 +267,38 @@ class ChannelVerification:
             VerificationStatus.PHYSICAL_VERIFIED,
         }
 
-    def to_dict(self) -> dict[str, str]:
+    def physical_evidence_complete_for(self, ni_target: str) -> bool:
+        """Return whether persisted production evidence contains the full contract."""
+
+        if self.status is not VerificationStatus.PHYSICAL_VERIFIED:
+            return False
+        try:
+            target_matches = bool(self.ni_target) and normalize_digital_target(
+                self.ni_target
+            ) == normalize_digital_target(ni_target)
+        except ValueError:
+            return False
+        return bool(
+            target_matches
+            and self.run_identity
+            and self.profile_revision is not None
+            and self.flow_setpoint_sccm is not None
+            and self.flow_setpoint_sccm > 0
+            and self.flow_readback_sccm is not None
+            and self.flow_readback_sccm > 0
+            and self.open_command_id
+            and self.close_command_id
+            and self.open_command_id != self.close_command_id
+            and self.opened_at_ns is not None
+            and self.closed_at_ns is not None
+            and self.closed_at_ns >= self.opened_at_ns
+            and self.action_completed
+            and self.safe_closed
+            and self.authorized
+            and self.user_confirmed
+        )
+
+    def to_dict(self) -> dict[str, Any]:
         value = {
             "status": self.status.value,
             "fingerprint": self.fingerprint,
@@ -213,6 +306,25 @@ class ChannelVerification:
         }
         if self.note:
             value["note"] = self.note
+        optional = {
+            "run_identity": self.run_identity,
+            "profile_revision": self.profile_revision,
+            "ni_target": self.ni_target,
+            "flow_setpoint_sccm": self.flow_setpoint_sccm,
+            "flow_readback_sccm": self.flow_readback_sccm,
+            "open_command_id": self.open_command_id,
+            "close_command_id": self.close_command_id,
+            "opened_at_ns": self.opened_at_ns,
+            "closed_at_ns": self.closed_at_ns,
+        }
+        value.update({key: item for key, item in optional.items() if item not in {None, ""}})
+        if self.status is VerificationStatus.PHYSICAL_VERIFIED or self.run_identity:
+            value.update(
+                action_completed=self.action_completed,
+                safe_closed=self.safe_closed,
+                authorized=self.authorized,
+                user_confirmed=self.user_confirmed,
+            )
         return value
 
 
@@ -283,11 +395,16 @@ class ChannelDescriptor:
 
     @property
     def verification_valid(self) -> bool:
-        return bool(
+        basic_valid = bool(
             self.mapping_fingerprint
             and self.verification.verified
             and self.verification.fingerprint == self.mapping_fingerprint
         )
+        if not basic_valid:
+            return False
+        if self.verification.status is VerificationStatus.PHYSICAL_VERIFIED:
+            return self.verification.physical_evidence_complete_for(self.target)
+        return True
 
     def verification_valid_for(self, *, allow_mock: bool = False) -> bool:
         if not self.verification_valid:
@@ -471,6 +588,7 @@ class HardwareProfile:
     max_sample_a_sccm: float = DEFAULT_MAX_FLOW_SCCM
     max_vacuum_c_sccm: float = DEFAULT_MAX_FLOW_SCCM
     target_preset: ValveTargetPreset | None = None
+    verification_config: Any = field(default_factory=_default_verification_config)
 
     def __post_init__(self) -> None:
         version = _strict_int(self.schema_version, "HardwareProfile schema_version")
@@ -489,6 +607,11 @@ class HardwareProfile:
             self.target_preset, ValveTargetPreset
         ):
             raise ValueError("target_preset 必须是 ValveTargetPreset。")
+        from .hardware_verification import VerificationConfig
+
+        if not isinstance(self.verification_config, VerificationConfig):
+            raise ValueError("verification_config 必须是 VerificationConfig。")
+        self.verification_config.validate_for_max_sample(self.max_sample_a_sccm)
         normalized_channels = tuple(
             channel.invalidate_stale_verification() for channel in self.channels
         )
@@ -625,6 +748,7 @@ class HardwareProfile:
         }
         if self.target_preset is not None:
             value["target_preset"] = self.target_preset.to_dict()
+        value["verification_config"] = self.verification_config.to_dict()
         return value
 
     @classmethod
@@ -647,6 +771,7 @@ class HardwareProfile:
                 "connections",
                 "channels",
                 "target_preset",
+                "verification_config",
             },
             "hardware_profile",
         )
@@ -679,6 +804,9 @@ class HardwareProfile:
             max_sample_a_sccm=limits.get("sample_a", DEFAULT_MAX_FLOW_SCCM),
             max_vacuum_c_sccm=limits.get("vacuum_c", DEFAULT_MAX_FLOW_SCCM),
             target_preset=target_preset,
+            verification_config=_parse_verification_config(
+                raw.get("verification_config")
+            ),
         )
 
 
@@ -744,7 +872,25 @@ def _parse_channel(raw: Any) -> ChannelDescriptor:
         raise ValueError("channel.verification 必须是 JSON 对象。")
     _reject_unknown_keys(
         verification_raw,
-        {"status", "fingerprint", "verified_at", "note"},
+        {
+            "status",
+            "fingerprint",
+            "verified_at",
+            "note",
+            "run_identity",
+            "profile_revision",
+            "ni_target",
+            "flow_setpoint_sccm",
+            "flow_readback_sccm",
+            "open_command_id",
+            "close_command_id",
+            "opened_at_ns",
+            "closed_at_ns",
+            "action_completed",
+            "safe_closed",
+            "authorized",
+            "user_confirmed",
+        },
         "channel.verification",
     )
     try:
@@ -753,6 +899,19 @@ def _parse_channel(raw: Any) -> ChannelDescriptor:
             fingerprint=verification_raw.get("fingerprint", ""),
             verified_at=verification_raw.get("verified_at", ""),
             note=verification_raw.get("note", ""),
+            run_identity=verification_raw.get("run_identity", ""),
+            profile_revision=verification_raw.get("profile_revision"),
+            ni_target=verification_raw.get("ni_target", ""),
+            flow_setpoint_sccm=verification_raw.get("flow_setpoint_sccm"),
+            flow_readback_sccm=verification_raw.get("flow_readback_sccm"),
+            open_command_id=verification_raw.get("open_command_id", ""),
+            close_command_id=verification_raw.get("close_command_id", ""),
+            opened_at_ns=verification_raw.get("opened_at_ns"),
+            closed_at_ns=verification_raw.get("closed_at_ns"),
+            action_completed=verification_raw.get("action_completed", False),
+            safe_closed=verification_raw.get("safe_closed", False),
+            authorized=verification_raw.get("authorized", False),
+            user_confirmed=verification_raw.get("user_confirmed", False),
         )
     except ValueError as exc:
         raise ValueError(f"机外气口 {raw.get('external_port')}: {exc}") from exc
@@ -768,6 +927,12 @@ def _parse_channel(raw: Any) -> ChannelDescriptor:
         )
     except ValueError as exc:
         raise ValueError(f"机外气口 {raw.get('external_port')}: {exc}") from exc
+
+
+def _parse_verification_config(raw: Any):
+    from .hardware_verification import VerificationConfig
+
+    return VerificationConfig.from_value(raw)
 
 
 def _parse_selector(raw: Any, *, required: bool) -> SelectorConfig | None:

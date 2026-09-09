@@ -131,7 +131,7 @@ def test_production_availability_requires_matching_physical_verification() -> No
     profile = _default_profile()
     original = profile.registry.by_external_port(2)
     pending = replace(original, verification=replace(original.verification, status=VerificationStatus.PENDING))
-    physical = replace(
+    incomplete_physical = replace(
         original,
         verification=replace(
             original.verification,
@@ -139,10 +139,32 @@ def test_production_availability_requires_matching_physical_verification() -> No
             fingerprint=original.mapping_fingerprint,
         ),
     )
+    physical = replace(
+        original,
+        verification=replace(
+            original.verification,
+            status=VerificationStatus.PHYSICAL_VERIFIED,
+            fingerprint=original.mapping_fingerprint,
+            run_identity="physical-run-1",
+            profile_revision=0,
+            ni_target=original.target,
+            flow_setpoint_sccm=1500,
+            flow_readback_sccm=1499,
+            open_command_id="physical-run-1:open",
+            close_command_id="physical-run-1:close",
+            opened_at_ns=100,
+            closed_at_ns=200,
+            action_completed=True,
+            safe_closed=True,
+            authorized=True,
+            user_confirmed=True,
+        ),
+    )
 
     assert pending.enabled and not pending.available
     assert original.verification.status is VerificationStatus.MOCK_VERIFIED
     assert not original.available
+    assert not incomplete_physical.available
     assert physical.available
 
 

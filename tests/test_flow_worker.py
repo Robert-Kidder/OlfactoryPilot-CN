@@ -79,6 +79,58 @@ def test_manual_flow_requires_exact_manual_lease_identity() -> None:
     assert worker.submit(wrong) is False
 
 
+def test_verification_lease_accepts_only_a_only_or_full_zero_commands() -> None:
+    service = _FlowService()
+    worker = FlowWorker(service)
+    token = worker.acquire_lease(
+        DeviceLeaseKind.VERIFICATION,
+        operation_id="verification-1",
+        generation=4,
+    )
+    assert token is not None
+
+    base = FlowCommand(
+        "verification-flow",
+        0,
+        1,
+        "verification",
+        1500,
+        0,
+        0,
+        "verification",
+        operation_id="verification-1",
+        generation=4,
+        lease_token=token.token,
+    )
+    assert not worker.submit(replace(base, command_id="bad-b", b=1))
+    assert not worker.submit(replace(base, command_id="bad-mode", mode="rest"))
+    assert worker.submit(base)
+    assert worker.process_ready() == 1
+    assert service.calls == ["verification"]
+
+    zero = replace(
+        base,
+        command_id="verification-zero",
+        sequence=2,
+        mode="verification_a_zero",
+        a=0,
+    )
+    assert worker.submit(zero)
+    assert worker.process_ready() == 1
+    assert service.calls[-1] == "safe_stop_a_zero"
+
+    all_zero = replace(
+        zero,
+        command_id="verification-all-zero",
+        sequence=3,
+        mode="verification_zero",
+    )
+    assert worker.submit(all_zero)
+    assert worker.process_ready() == 1
+    assert service.calls[-1] == "zero"
+    assert worker.release_lease(token)
+
+
 def test_protocol_lease_rejects_while_queued_flow_still_owns_order() -> None:
     service = _FlowService()
     worker = FlowWorker(service)

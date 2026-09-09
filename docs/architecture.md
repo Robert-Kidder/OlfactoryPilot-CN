@@ -155,11 +155,12 @@ Auto external-trigger ingress 与 canonical execution core 必须解耦。USB-65
 - `HardwareProfile.target_preset` 是可持久化的标准线路表；兼容读取旧 `valve_mapping.variants["20-channel"]`，保存时同步旧字段。`HardwareProfile` descriptor 仍是运行 authority。控制通道变化必须同步解析 target，target 或 polarity 变化必须使对应验证指纹失效。
 - 验证结果通过独立 CAS/atomic evidence 事务写入：revision 与单口 mapping fingerprint 任一不匹配即拒绝，事务只能更新该口 verification，不能改变 `external_port/internal_valve/target/active_high`。
 - 三层路由为面板气口 `external_port` → 控制通道 `internal_valve` → resolved NI `target`。默认八路关系是 02→02、04→03、06→04、08→05、12→06、14→07、16→08、18→09；运行时不从面板编号推导控制通道，也不把 preset 作为第二份可变 runtime authority。
-- verification 使用独立 lease 和结构化 presentation snapshot，phase 至少包含 IDLE、RUNNING、AWAITING_CONFIRMATION 与 FINISHED，并携带 external port、monotonic started/deadline、duration、can-stop、结果和 revision/fingerprint。用户文案不是程序状态来源，UI timer 只按 deadline 更新显示。
-- simulation 只在 connected/ready/safe idle、clean saved revision 时运行单口 Mock；控制动作完成后保留 lease 并等待用户确认。正向确认持久化 `MOCK_VERIFIED`，负向确认持久化 `FAILED`，立即停止持久化 `INCOMPLETE`。production physical handler 在 HIL commissioning 前保持 no-actuation stub，不能写入 `PHYSICAL_VERIFIED`；后续物理实现必须同时提交可信 action-completed、safe-closed、authorized 与 user-confirmed 合同。
+- verification 使用独立 lease 和结构化 presentation snapshot，phase 至少包含 IDLE、PREPARING、RUNNING、AWAITING_CONFIRMATION 与 FINISHED，并携带 external port、monotonic started/deadline、duration、can-stop、结果和 revision/fingerprint。用户文案不是程序状态来源，UI timer 只按 deadline 更新显示。
+- simulation 只在 connected/ready/safe idle、clean saved revision 时运行单口 Mock；控制动作完成后保留 lease 并等待用户确认。正向确认持久化 `MOCK_VERIFIED`，负向确认持久化 `FAILED`，立即停止持久化 `INCOMPLETE`。production physical verification 只在 Verification ownership 下运行：全阀 close receipt 后发送唯一 A-only flow command，等待 matching receipt 与 fresh SAFE/readback，再切 selector odor 并打开目标；deadline 从目标 open receipt 的 `actual_ns` 起算。提前结果、停止与 timeout 均由 Worker 按目标 close→A=0→selector compensation→其余目标安全的顺序收口。只有 action-completed、safe-closed、authorized、user-confirmed 以及完整 run/revision/fingerprint/command/receipt 身份一致的合同可 CAS 写入 `PHYSICAL_VERIFIED`；任何不完整或冲突证据进入 fail-closed/recovery。
 
 ### C.3 HIL commissioning checklist
 
+- C.3a 只交付可由 fake real HAL 自动验证的 commissioning readiness，不执行真实 HIL；现场步骤与空白证据记录固定在 `sprint-artifacts/evidence/c-3b-hil-commissioning-checklist.md`，必须等待人工批准后逐项执行。
 - 用真实气路逐口确认面板编号、控制通道、NI target 和实际出口一致，并确认 target/polarity 编辑后实际输出及验证失效行为。
 - 接入真实 NI/Alicat/串口后确认保存连接字段提示“重启后生效”，重启创建的新 HAL 使用最新已保存配置，连接期间不热加载硬件对象。
 - 确认 RUNNING deadline 由 Controller/Worker 关闭阀门，UI timer 停止或卡顿不影响安全关闭；核对 open/close receipt、超时和故障路径。

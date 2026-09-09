@@ -45,7 +45,7 @@ OlfactoryPilot-CN 是用于嗅觉刺激实验的 Windows 桌面控制软件，�
 - Protocol、Manual、Maintenance 是三个互斥执行域；每个域只接受能够由 lease、command category/identity、executor context 或 safe-transition identity 明确归属本域的证据。
 - Protocol lease 是 Protocol ownership 的最强证据。仅加载文档、非零 epoch、任意 non-idle lease、普通 flow ready、active valve 或 possibly-open 状态都不能单独证明 Protocol 正在执行。
 - Manual/Maintenance 的 lease、pending command、valve、possibly-open 和 readiness 不得触发 Protocol invalidation；真正 active Protocol 的 readiness 丢失仍按现有 fail-closed 路径处理。
-- 单口验证使用独立 Verification ownership 和结构化 phase/deadline/result presentation，只接受已保存且 revision/fingerprint 与运行时一致的 profile。动作结束必须进入用户确认；模拟正向确认可生成 `MOCK_VERIFIED`，production stub 不得生成 `PHYSICAL_VERIFIED`。
+- 单口验证使用独立 Verification ownership 和结构化 phase/deadline/result presentation，只接受已保存且 revision/fingerprint 与运行时一致的 profile。真实验证在 Verification lease 下按“气味阀1–20全关→A-only flow 与 fresh SAFE/readback→selector odor→目标阀 open”启动，并按“目标阀 close→A=0→selector compensation→其余目标安全”收口；任一 stale、late、duplicate、conflicting 或失败回执都必须 fail-closed。模拟正向确认只生成 `MOCK_VERIFIED`；真实动作完成、安全收口和用户确认三者的完整可信合同才能生成 `PHYSICAL_VERIFIED`。
 - 配置编辑与验证是两种权限：mapping 及普通保存仅允许设备断开且 owner 全部 handoff；验证则要求设备已连接、ready、safe idle、无未保存 draft 和竞争 owner。验证 evidence 只更新匹配 revision/fingerprint 的单口状态，不触发 connected mapping hot reload。成功保存后只由 Controller 从 Store commit 发布一次新 revision，同步 state registry、Settings 和 Manual；View 不自行读取配置文件。
 
 ## 目标用户

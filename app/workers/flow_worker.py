@@ -601,8 +601,15 @@ class FlowWorker(QThread):
             generation=command.generation,
             token=command.lease_token,
         )
+        verification_match = self._lease.matches(
+            kind=DeviceLeaseKind.VERIFICATION,
+            operation_id=command.operation_id,
+            generation=command.generation,
+            token=command.lease_token,
+        )
         if (
             not maintenance_match
+            and not verification_match
             and self._execution_epoch is not None
             and command.execution_epoch != self._execution_epoch
         ):
@@ -613,8 +620,28 @@ class FlowWorker(QThread):
             return "maintenance 已持有设备租约，流量命令身份不匹配。"
         if command.source == "manual:experiment" and not manual_match:
             return "manual 流量命令租约身份不匹配。"
+        if command.source == "verification" and not verification_match:
+            return "verification 流量命令租约身份不匹配。"
         if manual_match:
             return "" if command.source == "manual:experiment" else "manual 租约拒绝非手动命令。"
+        if verification_match:
+            if command.source != "verification":
+                return "verification 租约拒绝非验证命令。"
+            verification_a_only = bool(
+                command.mode == "verification"
+                and command.a > 0
+                and abs(command.b) <= 1e-9
+                and abs(command.c) <= 1e-9
+            )
+            verification_zero = bool(
+                command.mode in {"verification_a_zero", "verification_zero"}
+                and all(abs(value) <= 1e-9 for value in (command.a, command.b, command.c))
+            )
+            return (
+                ""
+                if verification_a_only or verification_zero
+                else "verification 只接受 A-only 非零或 A/B/C 全零命令。"
+            )
         if lease.kind not in {DeviceLeaseKind.IDLE, DeviceLeaseKind.MAINTENANCE}:
             return f"{lease.kind.value} 已持有设备租约，流量命令已取消。"
         if lease.kind == DeviceLeaseKind.IDLE and command.lease_token:
@@ -646,6 +673,10 @@ class FlowWorker(QThread):
         if command.mode == "safe_stop_a_zero":
             return self.service.apply_a_zero()
         if command.mode == "zero":
+            return self.service.apply_zero()
+        if command.mode == "verification_a_zero":
+            return self.service.apply_a_zero()
+        if command.mode == "verification_zero":
             return self.service.apply_zero()
         return self.service.apply_flows(
             a_target=command.a,

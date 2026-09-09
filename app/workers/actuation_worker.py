@@ -25,11 +25,17 @@ from app.models import (
     CleaningStatus,
     DeviceLeaseKind,
     DeviceLeaseToken,
+    HardwareVerificationPhase,
     ManualExperimentOutcome,
     ManualExperimentPlan,
     ManualExperimentResult,
     ManualExperimentSnapshot,
     ManualExperimentStatus,
+    PhysicalVerificationContract,
+    PhysicalVerificationOutcome,
+    PhysicalVerificationPlan,
+    PhysicalVerificationResult,
+    PhysicalVerificationWorkerSnapshot,
     ProtocolExecutionState,
     ProtocolExecutionStatus,
     ProtocolGateEvent,
@@ -157,6 +163,10 @@ class InterlockSnapshot:
         if command.category == ActuationCategory.CLEANING:
             if self.device_lease != "maintenance":
                 return "maintenance 未持有设备租约，已取消清洗动作。"
+            return ""
+        if command.category == ActuationCategory.VERIFICATION:
+            if self.device_lease != DeviceLeaseKind.VERIFICATION.value:
+                return "verification 未持有设备租约，已取消现场验证动作。"
             return ""
         if self.device_lease == "maintenance":
             return "maintenance 设备租约已占用，已拒绝其他动作。"
@@ -434,6 +444,8 @@ class ActuationWorker(QThread):
     cleaning_result_ready = Signal(object)
     manual_snapshot_ready = Signal(object)
     manual_result_ready = Signal(object)
+    physical_verification_snapshot_ready = Signal(object)
+    physical_verification_result_ready = Signal(object)
     protocol_safe_stop_handoff_requested = Signal(object)
 
     def __init__(
@@ -452,6 +464,7 @@ class ActuationWorker(QThread):
         sample_transform: Callable[[float], float] | None = None,
         flow_submitter: Callable[[FlowCommand], bool] | None = None,
         cleaning_flow_ready_timeout_ms: int = 5000,
+        verification_flow_ready_timeout_ms: int = 5000,
         safe_stop_receipt_timeout_ms: int = 2000,
         manual_receipt_timeout_ms: int = 2000,
         parent: QObject | None = None,
@@ -481,6 +494,9 @@ class ActuationWorker(QThread):
         self._flow_submitter = flow_submitter
         self._cleaning_flow_ready_timeout_ns = (
             max(1, int(cleaning_flow_ready_timeout_ms)) * 1_000_000
+        )
+        self._verification_flow_ready_timeout_ns = (
+            max(1, int(verification_flow_ready_timeout_ms)) * 1_000_000
         )
         self._safe_stop_receipt_timeout_ns = (
             max(1, int(safe_stop_receipt_timeout_ms)) * 1_000_000
@@ -556,6 +572,22 @@ class ActuationWorker(QThread):
         self._cleaning_stop_outcome = CleaningOutcome.FAILED
         self._cleaning_terminal_status = CleaningStatus.FAILED
         self._cleaning_failure_reason = ""
+        self._verification_plan: PhysicalVerificationPlan | None = None
+        self._verification_start_pending = False
+        self._verification_finish_pending: PhysicalVerificationOutcome | None = None
+        self._verification_lease_token: DeviceLeaseToken | None = None
+        self._verification_phase = "idle"
+        self._verification_expected: dict[str, dict[str, Any]] = {}
+        self._verification_receipts: dict[str, ActuationReceipt] = {}
+        self._verification_pending_flow: FlowCommand | None = None
+        self._verification_receipt_deadlines: dict[str, int] = {}
+        self._verification_requested_outcome = PhysicalVerificationOutcome.TIMED_OUT
+        self._verification_open_command_id = ""
+        self._verification_close_command_id = ""
+        self._verification_opened_at_ns: int | None = None
+        self._verification_closed_at_ns: int | None = None
+        self._verification_flow_readback = 0.0
+        self._verification_recovery_required = False
         self._manual_snapshot = ManualExperimentSnapshot()
         self._manual_plan: ManualExperimentPlan | None = None
         self._manual_lease_token: DeviceLeaseToken | None = None
@@ -606,6 +638,55 @@ class ActuationWorker(QThread):
                 self._queued_owner_message(
                     "manual_start",
                     {"plan": plan, "lease_token": lease_token},
+                )
+            )
+            self._condition.notify_all()
+            return True
+
+    def post_physical_verification_start(
+        self,
+        plan: PhysicalVerificationPlan,
+        *,
+        lease_token: DeviceLeaseToken,
+    ) -> bool:
+        with self._condition:
+            if (
+                not self._accepting
+                or self._verification_start_pending
+                or self._verification_plan is not None
+                or self._manual_active()
+                or self._cleaning_snapshot.status
+                in {CleaningStatus.PREPARING, CleaningStatus.RUNNING, CleaningStatus.STOPPING}
+            ):
+                return False
+            self._verification_start_pending = True
+            self._messages.append(
+                self._queued_owner_message(
+                    "verification_start",
+                    {"plan": plan, "lease_token": lease_token},
+                )
+            )
+            self._condition.notify_all()
+            return True
+
+    def post_physical_verification_finish(
+        self,
+        outcome: PhysicalVerificationOutcome,
+        *,
+        reason: str = "",
+    ) -> bool:
+        requested = PhysicalVerificationOutcome(outcome)
+        with self._condition:
+            if (
+                (self._verification_plan is None and not self._verification_start_pending)
+                or self._verification_finish_pending is not None
+            ):
+                return False
+            self._verification_finish_pending = requested
+            self._messages.appendleft(
+                self._queued_owner_message(
+                    "verification_finish",
+                    {"outcome": requested, "reason": str(reason)},
                 )
             )
             self._condition.notify_all()
@@ -953,8 +1034,14 @@ class ActuationWorker(QThread):
     def submit(self, command: ActuationCommand) -> bool:
         """Owner-side enqueue. External producers should post intents, not mutate state."""
         with self._condition:
+            if (
+                command.category is ActuationCategory.VERIFICATION
+                and not self._is_authorized_verification_business_command(command)
+            ):
+                return False
             if command.valve == 0 and not (
                 self._is_authorized_cleaning_selector_command(command)
+                or self._is_authorized_verification_selector_command(command)
                 or self._is_authorized_selector_business_command(command)
             ):
                 return False
@@ -1117,6 +1204,63 @@ class ActuationWorker(QThread):
             and command.action == expected_action
         )
 
+    def _is_authorized_verification_selector_command(
+        self,
+        command: ActuationCommand,
+    ) -> bool:
+        plan = self._verification_plan
+        expected = self._verification_expected.get(command.command_id)
+        if plan is None or expected is None or expected.get("command") != command:
+            return False
+        role = expected.get("role")
+        if role not in {"selector_odor", "selector_safe"}:
+            return False
+        route = (
+            SelectorRoute.ODOR
+            if role == "selector_odor"
+            else plan.selector.safe_route
+        )
+        try:
+            step = self.valve_service.selector_route_step(route)
+        except (AttributeError, ValueError):
+            return False
+        expected_action = ActuationAction.OPEN if step.state else ActuationAction.CLOSE
+        return bool(
+            command.operation_id == plan.run_identity
+            and command.generation == plan.revision
+            and command.step_id == role
+            and command.action_kind == command.action == expected_action
+            and command.target
+            and normalize_digital_target(command.target)
+            == normalize_digital_target(f"{step.device}/{step.line}")
+        )
+
+    def _is_authorized_verification_business_command(
+        self,
+        command: ActuationCommand,
+    ) -> bool:
+        plan = self._verification_plan
+        expected = self._verification_expected.get(command.command_id)
+        if (
+            plan is None
+            or expected is None
+            or expected.get("command") != command
+            or command.operation_id != plan.run_identity
+            or command.generation != plan.revision
+        ):
+            return False
+        if command.valve == 0:
+            return self._is_authorized_verification_selector_command(command)
+        return bool(
+            expected.get("role") == "target_open"
+            and command.step_id == "target_open"
+            and command.valve == plan.internal_valve
+            and command.action_kind == command.action == ActuationAction.OPEN
+            and command.target
+            and normalize_digital_target(command.target)
+            == normalize_digital_target(plan.target)
+        )
+
     def post_start(self, *, document, readiness, lease_epoch: int | None = None) -> None:
         self._post_message(
             "start",
@@ -1214,7 +1358,10 @@ class ActuationWorker(QThread):
         )
 
     def post_flow_result(self, result: FlowCommandResult) -> None:
-        self._post_message("flow_result", {"flow_result": result})
+        self._post_message(
+            "flow_result",
+            {"flow_result": result, "received_ns": int(self._clock_ns())},
+        )
         if not self.isRunning() and self._writer_hal() is None:
             self.process_ready()
 
@@ -1341,6 +1488,27 @@ class ActuationWorker(QThread):
             self.flow_result_ready.emit(FlowCommandResult(command=command, result=result))
         elif kind == "flow_result":
             self.flow_result_ready.emit(replace(payload["flow_result"], stale=True))
+        elif kind == "verification_start":
+            plan = payload.get("plan")
+            self._verification_start_pending = False
+            self._verification_finish_pending = None
+            if isinstance(plan, PhysicalVerificationPlan):
+                self.physical_verification_result_ready.emit(
+                    PhysicalVerificationResult(
+                        plan=plan,
+                        outcome=PhysicalVerificationOutcome.INCOMPLETE,
+                        reason=message,
+                        lease_releasable=True,
+                    )
+                )
+        elif kind == "verification_finish":
+            self._verification_finish_pending = None
+            if self._verification_plan is not None:
+                self._emit_physical_verification_result(
+                    PhysicalVerificationOutcome.RECOVERY_REQUIRED,
+                    message,
+                    lease_releasable=False,
+                )
 
     def submit_emergency_close(self, valve: int, *, reason: str) -> ActuationCommand:
         if int(valve) == 0:
@@ -1498,6 +1666,15 @@ class ActuationWorker(QThread):
 
     def consume_receipt(self, receipt: ActuationReceipt) -> None:
         receipt = self._enforce_selector_deadline(receipt)
+        if (
+            self._verification_plan is not None
+            and (
+                receipt.operation_id == self._verification_plan.run_identity
+                or receipt.command_id in self._verification_expected
+            )
+        ):
+            self._consume_verification_receipt(receipt)
+            return
         if (
             receipt.operation_id is not None
             and self._cleaning_plan is not None
@@ -2760,6 +2937,7 @@ class ActuationWorker(QThread):
                 "safe_stop_fence",
                 "safe_stop_selector",
                 "stop",
+                "verification_finish",
             }
             with self._flow_result_mailbox_lock:
                 if self._flow_result_mailbox:
@@ -2849,6 +3027,8 @@ class ActuationWorker(QThread):
                 "safe_stop_selector",
                 "start",
                 "stop",
+                "verification_finish",
+                "verification_start",
             }
             for index, message in enumerate(self._messages):
                 if message[0] in {"recorder_bind", "recorder_fence"}:
@@ -2888,6 +3068,46 @@ class ActuationWorker(QThread):
             return None
 
     def _handle_message(self, kind: str, payload: dict[str, Any]) -> None:
+        if kind == "verification_start":
+            self._begin_physical_verification(**payload)
+            return
+        if kind == "verification_finish":
+            if self._verification_plan is None and self._verification_start_pending:
+                cancelled_plan = None
+                with self._condition:
+                    retained = deque()
+                    for message in self._messages:
+                        if message.kind == "verification_start":
+                            candidate = message.payload.get("plan")
+                            if isinstance(candidate, PhysicalVerificationPlan):
+                                cancelled_plan = candidate
+                            continue
+                        retained.append(message)
+                    self._messages = retained
+                    self._verification_start_pending = False
+                if cancelled_plan is not None:
+                    self.physical_verification_result_ready.emit(
+                        PhysicalVerificationResult(
+                            plan=cancelled_plan,
+                            outcome=payload["outcome"],
+                            reason=payload.get("reason")
+                            or "现场验证在 owner 消费启动前已取消。",
+                            lease_releasable=True,
+                        )
+                    )
+                self._verification_finish_pending = None
+                return
+            self._begin_physical_verification_stop(**payload)
+            return
+        if kind == "verification_deadline":
+            self._handle_physical_verification_deadline(**payload)
+            return
+        if kind == "verification_receipt_timeout":
+            self._handle_physical_verification_receipt_timeout(**payload)
+            return
+        if kind == "verification_flow_ready_timeout":
+            self._handle_physical_verification_flow_ready_timeout(**payload)
+            return
         if kind == "manual_start":
             self._begin_manual(**payload)
             return
@@ -2929,6 +3149,13 @@ class ActuationWorker(QThread):
             return
         if kind == "flow_result":
             wrapped = payload["flow_result"]
+            if self._is_verification_flow_result(wrapped):
+                self.flow_result_ready.emit(wrapped)
+                self._consume_verification_flow_result(
+                    wrapped,
+                    received_ns=payload.get("received_ns"),
+                )
+                return
             if self._is_manual_flow_result(wrapped):
                 self.flow_result_ready.emit(wrapped)
                 self._consume_manual_flow_result(
@@ -2990,6 +3217,42 @@ class ActuationWorker(QThread):
                 if reason:
                     self._fail_manual(reason)
                 return
+        if self._verification_plan is not None and kind in {
+            "interlock_changed",
+            "readiness",
+            "input_error",
+            "recorder_failed",
+            "stop",
+        }:
+            if kind in {"input_error", "recorder_failed", "stop"}:
+                self._begin_physical_verification_stop(
+                    outcome=PhysicalVerificationOutcome.RECOVERY_REQUIRED,
+                    reason=payload.get("message", "验证期间安全状态发生变化。"),
+                )
+                return
+            if self._verification_phase == "flow_wait_safe":
+                self._continue_verification_after_fresh_safe()
+                return
+            interlock = self.interlock.read()[1]
+            closing = self._verification_phase in {
+                "target_close",
+                "flow_a_zero",
+                "flow_all_zero",
+                "selector_safe",
+                "other_close",
+            }
+            invalid = (
+                not interlock.connected
+                or not interlock.hardware_ready
+                or interlock.device_lease != DeviceLeaseKind.VERIFICATION.value
+                or (not closing and interlock.safety_state != "SAFE")
+            )
+            if invalid:
+                self._begin_physical_verification_stop(
+                    outcome=PhysicalVerificationOutcome.RECOVERY_REQUIRED,
+                    reason=payload.get("message", "验证期间安全联锁已失效。"),
+                )
+            return
         if kind == "safe_stop_fence":
             self._begin_safe_stop_fence(**payload)
             return
@@ -3732,6 +3995,836 @@ class ActuationWorker(QThread):
                 monotonic_ns=self._clock_ns(),
             )
         )
+
+    def _publish_physical_verification_snapshot(
+        self,
+        phase: HardwareVerificationPhase,
+        *,
+        message: str = "",
+    ) -> None:
+        plan = self._verification_plan
+        if plan is None:
+            return
+        started_ns = self._verification_opened_at_ns
+        deadline_ns = (
+            None
+            if started_ns is None
+            else started_ns + int(plan.duration_s * 1_000_000_000)
+        )
+        self.physical_verification_snapshot_ready.emit(
+            PhysicalVerificationWorkerSnapshot(
+                plan=plan,
+                phase=phase,
+                started_ns=started_ns,
+                deadline_ns=deadline_ns,
+                message=str(message),
+            )
+        )
+
+    def _begin_physical_verification(
+        self,
+        *,
+        plan: PhysicalVerificationPlan,
+        lease_token: DeviceLeaseToken,
+    ) -> None:
+        self._verification_start_pending = False
+        _, interlock, _unsafe_latched = self.interlock.read()
+        reason = ""
+        if (
+            lease_token.kind is not DeviceLeaseKind.VERIFICATION
+            or lease_token.operation_id != plan.run_identity
+            or lease_token.generation != plan.revision
+        ):
+            reason = "verification lease identity 不匹配。"
+        elif interlock.device_lease != DeviceLeaseKind.VERIFICATION.value:
+            reason = "verification lease 尚未发布到动作联锁。"
+        elif (
+            not interlock.connected
+            or not interlock.hardware_ready
+            or interlock.safety_state != "SAFE"
+        ):
+            reason = "现场验证启动时硬件或安全联锁未就绪。"
+        elif self.valve_service is None or self._flow_submitter is None:
+            reason = "现场验证硬件 owner 不可用。"
+        elif self._manual_active() or self._cleaning_snapshot.status in {
+            CleaningStatus.PREPARING,
+            CleaningStatus.RUNNING,
+            CleaningStatus.STOPPING,
+        }:
+            reason = "其他动作 owner 尚未 handoff。"
+        self._verification_plan = plan
+        self._verification_lease_token = lease_token
+        self._verification_phase = "initial_close"
+        self._verification_expected.clear()
+        self._verification_receipts.clear()
+        self._verification_pending_flow = None
+        self._verification_receipt_deadlines.clear()
+        self._verification_requested_outcome = PhysicalVerificationOutcome.TIMED_OUT
+        self._verification_open_command_id = ""
+        self._verification_close_command_id = ""
+        self._verification_opened_at_ns = None
+        self._verification_closed_at_ns = None
+        self._verification_flow_readback = 0.0
+        self._verification_recovery_required = False
+        if reason:
+            self._emit_physical_verification_result(
+                PhysicalVerificationOutcome.RECOVERY_REQUIRED,
+                reason,
+                lease_releasable=False,
+            )
+            return
+        self._publish_physical_verification_snapshot(
+            HardwareVerificationPhase.PREPARING,
+            message="已取得验证专用控制权，正在确认气味阀 1–20 全部关闭。",
+        )
+        for ordinal, (valve, target, physical_level) in enumerate(
+            plan.close_targets,
+            1,
+        ):
+            device, line = target.split("/", 1)
+            if not self._submit_verification_target_command(
+                role="initial_close",
+                step_id=f"initial-close-{ordinal}",
+                valve=valve,
+                device=device,
+                line=line,
+                action=ActuationAction.CLOSE,
+                category=ActuationCategory.SAFETY,
+                physical_level=physical_level,
+            ):
+                return
+
+    def _submit_verification_target_command(
+        self,
+        *,
+        role: str,
+        step_id: str,
+        valve: int,
+        device: str | None,
+        line: str,
+        action: ActuationAction,
+        category: ActuationCategory,
+        physical_level: bool | None = None,
+    ) -> bool:
+        plan = self._verification_plan
+        if plan is None:
+            return False
+        self._sequence += 1
+        command_id = f"{plan.run_identity}:{plan.revision}:{step_id}:{self._sequence}"
+        command = ActuationCommand(
+            command_id=command_id,
+            execution_epoch=0,
+            arm_epoch=0,
+            sequence=self._sequence,
+            trial_id=None,
+            trial_index=None,
+            valve=int(valve),
+            action=action,
+            category=category,
+            expected_ns=int(self._clock_ns()),
+            duration_ns=None,
+            wall_timestamp=float(self._wall_clock()),
+            safety_generation=self.interlock.read()[0],
+            target_device=device,
+            target_line=line,
+            operation_id=plan.run_identity,
+            generation=plan.revision,
+            step_id=step_id,
+            action_kind=action,
+            physical_level=physical_level,
+        )
+        self._verification_expected[command_id] = {"role": role, "command": command}
+        if not self.submit(command):
+            self._verification_expected.pop(command_id, None)
+            self._abort_physical_verification(
+                f"现场验证命令无法进入动作队列：{step_id}",
+                recovery_required=action is ActuationAction.CLOSE,
+            )
+            return False
+        deadline_ns = int(self._clock_ns()) + self._safe_stop_receipt_timeout_ns
+        self._verification_receipt_deadlines[command_id] = deadline_ns
+        self._sequence += 1
+        heapq.heappush(
+            self._deadline_heap,
+            (
+                deadline_ns,
+                4,
+                self._sequence,
+                "verification_receipt_timeout",
+                {"run_identity": plan.run_identity, "command_id": command_id},
+            ),
+        )
+        return True
+
+    def _submit_verification_flow(
+        self,
+        *,
+        zero: bool,
+        all_zero: bool = False,
+    ) -> bool:
+        plan = self._verification_plan
+        token = self._verification_lease_token
+        if plan is None or token is None or self._flow_submitter is None:
+            self._abort_physical_verification(
+                "验证流量 owner 不可用。", recovery_required=True
+            )
+            return False
+        self._sequence += 1
+        command = FlowCommand(
+            command_id=(
+                f"{plan.run_identity}:{plan.revision}:"
+                f"{'flow-all-zero' if all_zero else 'a-zero' if zero else 'flow-start'}:"
+                f"{self._sequence}"
+            ),
+            execution_epoch=0,
+            sequence=self._sequence,
+            mode=(
+                "verification_zero"
+                if all_zero
+                else "verification_a_zero"
+                if zero
+                else "verification"
+            ),
+            a=0.0 if zero else plan.flow_sccm,
+            b=0.0,
+            c=0.0,
+            source="verification",
+            operation_id=plan.run_identity,
+            generation=plan.revision,
+            lease_token=token.token,
+        )
+        self._verification_pending_flow = command
+        self._verification_phase = (
+            "flow_all_zero" if all_zero else "flow_a_zero" if zero else "flow_start"
+        )
+        if not self._flow_submitter(command):
+            self._verification_pending_flow = None
+            self._abort_physical_verification(
+                "验证流量命令未被 FlowWorker 接受。",
+                recovery_required=zero,
+            )
+            return False
+        deadline_ns = int(self._clock_ns()) + self._safe_stop_receipt_timeout_ns
+        self._verification_receipt_deadlines[command.command_id] = deadline_ns
+        self._sequence += 1
+        heapq.heappush(
+            self._deadline_heap,
+            (
+                deadline_ns,
+                4,
+                self._sequence,
+                "verification_receipt_timeout",
+                {"run_identity": plan.run_identity, "command_id": command.command_id},
+            ),
+        )
+        return True
+
+    def _is_verification_flow_result(self, wrapped: FlowCommandResult) -> bool:
+        plan = self._verification_plan
+        return bool(
+            plan is not None
+            and wrapped.command.source == "verification"
+            and (
+                wrapped.command.operation_id == plan.run_identity
+                or (
+                    self._verification_pending_flow is not None
+                    and wrapped.command.command_id
+                    == self._verification_pending_flow.command_id
+                )
+            )
+        )
+
+    def _consume_verification_flow_result(
+        self,
+        wrapped: FlowCommandResult,
+        *,
+        received_ns: int | None = None,
+    ) -> None:
+        expected = self._verification_pending_flow
+        phase = self._verification_phase
+        self._verification_pending_flow = None
+        observed_ns = int(self._clock_ns()) if received_ns is None else int(received_ns)
+        deadline_ns = self._verification_receipt_deadlines.pop(
+            wrapped.command.command_id,
+            None,
+        )
+        if expected is None or wrapped.command != expected:
+            self._abort_physical_verification(
+                "验证 flow receipt 陈旧、重复或完整身份冲突。",
+                recovery_required=True,
+            )
+            return
+        if deadline_ns is None or observed_ns > deadline_ns:
+            self._abort_physical_verification(
+                "验证 flow receipt 超过 monotonic deadline。",
+                recovery_required=True,
+            )
+            return
+        result = wrapped.result
+        values_match = (
+            math.isfinite(float(result.a))
+            and math.isfinite(float(result.b))
+            and math.isfinite(float(result.c))
+            and abs(float(result.b)) <= 1e-9
+            and abs(float(result.c)) <= 1e-9
+            and (
+                abs(float(result.a)) <= 1e-9
+                if phase in {"flow_a_zero", "flow_all_zero"}
+                else abs(float(result.a) - expected.a) <= 1e-9
+            )
+        )
+        try:
+            a_readback = float(result.a_setpoint_readback_sccm)
+            b_readback = (
+                None
+                if result.b_setpoint_readback_sccm is None
+                else float(result.b_setpoint_readback_sccm)
+            )
+            c_readback = (
+                None
+                if result.c_setpoint_readback_sccm is None
+                else float(result.c_setpoint_readback_sccm)
+            )
+        except (TypeError, ValueError, OverflowError):
+            a_readback = math.nan
+            b_readback = None
+            c_readback = None
+        readbacks_match = math.isfinite(a_readback) and (
+            (
+                abs(a_readback) <= 1e-9
+                and b_readback is not None
+                and c_readback is not None
+                and math.isfinite(b_readback)
+                and math.isfinite(c_readback)
+                and abs(b_readback) <= 1e-9
+                and abs(c_readback) <= 1e-9
+            )
+            if phase == "flow_all_zero"
+            else abs(a_readback) <= 1e-9
+            if phase == "flow_a_zero"
+            else (
+                abs(a_readback - expected.a) <= 1e-9
+                and b_readback is not None
+                and c_readback is not None
+                and math.isfinite(b_readback)
+                and math.isfinite(c_readback)
+                and abs(b_readback) <= 1e-9
+                and abs(c_readback) <= 1e-9
+            )
+        )
+        if (
+            not result.success
+            or wrapped.stale
+            or not values_match
+            or not readbacks_match
+        ):
+            self._abort_physical_verification(
+                result.message
+                or "验证 flow receipt 缺少或未确认实际 Alicat setpoint 回读。",
+                recovery_required=True,
+            )
+            return
+        if phase == "flow_start":
+            self._verification_flow_readback = a_readback
+            self.interlock.arm_airflow_monitor()
+            self._verification_phase = "flow_wait_safe"
+            ready_deadline_ns = int(self._clock_ns()) + self._verification_flow_ready_timeout_ns
+            self._sequence += 1
+            heapq.heappush(
+                self._deadline_heap,
+                (
+                    ready_deadline_ns,
+                    5,
+                    self._sequence,
+                    "verification_flow_ready_timeout",
+                    {"run_identity": expected.operation_id},
+                ),
+            )
+            self._continue_verification_after_fresh_safe()
+            return
+        if phase == "flow_a_zero":
+            self.interlock.disarm_airflow_monitor()
+            self._verification_phase = "selector_safe"
+            self._submit_verification_selector(safe=True)
+            return
+        if phase == "flow_all_zero":
+            self._verification_phase = "other_close"
+            self._submit_verification_other_closes()
+            return
+        self._abort_physical_verification(
+            "验证 flow receipt 到达了不允许推进的阶段。",
+            recovery_required=True,
+        )
+
+    def _continue_verification_after_fresh_safe(self) -> None:
+        if self._verification_phase != "flow_wait_safe":
+            return
+        _, interlock, _unsafe_latched = self.interlock.read()
+        if (
+            not interlock.connected
+            or not interlock.hardware_ready
+            or interlock.device_lease != DeviceLeaseKind.VERIFICATION.value
+        ):
+            self._abort_physical_verification(
+                "验证等待气流时设备连接已失效。", recovery_required=True
+            )
+            return
+        if interlock.safety_state != "SAFE":
+            self._abort_physical_verification(
+                "验证流量回读不是新鲜 SAFE 状态。", recovery_required=True
+            )
+            return
+        if not interlock.airflow_fresh_after_arm:
+            return
+        if not self.interlock.clear_unsafe_latch():
+            self._abort_physical_verification(
+                "验证流量回读不是新鲜 SAFE 状态。", recovery_required=True
+            )
+            return
+        plan = self._verification_plan
+        if plan is not None:
+            with self._condition:
+                self._deadline_heap = [
+                    item
+                    for item in self._deadline_heap
+                    if not (
+                        item[3] == "verification_flow_ready_timeout"
+                        and item[4].get("run_identity") == plan.run_identity
+                    )
+                ]
+                heapq.heapify(self._deadline_heap)
+        self._verification_phase = "selector_odor"
+        self._submit_verification_selector(safe=False)
+
+    def _handle_physical_verification_flow_ready_timeout(
+        self,
+        *,
+        run_identity: str,
+    ) -> None:
+        plan = self._verification_plan
+        if (
+            plan is None
+            or plan.run_identity != run_identity
+            or self._verification_phase != "flow_wait_safe"
+        ):
+            return
+        self._abort_physical_verification(
+            "验证非零流量后等待新鲜 SAFE 状态超时。",
+            recovery_required=True,
+        )
+
+    def _submit_verification_selector(self, *, safe: bool) -> bool:
+        plan = self._verification_plan
+        if plan is None or self.valve_service is None:
+            return False
+        route = plan.selector.safe_route if safe else SelectorRoute.ODOR
+        try:
+            step = self.valve_service.selector_route_step(route)
+        except ValueError as exc:
+            self._abort_physical_verification(str(exc), recovery_required=True)
+            return False
+        return self._submit_verification_target_command(
+            role="selector_safe" if safe else "selector_odor",
+            step_id="selector_safe" if safe else "selector_odor",
+            valve=0,
+            device=step.device,
+            line=step.line,
+            action=ActuationAction.OPEN if step.state else ActuationAction.CLOSE,
+            category=(ActuationCategory.SAFETY if safe else ActuationCategory.VERIFICATION),
+            physical_level=None,
+        )
+
+    def _submit_verification_target_open(self) -> bool:
+        plan = self._verification_plan
+        if plan is None:
+            return False
+        device, line = plan.target.split("/", 1)
+        return self._submit_verification_target_command(
+            role="target_open",
+            step_id="target_open",
+            valve=plan.internal_valve,
+            device=device,
+            line=line,
+            action=ActuationAction.OPEN,
+            category=ActuationCategory.VERIFICATION,
+            physical_level=None,
+        )
+
+    def _submit_verification_other_closes(self) -> None:
+        plan = self._verification_plan
+        if plan is None:
+            return
+        for ordinal, (valve, target, physical_level) in enumerate(
+            plan.close_targets,
+            1,
+        ):
+            if valve == plan.internal_valve:
+                continue
+            device, line = target.split("/", 1)
+            if not self._submit_verification_target_command(
+                role="other_close",
+                step_id=f"other-close-{ordinal}",
+                valve=valve,
+                device=device,
+                line=line,
+                action=ActuationAction.CLOSE,
+                category=ActuationCategory.SAFETY,
+                physical_level=physical_level,
+            ):
+                return
+        if not any(
+            item["role"] == "other_close"
+            for item in self._verification_expected.values()
+        ):
+            self._complete_physical_verification_safe_close()
+
+    def _consume_verification_receipt(self, receipt: ActuationReceipt) -> None:
+        plan = self._verification_plan
+        if plan is None:
+            return
+        previous = self._verification_receipts.get(receipt.command_id)
+        if previous is not None:
+            self._abort_physical_verification(
+                "验证 DO receipt 重复或内容冲突。", recovery_required=True
+            )
+            return
+        self._verification_receipts[receipt.command_id] = receipt
+        expected = self._verification_expected.pop(receipt.command_id, None)
+        deadline_ns = self._verification_receipt_deadlines.pop(
+            receipt.command_id,
+            None,
+        )
+        if expected is None or not self._receipt_matches_command(
+            receipt, expected["command"]
+        ):
+            self._abort_physical_verification(
+                "验证 DO receipt 陈旧、迟到或完整身份冲突。",
+                recovery_required=True,
+            )
+            self._retire_command(receipt.command_id)
+            return
+        observed_ns = int(
+            receipt.actual_ns if receipt.actual_ns is not None else self._clock_ns()
+        )
+        if deadline_ns is None or observed_ns > deadline_ns:
+            self._abort_physical_verification(
+                "验证 DO receipt 超过 monotonic deadline。",
+                recovery_required=True,
+            )
+            self._retire_command(receipt.command_id)
+            return
+        self.receipt_ready.emit(receipt)
+        if self.valve_service is not None:
+            self.valve_service.commit_receipt(receipt)
+        if receipt.stale or receipt.result is not ActuationResult.SUCCESS:
+            self._abort_physical_verification(
+                receipt.message or f"验证 {expected['role']} receipt 未成功。",
+                recovery_required=receipt.action is ActuationAction.CLOSE,
+            )
+            self._retire_command(receipt.command_id)
+            return
+        role = expected["role"]
+        if role == "initial_close":
+            if not any(
+                item["role"] == "initial_close"
+                for item in self._verification_expected.values()
+            ):
+                self._submit_verification_flow(zero=False)
+        elif role == "selector_odor":
+            self._verification_phase = "target_open"
+            self._submit_verification_target_open()
+        elif role == "target_open":
+            if receipt.actual_ns is None:
+                self._abort_physical_verification(
+                    "目标阀 open receipt 缺少 monotonic actual_ns。",
+                    recovery_required=True,
+                )
+            else:
+                self._verification_open_command_id = receipt.command_id
+                self._verification_opened_at_ns = int(receipt.actual_ns)
+                self._verification_phase = "running"
+                deadline_ns = int(receipt.actual_ns) + int(
+                    plan.duration_s * 1_000_000_000
+                )
+                self._sequence += 1
+                heapq.heappush(
+                    self._deadline_heap,
+                    (
+                        deadline_ns,
+                        6,
+                        self._sequence,
+                        "verification_deadline",
+                        {
+                            "run_identity": plan.run_identity,
+                            "open_command_id": receipt.command_id,
+                        },
+                    ),
+                )
+                self._publish_physical_verification_snapshot(
+                    HardwareVerificationPhase.RUNNING,
+                    message="目标阀已按 exact receipt 确认打开。",
+                )
+        elif role == "target_close":
+            if receipt.actual_ns is None:
+                self._abort_physical_verification(
+                    "目标阀 close receipt 缺少 monotonic actual_ns。",
+                    recovery_required=True,
+                )
+                self._retire_command(receipt.command_id)
+                return
+            if (
+                (
+                    self._verification_opened_at_ns is not None
+                    and int(receipt.actual_ns) < self._verification_opened_at_ns
+                )
+                or receipt.command_id == self._verification_open_command_id
+            ):
+                self._verification_recovery_required = True
+                self._verification_requested_outcome = (
+                    PhysicalVerificationOutcome.RECOVERY_REQUIRED
+                )
+            self._verification_close_command_id = receipt.command_id
+            self._verification_closed_at_ns = int(receipt.actual_ns)
+            self._verification_phase = "flow_a_zero"
+            self._submit_verification_flow(zero=True)
+        elif role == "selector_safe":
+            self._verification_phase = "flow_all_zero"
+            self._submit_verification_flow(zero=True, all_zero=True)
+        elif role == "other_close" and not any(
+            item["role"] == "other_close"
+            for item in self._verification_expected.values()
+        ):
+            self._complete_physical_verification_safe_close()
+        self._retire_command(receipt.command_id)
+
+    def _handle_physical_verification_deadline(
+        self,
+        *,
+        run_identity: str,
+        open_command_id: str,
+    ) -> None:
+        plan = self._verification_plan
+        if (
+            plan is None
+            or plan.run_identity != run_identity
+            or self._verification_phase != "running"
+            or self._verification_open_command_id != open_command_id
+        ):
+            return
+        self._begin_physical_verification_stop(
+            outcome=PhysicalVerificationOutcome.TIMED_OUT,
+            reason="验证达到最长时间，已自动开始安全收口。",
+        )
+
+    def _handle_physical_verification_receipt_timeout(
+        self,
+        *,
+        run_identity: str,
+        command_id: str,
+    ) -> None:
+        plan = self._verification_plan
+        if plan is None or plan.run_identity != run_identity:
+            return
+        pending_do = command_id in self._verification_expected
+        pending_flow = (
+            self._verification_pending_flow is not None
+            and self._verification_pending_flow.command_id == command_id
+        )
+        if not pending_do and not pending_flow:
+            return
+        self._verification_expected.pop(command_id, None)
+        self._verification_receipt_deadlines.pop(command_id, None)
+        if pending_flow:
+            self._verification_pending_flow = None
+        self._abort_physical_verification(
+            "验证命令 receipt 超时，状态未确认。", recovery_required=True
+        )
+
+    def _begin_physical_verification_stop(
+        self,
+        *,
+        outcome: PhysicalVerificationOutcome,
+        reason: str = "",
+    ) -> None:
+        plan = self._verification_plan
+        if plan is None:
+            return
+        if self._verification_finish_pending is None:
+            self._verification_finish_pending = PhysicalVerificationOutcome(outcome)
+        if self._verification_phase in {
+            "target_close",
+            "flow_a_zero",
+            "selector_safe",
+            "flow_all_zero",
+            "other_close",
+        }:
+            if outcome is PhysicalVerificationOutcome.RECOVERY_REQUIRED:
+                self._verification_recovery_required = True
+            return
+        self._verification_requested_outcome = PhysicalVerificationOutcome(outcome)
+        self._verification_recovery_required = (
+            self._verification_recovery_required
+            or outcome is PhysicalVerificationOutcome.RECOVERY_REQUIRED
+        )
+        with self._condition:
+            self._deadline_heap = [
+                item
+                for item in self._deadline_heap
+                if not (
+                    item[3]
+                    in {
+                        "verification_deadline",
+                        "verification_receipt_timeout",
+                        "verification_flow_ready_timeout",
+                    }
+                    and item[4].get("run_identity") == plan.run_identity
+                )
+            ]
+            heapq.heapify(self._deadline_heap)
+            self._emergency = deque(
+                command
+                for command in self._emergency
+                if command.operation_id != plan.run_identity
+            )
+            kept = []
+            while self._normal_heap:
+                item = heapq.heappop(self._normal_heap)
+                if item[3].operation_id == plan.run_identity:
+                    self._retire_command(item[3].command_id)
+                else:
+                    kept.append(item)
+            for item in kept:
+                heapq.heappush(self._normal_heap, item)
+            self._verification_expected.clear()
+            self._verification_receipt_deadlines.clear()
+        self._publish_physical_verification_snapshot(
+            HardwareVerificationPhase.PREPARING,
+            message=reason or "正在按安全偏序关闭验证气路。",
+        )
+        self._verification_phase = "target_close"
+        device, line = plan.target.split("/", 1)
+        self._submit_verification_target_command(
+            role="target_close",
+            step_id="target_close",
+            valve=plan.internal_valve,
+            device=device,
+            line=line,
+            action=ActuationAction.CLOSE,
+            category=ActuationCategory.SAFETY,
+            physical_level=not plan.active_high,
+        )
+
+    def _abort_physical_verification(
+        self,
+        reason: str,
+        *,
+        recovery_required: bool = False,
+    ) -> None:
+        if self._verification_plan is None:
+            return
+        self._verification_recovery_required |= bool(recovery_required)
+        if self._verification_phase in {
+            "target_close",
+            "flow_a_zero",
+            "selector_safe",
+            "flow_all_zero",
+            "other_close",
+        }:
+            self._emit_physical_verification_result(
+                PhysicalVerificationOutcome.RECOVERY_REQUIRED,
+                str(reason),
+                lease_releasable=False,
+            )
+            return
+        self._begin_physical_verification_stop(
+            outcome=(
+                PhysicalVerificationOutcome.RECOVERY_REQUIRED
+                if recovery_required
+                else PhysicalVerificationOutcome.FAILED
+            ),
+            reason=str(reason),
+        )
+
+    def _complete_physical_verification_safe_close(self) -> None:
+        plan = self._verification_plan
+        if plan is None:
+            return
+        outcome = self._verification_requested_outcome
+        if self._verification_recovery_required:
+            self._emit_physical_verification_result(
+                PhysicalVerificationOutcome.RECOVERY_REQUIRED,
+                "验证收口证据不完整，需要执行全局停止/恢复。",
+                lease_releasable=False,
+            )
+            return
+        try:
+            contract = PhysicalVerificationContract(
+                run_identity=plan.run_identity,
+                external_port=plan.external_port,
+                revision=plan.revision,
+                fingerprint=plan.fingerprint,
+                action_completed=bool(
+                    self._verification_open_command_id
+                    and self._verification_close_command_id
+                    and self._verification_open_command_id
+                    != self._verification_close_command_id
+                    and self._verification_opened_at_ns is not None
+                    and self._verification_closed_at_ns is not None
+                    and self._verification_closed_at_ns
+                    >= self._verification_opened_at_ns
+                ),
+                safe_closed=True,
+                authorized=True,
+                ni_target=plan.target,
+                flow_setpoint_sccm=plan.flow_sccm,
+                flow_readback_sccm=self._verification_flow_readback,
+                open_command_id=self._verification_open_command_id,
+                close_command_id=self._verification_close_command_id,
+                opened_at_ns=self._verification_opened_at_ns,
+                closed_at_ns=self._verification_closed_at_ns,
+            )
+        except (TypeError, ValueError, OverflowError) as exc:
+            self._emit_physical_verification_result(
+                PhysicalVerificationOutcome.RECOVERY_REQUIRED,
+                f"验证动作证据无效：{exc}",
+                lease_releasable=False,
+            )
+            return
+        self._emit_physical_verification_result(
+            outcome,
+            "现场验证动作已完成安全收口。",
+            contract=contract,
+            lease_releasable=True,
+        )
+
+    def _emit_physical_verification_result(
+        self,
+        outcome: PhysicalVerificationOutcome,
+        reason: str,
+        *,
+        contract: PhysicalVerificationContract | None = None,
+        lease_releasable: bool,
+    ) -> None:
+        plan = self._verification_plan
+        if plan is None:
+            return
+        self.physical_verification_result_ready.emit(
+            PhysicalVerificationResult(
+                plan=plan,
+                outcome=outcome,
+                contract=contract,
+                reason=str(reason),
+                lease_releasable=bool(lease_releasable),
+            )
+        )
+        self._verification_plan = None
+        self._verification_start_pending = False
+        self._verification_finish_pending = None
+        self._verification_lease_token = None
+        self._verification_phase = "idle"
+        self._verification_expected.clear()
+        self._verification_pending_flow = None
+        self._verification_receipt_deadlines.clear()
 
     def _begin_cleaning(
         self,

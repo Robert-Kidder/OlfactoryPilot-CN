@@ -230,11 +230,13 @@ class HardwareProfileStore:
             raise ValueError("用户确认状态必须是布尔值。")
         if not user_confirmed:
             raise ValueError("用户尚未正向确认出气正确。")
+        channel = self._profile.registry.by_external_port(int(external_port))
         if not contract.permits(
             external_port=external_port,
             revision=expected_revision,
             fingerprint=expected_fingerprint,
             run_identity=run_identity,
+            ni_target=channel.target,
         ):
             raise ValueError("现场验证完成契约与当前运行不匹配。")
         evidence = ChannelVerification(
@@ -242,6 +244,19 @@ class HardwareProfileStore:
             fingerprint=expected_fingerprint,
             verified_at=verified_at,
             note=note,
+            run_identity=contract.run_identity,
+            profile_revision=contract.revision,
+            ni_target=contract.ni_target,
+            flow_setpoint_sccm=contract.flow_setpoint_sccm,
+            flow_readback_sccm=contract.flow_readback_sccm,
+            open_command_id=contract.open_command_id,
+            close_command_id=contract.close_command_id,
+            opened_at_ns=contract.opened_at_ns,
+            closed_at_ns=contract.closed_at_ns,
+            action_completed=contract.action_completed,
+            safe_closed=contract.safe_closed,
+            authorized=contract.authorized,
+            user_confirmed=user_confirmed,
         )
         return self._commit_verification(
             external_port,

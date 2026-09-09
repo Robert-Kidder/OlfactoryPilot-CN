@@ -12,6 +12,7 @@ from app.models import (
     ChannelVerification,
     HardwareProfile,
     PhysicalVerificationContract,
+    VerificationConfig,
     VerificationStatus,
 )
 from app.services import HardwareProfileStore, StaleHardwareProfileRevisionError
@@ -46,6 +47,96 @@ def test_store_merges_default_and_local_and_preserves_unrelated_fields(tmp_path)
     assert store.revision == 1
     assert saved.profile_name == "本机方案 V2"
     assert not list(tmp_path.glob(".local_config.json.*.tmp"))
+
+
+def test_nondefault_verification_config_survives_save_and_restart(tmp_path) -> None:
+    local_path = tmp_path / "local_config.json"
+    defaults = _default_config()
+    store = HardwareProfileStore(
+        default_config=defaults,
+        local_config_path=local_path,
+    )
+    candidate = replace(
+        store.profile,
+        verification_config=VerificationConfig(
+            flow_sccm=1400,
+            duration_s=30,
+            max_approved_flow_sccm=1500,
+        ),
+    )
+
+    store.save(candidate, expected_revision=store.revision)
+    restarted = HardwareProfileStore(
+        default_config=defaults,
+        local_config_path=local_path,
+    )
+
+    assert restarted.profile.verification_config == VerificationConfig(
+        flow_sccm=1400,
+        duration_s=30,
+        max_approved_flow_sccm=1500,
+    )
+
+
+def test_physical_contract_normalizes_numeric_strings_and_permits_safely() -> None:
+    contract = PhysicalVerificationContract(
+        run_identity="numeric-contract",
+        external_port=2,
+        revision=1,
+        fingerprint="a" * 64,
+        action_completed=True,
+        safe_closed=True,
+        authorized=True,
+        ni_target="Dev1/P0.1",
+        flow_setpoint_sccm="1400",
+        flow_readback_sccm="1400",
+        open_command_id="open",
+        close_command_id="close",
+        opened_at_ns=1,
+        closed_at_ns=2,
+    )
+
+    assert contract.flow_setpoint_sccm == 1400.0
+    assert contract.flow_readback_sccm == 1400.0
+    assert contract.permits(
+        external_port=2,
+        revision=1,
+        fingerprint="a" * 64,
+        run_identity="numeric-contract",
+        ni_target="dev1/port0/line1",
+    )
+
+
+@pytest.mark.parametrize(
+    "changes",
+    (
+        {"opened_at_ns": 2, "closed_at_ns": 1},
+        {"open_command_id": "same", "close_command_id": "same"},
+    ),
+)
+def test_channel_physical_evidence_rejects_invalid_temporal_identity(changes) -> None:
+    values = {
+        "status": VerificationStatus.PHYSICAL_VERIFIED,
+        "fingerprint": "a" * 64,
+        "verified_at": "2026-09-08T00:00:00+08:00",
+        "run_identity": "evidence",
+        "profile_revision": 1,
+        "ni_target": "Dev1/P0.1",
+        "flow_setpoint_sccm": 1400,
+        "flow_readback_sccm": 1400,
+        "open_command_id": "open",
+        "close_command_id": "close",
+        "opened_at_ns": 1,
+        "closed_at_ns": 2,
+        "action_completed": True,
+        "safe_closed": True,
+        "authorized": True,
+        "user_confirmed": True,
+    }
+    values.update(changes)
+
+    with pytest.raises(ValueError):
+        ChannelVerification(**values)
 
 
 def test_save_invalid_candidate_has_no_disk_or_active_side_effect(tmp_path) -> None:
@@ -472,6 +563,13 @@ def test_physical_evidence_requires_matching_completed_safe_contract_and_confirm
         action_completed=True,
         safe_closed=True,
         authorized=True,
+        ni_target=channel.target,
+        flow_setpoint_sccm=1500,
+        flow_readback_sccm=1499,
+        open_command_id="physical-run-1:open",
+        close_command_id="physical-run-1:close",
+        opened_at_ns=100,
+        closed_at_ns=200,
     )
 
     with pytest.raises(ValueError, match="尚未正向确认"):
@@ -520,6 +618,13 @@ def test_physical_evidence_requires_matching_completed_safe_contract_and_confirm
         ({"revision": 1}, {}),
         ({"fingerprint": "f" * 64}, {}),
         ({"run_identity": "other-run"}, {}),
+        ({"ni_target": "Dev1/P0.2"}, {}),
+        ({"flow_setpoint_sccm": 0}, {}),
+        ({"flow_readback_sccm": 0}, {}),
+        ({"open_command_id": ""}, {}),
+        ({"close_command_id": ""}, {}),
+        ({"opened_at_ns": None}, {}),
+        ({"closed_at_ns": None}, {}),
         ({}, {"run_identity": "other-run"}),
         ({}, {"expected_revision": 1}),
         ({}, {"expected_fingerprint": "f" * 64}),
@@ -544,6 +649,13 @@ def test_physical_evidence_rejects_each_incomplete_or_mismatched_contract_field(
         action_completed=True,
         safe_closed=True,
         authorized=True,
+        ni_target=channel.target,
+        flow_setpoint_sccm=1500,
+        flow_readback_sccm=1499,
+        open_command_id="physical-run-1:open",
+        close_command_id="physical-run-1:close",
+        opened_at_ns=100,
+        closed_at_ns=200,
     )
     contract = replace(contract, **contract_change)
     call = {
@@ -702,6 +814,19 @@ def test_valid_physical_evidence_cannot_be_downgraded(tmp_path) -> None:
         verification=ChannelVerification(
             status=VerificationStatus.PHYSICAL_VERIFIED,
             fingerprint=channel.mapping_fingerprint,
+            run_identity="physical-run-1",
+            profile_revision=0,
+            ni_target=channel.target,
+            flow_setpoint_sccm=1500,
+            flow_readback_sccm=1499,
+            open_command_id="physical-run-1:open",
+            close_command_id="physical-run-1:close",
+            opened_at_ns=100,
+            closed_at_ns=200,
+            action_completed=True,
+            safe_closed=True,
+            authorized=True,
+            user_confirmed=True,
         ),
     )
     config["hardware_profile"] = replace(profile, channels=tuple(channels)).to_dict()

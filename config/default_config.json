@@ -67,6 +67,11 @@
       "sample_a": 5000,
       "vacuum_c": 5000
     },
+    "verification_config": {
+      "flow_sccm": 1500,
+      "duration_s": 20,
+      "max_approved_flow_sccm": 1500
+    },
     "selector": {
       "target": "Dev2/P1.0",
       "safe_route": "compensation",

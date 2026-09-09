@@ -28,6 +28,7 @@ class MockHAL(HalBase):
         self._digital_state: dict[str, bool] = {}
         self._flow = float(base_flow_sccm)
         self.flow_commands: list[tuple[str, float, bool]] = []
+        self._setpoint_readbacks_sccm: dict[str, float] = {}
         self.fail_on: set[str] = set()
         self.master_events: list[tuple[str, bool]] = []
         self._ttl_level = 0.0
@@ -80,13 +81,17 @@ class MockHAL(HalBase):
             value = channel
             channel = "A"
         channel = str(channel).upper()
-        if hasattr(self, "fail_on") and channel in self.fail_on:
-            return False
-        self._flow = float(value)
         if not hasattr(self, "flow_commands"):
             self.flow_commands = []
         self.flow_commands.append((channel, float(value), bool(comp)))
+        if hasattr(self, "fail_on") and channel in self.fail_on:
+            return False
+        self._flow = float(value)
+        self._setpoint_readbacks_sccm[channel] = float(value)
         return True
+
+    def last_setpoint_readback_sccm(self, channel: str) -> float | None:
+        return self._setpoint_readbacks_sccm.get(str(channel).upper())
 
     def write_digital(self, *, device: str | None, line: str, state: bool) -> bool:
         key = f"{device}/{line}" if device else line

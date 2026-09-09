@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from app.services.flow_service import FlowService
+from app.services.mock_hal import MockHAL
 
 
 class DummyHal:
@@ -71,6 +72,20 @@ def test_partial_failure_rolls_back_previous_channels():
         ("C", 3.0, False),
         ("B", 0.0, False),
     ]
+
+
+def test_mock_flow_result_carries_verified_per_channel_setpoint_readbacks() -> None:
+    result = FlowService(MockHAL()).apply_flows(
+        a_target=1400,
+        b_target=0,
+        c_target=0,
+        mode="verification",
+    )
+
+    assert result.success
+    assert result.a_setpoint_readback_sccm == 1400
+    assert result.b_setpoint_readback_sccm == 0
+    assert result.c_setpoint_readback_sccm == 0
 
 
 def test_apply_zero_sets_all_channels_to_zero_without_comp():

@@ -84,6 +84,7 @@ class ActuationDOAdapter:
                 ActuationCategory.WARMUP,
                 ActuationCategory.MANUAL,
                 ActuationCategory.PRETEST,
+                ActuationCategory.VERIFICATION,
             }
         )
         selector_manual_compensation = bool(

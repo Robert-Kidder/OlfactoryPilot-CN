@@ -101,6 +101,9 @@ class HalInterface(Protocol):
         channel: "A"/"B"/"C" MFC。comp=True 表示补偿/合成流（Rest 下的 A_comp）。
         """
 
+    def last_setpoint_readback_sccm(self, channel: str) -> float | None:
+        """Return the latest verified Alicat setpoint readback for one MFC."""
+
     def write_digital(self, *, device: str | None, line: str, state: bool) -> bool:
         """写入数字输出（阀/继电器）。"""
 

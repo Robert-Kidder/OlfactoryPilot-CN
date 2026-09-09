@@ -37,9 +37,17 @@
 
 Settings 默认进入设置首页，以“气口配置”和“线路与设备”两个入口卡片进入子页，并用紧凑 breadcrumb 返回；主导航不再直接打开 2×10 总览，Manual 的“气口设置”快捷入口仍直接进入气口配置。“气口配置”包含固定 2×10 气口总览、单口详情、页内验证任务和保存动作。Tile 同时表达未启用、待验证、待现场确认、可用、需检查和独立 selected；selected 只使用琥珀轮廓，不能替代状态。`MOCK_VERIFIED` 显示“待现场确认”，只有与当前 mapping 匹配的 `PHYSICAL_VERIFIED` 才显示“可用”。未启用的 Settings Tile 仍可选择编辑；Manual 未验证或未启用 Tile 必须明确 unavailable 且不能驱动动作。
 
-“线路与设备”默认以两列紧凑表从控制通道 01 开始展示线路映射；断开设备后，用户可显式点击“编辑线路”修改 target，设备连接参数可直接编辑。连接设备后这些控件 disabled。名称、控制通道、串口、设备和 Alicat 输入均有内容驱动的 maximum width，不横跨桌面窗口。Settings、Manual、滚动 viewport 与 Card 使用统一 page/primary surface/secondary surface/border/amber/text/success/warning/error tokens，Mica 保持关闭。
+“线路与设备”默认以两列紧凑表从控制通道 01 开始展示线路映射；断开设备后，用户可显式点击“编辑线路”修改 canonical NI target，polarity 只在该高级编辑态中可改，普通查看态不得用整行或文字点击改变二值状态。非法、重复、与 selector 冲突或引用未登记设备的 target 必须即时显示错误且不能完成编辑/保存；完成合法编辑后查看态立即与 draft 一致。设备连接参数可直接编辑，连接设备后上述控件全部 disabled。名称、控制通道、串口、设备和 Alicat 输入均有内容驱动的 maximum width，不横跨桌面窗口。Settings、Manual、滚动 viewport 与 Card 使用统一 page/primary surface/secondary surface/border/amber/text/success/warning/error tokens，Mica 保持关闭。
 
-验证确认只显示面板气口和约 20 秒；RUNNING 使用结构化 monotonic deadline 驱动单调递减倒计时和 determinate progress，UI timer 不承担关阀。控制动作结束后进入 AWAITING_CONFIRMATION，用户必须选择“没有或位置不对”或“出气正确”。simulation 的正向结果只写 `MOCK_VERIFIED` 并显示“待现场确认”，不能形成 production availability；真实物理流程只有在动作完成、安全关闭和用户正向确认的可信合同全部成立时才能写 `PHYSICAL_VERIFIED`。保存及停止等结果只在对应动作附近给出简短反馈；rollback 后端继续保留，但普通页面不显示 rollback。
+验证启动确认必须显示面板气口、验证流量和最长验证时间。默认验证流量 1500 ml/min、默认20秒，但流量必须大于0且不超过当前 sample A 上限、设备量程与现场证据上限，时长只允许1–60秒，均不得 silent clamp。PREPARING 显示安全准备，RUNNING 使用结构化 monotonic deadline 驱动单调递减倒计时和 determinate progress，UI timer 不承担关阀；RUNNING 可立即选择“没有或位置不对”“出气正确”或停止，系统先安全收口再处理结果。timeout 只收口并进入 AWAITING_CONFIRMATION，不自动成功。simulation 的正向结果只写 `MOCK_VERIFIED` 并显示“待现场确认”，不能形成 production availability；真实物理流程只有在动作完成、安全关闭和用户正向确认的可信合同全部成立时才能写 `PHYSICAL_VERIFIED`。保存及停止等结果只在对应动作附近给出简短反馈；rollback 后端继续保留，但普通页面不显示 rollback。
+
+### HIL 后 UI/UX 收敛项
+
+- Settings 两张入口卡和子页面返回/层级导航均不是最终方案；后续按“气口 / 设备连接 / 验证设置 / 高级”或经产品设计确认的类似分组统一重构。
+- “线路与设备”当前混合单气口线路与全局连接配置，后续重新分类；profile/config 名称不作为普通用户主要设置。
+- 线路表、表单宽度、Card spacing 与字体层级继续统一。
+- Manual 与 Settings 的最终视觉语言在 HIL 后统一完成。
+- Manual 实时曲线、Header、流量区、实验控制、PortTile 和停止按钮留到最终 Product UI Build。
 
 Auto 的具体布局不在本轮设计或实现；立项时应从上述用户任务与已验证领域契约继续设计。清洗、配置等既有服务层安全约束仍以 PRD 与架构为准。
 

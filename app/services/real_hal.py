@@ -112,6 +112,7 @@ class RealHAL(HalBase):
         self._setpoint_verify_retries = max(1, int(setpoint_verify_retries))
         self._setpoint_scale = float(alicat_setpoint_scale)
         self._readback_scale = float(alicat_readback_scale)
+        self._setpoint_readbacks_sccm: dict[str, float] = {}
         self._digital_lines = list(valve_lines or [])
         self._odor_valve_lines = list(
             self._digital_lines if odor_valve_lines is None else odor_valve_lines
@@ -275,6 +276,8 @@ class RealHAL(HalBase):
             value = float(channel)
             channel = "A"
         unit_id = self._resolve_unit_id(channel)
+        normalized_channel = str(channel).upper()
+        self._setpoint_readbacks_sccm.pop(normalized_channel, None)
         if not unit_id:
             LOG.warning("Unknown flow channel %s; check alicat_unit_ids", channel)
             return False
@@ -308,6 +311,9 @@ class RealHAL(HalBase):
                     )
                     continue
                 if math.isclose(readback, device_target, abs_tol=self._setpoint_verify_tolerance):
+                    self._setpoint_readbacks_sccm[normalized_channel] = (
+                        float(readback) * self._readback_scale
+                    )
                     LOG.info(
                         "Alicat setpoint verified | channel=%s | unit=%s | target_sccm=%.3f | device_target=%.3f | readback=%.3f | attempt=%s",
                         channel,
@@ -331,6 +337,9 @@ class RealHAL(HalBase):
         except Exception:  # pragma: no cover - defensive
             LOG.exception("Failed to set flow on channel %s", channel)
             return False
+
+    def last_setpoint_readback_sccm(self, channel: str) -> float | None:
+        return self._setpoint_readbacks_sccm.get(str(channel).upper())
 
     def write_digital(self, *, device: str | None, line: str, state: bool) -> bool:
         if self._digital_lines:

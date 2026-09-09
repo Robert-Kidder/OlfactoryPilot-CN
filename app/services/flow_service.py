@@ -16,6 +16,9 @@ class FlowApplyResult:
     c: float
     a_comp: float
     error: str | None = None
+    a_setpoint_readback_sccm: float | None = None
+    b_setpoint_readback_sccm: float | None = None
+    c_setpoint_readback_sccm: float | None = None
 
 
 class FlowService:
@@ -57,19 +60,23 @@ class FlowService:
         }
 
         applied_channels: list[tuple[str, float, bool]] = []
+        readbacks: dict[str, float | None] = {"A": None, "B": None, "C": None}
         try:
             if not self.hal.set_flow("B", float(b_target), comp=False):
                 self._rollback_flows(applied_channels)
                 return self._failure("B 通道 setpoint 未确认，请检查 Alicat unit ID/响应", a_target, b_target, c_target, a_comp, "write_failed", mode)
             applied_channels.append(("B", float(b_target), False))
+            readbacks["B"] = self._setpoint_readback("B")
             if not self.hal.set_flow("C", float(c_target), comp=False):
                 self._rollback_flows(applied_channels)
                 return self._failure("C 通道 setpoint 未确认，请检查 Alicat unit ID/响应", a_target, b_target, c_target, a_comp, "write_failed", mode)
             applied_channels.append(("C", float(c_target), False))
+            readbacks["C"] = self._setpoint_readback("C")
             if not self.hal.set_flow("A", a_comp, comp=(mode == "rest")):
                 self._rollback_flows(applied_channels)
                 return self._failure("A 通道 setpoint 未确认，请检查 Alicat unit ID/响应", a_target, b_target, c_target, a_comp, "write_failed", mode)
             applied_channels.append(("A", a_comp, mode == "rest"))
+            readbacks["A"] = self._setpoint_readback("A")
         except TimeoutError:
             self._rollback_flows(applied_channels)
             return self._failure("串口超时，未能写入流量", a_target, b_target, c_target, a_comp, "timeout", mode)
@@ -94,6 +101,9 @@ class FlowService:
             b=float(b_target),
             c=float(c_target),
             a_comp=a_comp,
+            a_setpoint_readback_sccm=readbacks["A"],
+            b_setpoint_readback_sccm=readbacks["B"],
+            c_setpoint_readback_sccm=readbacks["C"],
         )
 
     def _failure(
@@ -210,7 +220,25 @@ class FlowService:
                 "result": "success",
             },
         )
-        return FlowApplyResult(True, "A 流量已清零", 0.0, 0.0, 0.0, 0.0)
+        return FlowApplyResult(
+            True,
+            "A 流量已清零",
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            a_setpoint_readback_sccm=self._setpoint_readback("A"),
+        )
+
+    def _setpoint_readback(self, channel: str) -> float | None:
+        reader = getattr(self.hal, "last_setpoint_readback_sccm", None)
+        if not callable(reader):
+            return None
+        try:
+            value = reader(channel)
+            return None if value is None else float(value)
+        except (TypeError, ValueError, OverflowError):
+            return None
 
     def _set_master(self, state: bool) -> None:
         """主阀常开：流量写入不切换主阀。保留占位返回 True。"""
