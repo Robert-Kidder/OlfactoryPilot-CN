@@ -55,9 +55,11 @@ from app.views.port_formatting import (
 )
 from app.views.product_text import user_facing_text
 from app.views.product_theme import COLORS
+from app.views.spin_box_rules import (
+    apply_user_flow_step,
+    apply_user_seconds_step,
+)
 
-FLOW_STEP_ML_MIN = 500.0
-DURATION_STEP_S = 5.0
 DURATION_MIN_S = 1.0
 AMBER = COLORS.amber
 SAFETY_NOTICE_TITLES = frozenset(
@@ -652,7 +654,7 @@ class ManualExperimentView(QWidget):
         self.duration_input = DoubleSpinBox(card)
         self.duration_input.setObjectName("durationInput")
         self.duration_input.setDecimals(0)
-        self.duration_input.setSingleStep(DURATION_STEP_S)
+        apply_user_seconds_step(self.duration_input)
         self.duration_input.setSuffix(" 秒")
         self.duration_input.setKeyboardTracking(False)
         self.duration_input.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -710,7 +712,7 @@ class ManualExperimentView(QWidget):
     def _flow_input() -> DoubleSpinBox:
         control = DoubleSpinBox()
         control.setDecimals(0)
-        control.setSingleStep(FLOW_STEP_ML_MIN)
+        apply_user_flow_step(control)
         control.setSuffix(" ml/min")
         control.setKeyboardTracking(False)
         control.setAlignment(Qt.AlignmentFlag.AlignCenter)

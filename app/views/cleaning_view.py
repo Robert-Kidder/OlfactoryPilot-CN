@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.models import CleaningStatus, CleaningViewSnapshot
+from app.views.spin_box_rules import apply_user_flow_step, apply_user_seconds_step
 
 
 class CleaningView(QWidget):
@@ -49,9 +50,11 @@ class CleaningView(QWidget):
         self.clear_button = QPushButton("清空")
         self.flow_input = QDoubleSpinBox()
         self.flow_input.setDecimals(1)
+        apply_user_flow_step(self.flow_input)
         self.flow_input.setSuffix(" ml/min")
         self.duration_input = QDoubleSpinBox()
         self.duration_input.setDecimals(1)
+        apply_user_seconds_step(self.duration_input)
         self.duration_input.setSuffix(" 秒")
         self.cycles_input = QSpinBox()
         self.cycles_input.setSuffix(" 轮")

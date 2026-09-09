@@ -63,6 +63,7 @@ from app.views.port_formatting import (
 )
 from app.views.product_text import user_facing_text
 from app.views.product_theme import COLORS, apply_page_palette, make_viewport_transparent
+from app.views.spin_box_rules import apply_user_flow_step, apply_user_seconds_step
 
 AMBER = COLORS.amber
 
@@ -422,7 +423,6 @@ class HardwareSettingsView(QWidget):
         self.current_channel_labels: dict[int, BodyLabel] = {}
         self.target_inputs: dict[int, BodyLabel] = {}
         self.polarity_inputs: dict[int, SwitchButton] = {}
-        self.polarity_labels: dict[int, BodyLabel] = {}
         self.enabled_checks: dict[int, SwitchButton] = {}
         self.verification_labels: dict[int, BodyLabel] = {}
         self.verification_hints: dict[int, CaptionLabel] = {}
@@ -496,24 +496,19 @@ class HardwareSettingsView(QWidget):
         self.verification_flow_input = DoubleSpinBox(verification_config_card)
         self.verification_flow_input.setRange(0.0, 1_000_000_000.0)
         self.verification_flow_input.setDecimals(1)
+        apply_user_flow_step(self.verification_flow_input)
         self.verification_flow_input.setSuffix(" ml/min")
         self.verification_flow_input.setMaximumWidth(260)
         self.verification_duration_input = DoubleSpinBox(verification_config_card)
         self.verification_duration_input.setRange(0.0, 1_000_000_000.0)
         self.verification_duration_input.setDecimals(1)
+        apply_user_seconds_step(self.verification_duration_input)
         self.verification_duration_input.setSuffix(" 秒")
         self.verification_duration_input.setMaximumWidth(180)
         verification_config_layout.addWidget(CaptionLabel("验证流量"), 0, 0)
         verification_config_layout.addWidget(self.verification_flow_input, 0, 1)
         verification_config_layout.addWidget(CaptionLabel("最长验证时间"), 1, 0)
         verification_config_layout.addWidget(self.verification_duration_input, 1, 1)
-        verification_config_layout.addWidget(
-            CaptionLabel("每次现场启动前会再次显示气口、流量和时间。"),
-            2,
-            0,
-            1,
-            2,
-        )
         verification_config_card.viewLayout.addLayout(verification_config_layout)
         body.addWidget(verification_config_card)
 
@@ -720,7 +715,6 @@ class HardwareSettingsView(QWidget):
         name_input.setPlaceholderText("例如：薄荷；留空时显示气口编号")
         internal_input = ValveComboBox()
         internal_input.setMaximumWidth(280)
-        polarity = BodyLabel("高电平开启")
         verification = InfoBadge.info("需要验证", parent=page)
         verification.setObjectName("verificationStatus")
         test_button = PushButton(FIF.PLAY, "验证气口", page)
@@ -728,7 +722,6 @@ class HardwareSettingsView(QWidget):
         self.name_inputs[port] = name_input
         self.internal_inputs[port] = internal_input
         self.enabled_checks[port] = enabled
-        self.polarity_labels[port] = polarity
         self.verification_labels[port] = verification
         self.mock_buttons[port] = test_button
         hint = CaptionLabel("", page)
@@ -742,14 +735,12 @@ class HardwareSettingsView(QWidget):
         layout.addWidget(name_input, 1, 1)
         layout.addWidget(CaptionLabel("控制通道"), 2, 0)
         layout.addWidget(internal_input, 2, 1)
-        layout.addWidget(CaptionLabel("开启方式"), 3, 0)
-        layout.addWidget(polarity, 3, 1)
-        layout.addWidget(CaptionLabel("验证状态"), 4, 0)
+        layout.addWidget(CaptionLabel("验证状态"), 3, 0)
         status_row = QHBoxLayout()
         status_row.addWidget(verification, 1)
         status_row.addWidget(test_button)
-        layout.addLayout(status_row, 4, 1)
-        layout.addWidget(hint, 5, 1)
+        layout.addLayout(status_row, 3, 1)
+        layout.addWidget(hint, 4, 1)
         name_input.textChanged.connect(lambda value, p=port: self._update_channel(p, display_name=value))
         internal_input.valueChanged.connect(
             lambda value, p=port: self._update_internal_valve(p, value or None)
@@ -1087,9 +1078,6 @@ class HardwareSettingsView(QWidget):
                 )
                 self.target_inputs[port].setText(channel.target)
                 self.polarity_inputs[port].setChecked(channel.active_high)
-                self.polarity_labels[port].setText(
-                    "高电平开启" if channel.active_high else "低电平开启"
-                )
                 self.enabled_checks[port].setChecked(channel.enabled)
                 self._render_verification_badge(port, channel)
                 custom = snapshot.profile.channel_uses_custom_target(port)

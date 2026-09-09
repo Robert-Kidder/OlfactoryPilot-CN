@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.services import BreathSampleBuffer
+from app.views.spin_box_rules import apply_user_flow_step, apply_user_seconds_step
 
 
 class SkeuoButton(QPushButton):
@@ -345,21 +346,25 @@ class PreTestView(QWidget):
         layout.setHorizontalSpacing(12)
 
         self._mfc_b_spin = QDoubleSpinBox()
+        apply_user_flow_step(self._mfc_b_spin)
         self._mfc_b_spin.setRange(0, 5000)
         self._mfc_b_spin.setValue(1000)
         self._mfc_b_spin.setSuffix(" sccm")
 
         self._mfc_c_spin = QDoubleSpinBox()
+        apply_user_flow_step(self._mfc_c_spin)
         self._mfc_c_spin.setRange(0, 5000)
         self._mfc_c_spin.setValue(500)
         self._mfc_c_spin.setSuffix(" sccm")
 
         self._mfc_a_spin = QDoubleSpinBox()
+        apply_user_flow_step(self._mfc_a_spin)
         self._mfc_a_spin.setRange(0, 5000)
         self._mfc_a_spin.setValue(500)
         self._mfc_a_spin.setSuffix(" sccm")
 
         self._duration_spin = QSpinBox()
+        apply_user_seconds_step(self._duration_spin)
         self._duration_spin.setRange(1, 30)
         self._duration_spin.setValue(5)
         self._duration_spin.setSuffix(" 秒")

@@ -19,13 +19,12 @@ from app.models import (
     VerificationStatus,
 )
 from app.views.manual_experiment_view import (
-    DURATION_STEP_S,
-    FLOW_STEP_ML_MIN,
     ManualExperimentDraft,
     ManualExperimentView,
     ManualExperimentViewSnapshot,
     ManualPortSnapshot,
 )
+from app.views.spin_box_rules import DURATION_STEP_S, FLOW_STEP_ML_MIN
 
 
 def _channel(
@@ -248,6 +247,7 @@ def test_manual_flow_fields_edit_independent_abc_and_emit_domain_intents(qtbot) 
     assert releases[-1].duration_ns == 5_000_000_000
     assert view.sample_a_input.singleStep() == FLOW_STEP_ML_MIN
     assert view.main_b_input.singleStep() == FLOW_STEP_ML_MIN
+    assert view.vacuum_c_input.singleStep() == FLOW_STEP_ML_MIN
     assert view.duration_input.singleStep() == DURATION_STEP_S
 
 
@@ -276,10 +276,22 @@ def test_fluent_spin_boxes_follow_steps_and_disabled_state(qtbot) -> None:
         )
     )
     assert isinstance(view.main_b_input, DoubleSpinBox)
+    view.main_b_input.lineEdit().selectAll()
+    QTest.keyClicks(view.main_b_input.lineEdit(), "550")
+    QTest.keyClick(view.main_b_input.lineEdit(), Qt.Key.Key_Return)
+    assert view.main_b_input.value() == 550
+    assert view.draft.main_b_sccm == 550
     view.main_b_input.stepUp()
-    assert view.main_b_input.value() == 1000
+    assert view.main_b_input.value() == 650
     view.main_b_input.stepDown()
-    assert view.main_b_input.value() == 500
+    assert view.main_b_input.value() == 550
+    view.duration_input.lineEdit().selectAll()
+    QTest.keyClicks(view.duration_input.lineEdit(), "7")
+    QTest.keyClick(view.duration_input.lineEdit(), Qt.Key.Key_Return)
+    assert view.duration_input.value() == 7
+    assert view.draft.duration_s == 7
+    view.duration_input.stepUp()
+    assert view.duration_input.value() == 12
 
     view.render_snapshot(ManualExperimentViewSnapshot(controls_enabled=False))
     assert not view.main_b_input.isEnabled()

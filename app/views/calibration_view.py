@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.services import BreathSampleBuffer, FrameRateTracker, FrameStats
+from app.views.spin_box_rules import apply_user_seconds_step
 
 
 class CalibrationView(QWidget):
@@ -149,6 +150,7 @@ class CalibrationView(QWidget):
         # Calibration Start/Stop & Duration
         layout.addWidget(QLabel("校准时长:"))
         self._duration_spin = QSpinBox()
+        apply_user_seconds_step(self._duration_spin)
         self._duration_spin.setRange(5, 60)
         self._duration_spin.setValue(10)
         self._duration_spin.setSuffix(" 秒")

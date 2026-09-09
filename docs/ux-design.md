@@ -41,6 +41,14 @@ Settings 默认进入设置首页，以“气口配置”和“线路与设备�
 
 验证启动确认必须显示面板气口、验证流量和最长验证时间。默认验证流量 1500 ml/min、默认20秒，但流量必须大于0且不超过当前 sample A 上限、设备量程与现场证据上限，时长只允许1–60秒，均不得 silent clamp。PREPARING 显示安全准备，RUNNING 使用结构化 monotonic deadline 驱动单调递减倒计时和 determinate progress，UI timer 不承担关阀；RUNNING 可立即选择“没有或位置不对”“出气正确”或停止，系统先安全收口再处理结果。timeout 只收口并进入 AWAITING_CONFIRMATION，不自动成功。simulation 的正向结果只写 `MOCK_VERIFIED` 并显示“待现场确认”，不能形成 production availability；真实物理流程只有在动作完成、安全关闭和用户正向确认的可信合同全部成立时才能写 `PHYSICAL_VERIFIED`。保存及停止等结果只在对应动作附近给出简短反馈；rollback 后端继续保留，但普通页面不显示 rollback。
 
+### 通用数值输入规则
+
+- 用户手动调节的气流 SpinBox 统一使用 100 ml/min 步进；用户手动调节的秒级时间 SpinBox 统一使用 5 s 步进，并复用集中规则。
+- `singleStep` 只控制箭头和步进键；用户仍可按控件当前允许的输入精度直接键盘输入任何通过现有校验的合法值，不按步进网格做 round、snap 或强制量化，也不改变持久化值。
+- 协议/TXT 的 `duration_ms`、parser 毫秒精度、Worker deadline、内部 timing 和测试时钟不受 UI 步进限制。
+- polarity 不在普通气口设置中暴露，只在线路高级编辑流程中显示和修改；`active_high`、mapping fingerprint 与 verification invalidation 语义保持不变。
+- 不用解释性小字重复说明显而易见的控件；本次实际参数只在需要用户确认的操作节点显示。安全前提、危险后果、合法范围、单位及无障碍提示不属于可删除的重复说明。
+
 ### HIL 后 UI/UX 收敛项
 
 - Settings 两张入口卡和子页面返回/层级导航均不是最终方案；后续按“气口 / 设备连接 / 验证设置 / 高级”或经产品设计确认的类似分组统一重构。

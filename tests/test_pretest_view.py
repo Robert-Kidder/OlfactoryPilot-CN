@@ -21,6 +21,14 @@ def test_pretest_view_renders_20_channels(qt_app):
     assert view._apply_button.isHidden() is True
     assert view._start_button.toolTip() == ""
     assert all(widget.button.toolTip() == "" for widget in view._buttons.values())
+    assert view._mfc_a_spin.singleStep() == 100
+    assert view._mfc_b_spin.singleStep() == 100
+    assert view._mfc_c_spin.singleStep() == 100
+    assert view._duration_spin.singleStep() == 5
+    view._mfc_a_spin.setValue(550)
+    assert view._mfc_a_spin.value() == 550
+    view._mfc_a_spin.stepUp()
+    assert view._mfc_a_spin.value() == 650
 
 
 def test_pretest_view_hides_safe_status_prompt(qt_app):

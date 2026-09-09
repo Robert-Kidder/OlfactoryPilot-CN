@@ -144,6 +144,56 @@ def test_verification_parameters_reject_without_silent_clamp_then_accept(qtbot) 
     assert view.mock_buttons[2].isEnabled()
 
 
+def test_verification_parameters_share_steps_without_quantizing_keyboard_input(qtbot) -> None:
+    view = HardwareSettingsView()
+    qtbot.addWidget(view)
+    view.render_profile(_profile(), revision=1, can_save=True)
+
+    assert view.verification_flow_input.singleStep() == 100
+    assert view.verification_duration_input.singleStep() == 5
+    view.verification_flow_input.lineEdit().selectAll()
+    QTest.keyClicks(view.verification_flow_input.lineEdit(), "550")
+    QTest.keyClick(view.verification_flow_input.lineEdit(), Qt.Key.Key_Return)
+    assert view.verification_flow_input.value() == 550
+    view.verification_flow_input.stepUp()
+    assert view.verification_flow_input.value() == 650
+    assert view.draft.verification_config.flow_sccm == 650
+    view.verification_duration_input.lineEdit().selectAll()
+    QTest.keyClicks(view.verification_duration_input.lineEdit(), "7")
+    QTest.keyClick(view.verification_duration_input.lineEdit(), Qt.Key.Key_Return)
+    assert view.verification_duration_input.value() == 7
+    assert view.draft.verification_config.duration_s == 7
+    view.verification_duration_input.stepUp()
+    assert view.verification_duration_input.value() == 12
+
+
+def test_basic_port_details_hide_polarity_and_verification_explanation(qtbot) -> None:
+    view = HardwareSettingsView()
+    qtbot.addWidget(view)
+    view.render_profile(_profile(), revision=1, can_save=True)
+
+    basic_text = {
+        label.text()
+        for label in view.editor_stack.currentWidget().findChildren(QLabel)
+    }
+    assert basic_text.isdisjoint({"开启方式", "高电平开启", "低电平开启"})
+    settings_text = {
+        label.text() for label in view.settings_scroll.findChildren(QLabel)
+    }
+    assert "每次现场启动前会再次显示气口、流量和时间。" not in settings_text
+
+    view.open_hardware_settings()
+    assert view.page_stack.currentWidget() is view.hardware_section
+    advanced_text = {
+        label.text()
+        for label in view.advanced_stack.currentWidget().findChildren(QLabel)
+    }
+    assert "开启方式" in advanced_text
+    assert view.polarity_inputs[2].isChecked()
+    view.edit_lines_button.click()
+    assert view.polarity_inputs[2].isEnabled()
+
+
 def test_settings_default_profile_keeps_physical_two_by_ten_mapping(qtbot) -> None:
     profile = HardwareProfile.from_config(
         json.loads(Path("config/default_config.json").read_text(encoding="utf-8"))

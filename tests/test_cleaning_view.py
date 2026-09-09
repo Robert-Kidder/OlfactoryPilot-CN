@@ -4,6 +4,9 @@ import json
 import time
 from pathlib import Path
 
+from PySide6.QtCore import Qt
+from PySide6.QtTest import QTest
+
 from app.controllers.main_controller import MainController
 from app.models import (
     AppState,
@@ -104,6 +107,18 @@ def test_cleaning_view_has_20_routes_and_only_emits_intents(
 
     assert len(view.channel_checks) == 20
     assert "机外气路 4" in view.channel_checks[3].text()
+    assert view.flow_input.singleStep() == 100
+    assert view.duration_input.singleStep() == 5
+    view.flow_input.lineEdit().selectAll()
+    QTest.keyClicks(view.flow_input.lineEdit(), "550")
+    QTest.keyClick(view.flow_input.lineEdit(), Qt.Key.Key_Return)
+    assert view.flow_input.value() == 550
+    assert candidates[-1][1] == 550
+    view.duration_input.lineEdit().selectAll()
+    QTest.keyClicks(view.duration_input.lineEdit(), "7.5")
+    QTest.keyClick(view.duration_input.lineEdit(), Qt.Key.Key_Return)
+    assert view.duration_input.value() == 7.5
+    assert candidates[-1][2] == 7.5
     view.channel_checks[4].click()
     assert candidates[-1][0] == (2, 3, 4)
     assert "1.0 分钟" in view.estimate_label.text()
