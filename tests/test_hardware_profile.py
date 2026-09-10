@@ -162,10 +162,14 @@ def test_production_availability_requires_matching_physical_verification() -> No
     )
 
     assert pending.enabled and not pending.available
+    assert not pending.verification_valid_for(allow_mock=True)
     assert original.verification.status is VerificationStatus.MOCK_VERIFIED
     assert not original.available
+    assert original.verification_valid_for(allow_mock=True)
     assert not incomplete_physical.available
     assert physical.available
+    assert physical.verification_valid_for(allow_mock=True)
+    assert not replace(physical, enabled=False).available
 
 
 @pytest.mark.parametrize(

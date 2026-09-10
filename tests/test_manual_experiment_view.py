@@ -5,7 +5,7 @@ from dataclasses import FrozenInstanceError, replace
 import pytest
 from PySide6.QtCore import Qt
 from PySide6.QtTest import QTest
-from qfluentwidgets import DoubleSpinBox, InfoBarIcon
+from qfluentwidgets import InfoBarIcon
 
 from app.models import (
     ChannelDescriptor,
@@ -24,7 +24,11 @@ from app.views.manual_experiment_view import (
     ManualExperimentViewSnapshot,
     ManualPortSnapshot,
 )
-from app.views.spin_box_rules import DURATION_STEP_S, FLOW_STEP_ML_MIN
+from app.views.spin_box_rules import (
+    DURATION_STEP_S,
+    FLOW_STEP_ML_MIN,
+    ProductNumericSpinBox,
+)
 
 
 def _channel(
@@ -249,6 +253,27 @@ def test_manual_flow_fields_edit_independent_abc_and_emit_domain_intents(qtbot) 
     assert view.main_b_input.singleStep() == FLOW_STEP_ML_MIN
     assert view.vacuum_c_input.singleStep() == FLOW_STEP_ML_MIN
     assert view.duration_input.singleStep() == DURATION_STEP_S
+    assert all(
+        isinstance(control, ProductNumericSpinBox)
+        for control in (
+            view.sample_a_input,
+            view.main_b_input,
+            view.vacuum_c_input,
+            view.duration_input,
+        )
+    )
+    assert all(
+        not control.wrapping()
+        for control in (
+            view.sample_a_input,
+            view.main_b_input,
+            view.vacuum_c_input,
+            view.duration_input,
+        )
+    )
+    assert view.sample_a_input.suffix() == " ml/min"
+    assert view.duration_input.suffix() == " 秒"
+    assert view.sample_a_input.cleanText() == "300"
 
 
 def test_selecting_port_does_not_optimistically_mark_it_open(qtbot) -> None:
@@ -275,23 +300,31 @@ def test_fluent_spin_boxes_follow_steps_and_disabled_state(qtbot) -> None:
             draft=ManualExperimentDraft(sample_a_sccm=500, main_b_sccm=500),
         )
     )
-    assert isinstance(view.main_b_input, DoubleSpinBox)
+    assert isinstance(view.main_b_input, ProductNumericSpinBox)
     view.main_b_input.lineEdit().selectAll()
-    QTest.keyClicks(view.main_b_input.lineEdit(), "550")
+    QTest.keyClicks(view.main_b_input.lineEdit(), "550.25")
     QTest.keyClick(view.main_b_input.lineEdit(), Qt.Key.Key_Return)
-    assert view.main_b_input.value() == 550
-    assert view.draft.main_b_sccm == 550
+    assert view.main_b_input.value() == 550.25
+    assert view.draft.main_b_sccm == 550.25
     view.main_b_input.stepUp()
-    assert view.main_b_input.value() == 650
+    assert view.main_b_input.value() == 600
     view.main_b_input.stepDown()
-    assert view.main_b_input.value() == 550
+    assert view.main_b_input.value() == 500
+    view.sample_a_input.lineEdit().selectAll()
+    QTest.keyClicks(view.sample_a_input.lineEdit(), "500.125")
+    QTest.keyClick(view.sample_a_input.lineEdit(), Qt.Key.Key_Return)
+    view.vacuum_c_input.lineEdit().selectAll()
+    QTest.keyClicks(view.vacuum_c_input.lineEdit(), "0.75")
+    QTest.keyClick(view.vacuum_c_input.lineEdit(), Qt.Key.Key_Return)
+    assert view.draft.sample_a_sccm == 500.125
+    assert view.draft.vacuum_c_sccm == 0.75
     view.duration_input.lineEdit().selectAll()
-    QTest.keyClicks(view.duration_input.lineEdit(), "7")
+    QTest.keyClicks(view.duration_input.lineEdit(), "7.5")
     QTest.keyClick(view.duration_input.lineEdit(), Qt.Key.Key_Return)
-    assert view.duration_input.value() == 7
-    assert view.draft.duration_s == 7
+    assert view.duration_input.value() == 7.5
+    assert view.draft.duration_s == 7.5
     view.duration_input.stepUp()
-    assert view.duration_input.value() == 12
+    assert view.duration_input.value() == 10
 
     view.render_snapshot(ManualExperimentViewSnapshot(controls_enabled=False))
     assert not view.main_b_input.isEnabled()
@@ -317,14 +350,42 @@ def test_manual_timer_only_refreshes_countdown_and_a_wording_is_exact(qtbot) -> 
     assert view.telemetry_a_label.text() == "123"
     assert "总流量" not in view.telemetry_a_label.text()
     assert "稳定" not in view.telemetry_a_label.text()
-    assert view.countdown_label.text() == "剩余 2.0 秒"
+    assert view.countdown_label.text() == "剩余 2 秒"
     now[0] = 2_500_000_000
     view.refresh_countdown_display()
-    assert view.countdown_label.text() == "剩余 0.5 秒"
+    assert view.countdown_label.text() == "剩余 1 秒"
     assert emitted == []
 
     view.update_a_observation(88.0)
     assert view.telemetry_a_label.text() == "88"
+
+
+@pytest.mark.parametrize(
+    ("remaining_ns", "expected"),
+    (
+        (4_200_000_000, "剩余 5 秒"),
+        (4_000_000_000, "剩余 4 秒"),
+        (200_000_000, "剩余 1 秒"),
+        (0, "正在完成…"),
+    ),
+)
+def test_manual_countdown_rounds_up_and_never_lingers_at_zero(
+    qtbot, remaining_ns, expected
+) -> None:
+    now_ns = 10_000_000_000
+    view = ManualExperimentView(monotonic_ns=lambda: now_ns)
+    qtbot.addWidget(view)
+
+    view.render_snapshot(
+        ManualExperimentViewSnapshot(
+            experiment=ManualExperimentSnapshot(
+                status=ManualExperimentStatus.STIMULATING,
+                deadline_ns=now_ns + remaining_ns,
+            )
+        )
+    )
+
+    assert view.countdown_label.text() == expected
 
 
 def test_manual_view_data_objects_are_frozen() -> None:

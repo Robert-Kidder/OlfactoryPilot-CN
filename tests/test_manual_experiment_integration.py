@@ -38,9 +38,16 @@ class FakeClock:
 
 
 def _controller(
-    tmp_path: Path, *, verification_duration=0
+    tmp_path: Path,
+    *,
+    verification_duration=0,
+    pending_port: int | None = None,
 ) -> tuple[MainController, FakeClock]:
     config = json.loads(Path("config/default_config.json").read_text(encoding="utf-8"))
+    if pending_port is not None:
+        config["hardware_profile"]["channels"][pending_port - 1]["verification"] = {
+            "status": VerificationStatus.PENDING.value,
+        }
     config["_local_config_path"] = str(tmp_path / "local_config.json")
     config["simulation_verification_duration_s"] = verification_duration
     state = AppState.from_config(config)
@@ -697,6 +704,33 @@ def test_mock_verification_requires_isolated_correlated_open_close_receipts(
     assert window.hardware_settings_view.verification_labels[2].text() == "待现场确认"
     assert window.hardware_settings_view.verification_panel.isHidden()
     assert not window.hardware_settings_view.editor_stack.isHidden()
+
+
+def test_mock_verification_refreshes_simulation_availability_without_restart(
+    tmp_path,
+    qtbot,
+) -> None:
+    controller, _ = _controller(tmp_path, pending_port=2)
+    window = MainWindow(controller, controller.state)
+    qtbot.addWidget(window)
+    controller.bind_view(window)
+    controller._render_hardware_profile()
+
+    assert not window.manual_experiment_view.port_buttons[2].isEnabled()
+    assert not controller.state.hardware_profile.registry.by_external_port(2).available
+
+    controller.handle_hardware_mock_verify_requested(
+        2,
+        controller.state.hardware_profile,
+        expected_revision=0,
+    )
+    assert controller.handle_hardware_verification_result_requested(2, True)
+
+    channel = controller.state.hardware_profile.registry.by_external_port(2)
+    assert channel.verification.status is VerificationStatus.MOCK_VERIFIED
+    assert not channel.available
+    assert window.manual_experiment_view.port_buttons[2].isEnabled()
+    assert window.manual_experiment_view.profile_revision == 1
 
 
 def test_mock_verification_failure_does_not_publish_fingerprint(

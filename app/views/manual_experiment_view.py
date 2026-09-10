@@ -21,7 +21,6 @@ from qfluentwidgets import (
     BodyLabel,
     CaptionLabel,
     CardWidget,
-    DoubleSpinBox,
     IconInfoBadge,
     InfoBadge,
     InfoBar,
@@ -56,6 +55,7 @@ from app.views.port_formatting import (
 from app.views.product_text import user_facing_text
 from app.views.product_theme import COLORS
 from app.views.spin_box_rules import (
+    ProductNumericSpinBox,
     apply_user_flow_step,
     apply_user_seconds_step,
 )
@@ -651,9 +651,8 @@ class ManualExperimentView(QWidget):
         layout.setContentsMargins(14, 10, 14, 12)
         layout.setSpacing(8)
         layout.addWidget(StrongBodyLabel("实验控制", card))
-        self.duration_input = DoubleSpinBox(card)
+        self.duration_input = ProductNumericSpinBox(card)
         self.duration_input.setObjectName("durationInput")
-        self.duration_input.setDecimals(0)
         apply_user_seconds_step(self.duration_input)
         self.duration_input.setSuffix(" 秒")
         self.duration_input.setKeyboardTracking(False)
@@ -709,9 +708,8 @@ class ManualExperimentView(QWidget):
         return field
 
     @staticmethod
-    def _flow_input() -> DoubleSpinBox:
-        control = DoubleSpinBox()
-        control.setDecimals(0)
+    def _flow_input() -> ProductNumericSpinBox:
+        control = ProductNumericSpinBox()
         apply_user_flow_step(control)
         control.setSuffix(" ml/min")
         control.setKeyboardTracking(False)
@@ -979,12 +977,14 @@ class ManualExperimentView(QWidget):
         self._last_presentation_generation = presentation.generation
 
     @staticmethod
-    def _set_range_if_changed(control: DoubleSpinBox, minimum: float, maximum: float) -> None:
+    def _set_range_if_changed(
+        control: ProductNumericSpinBox, minimum: float, maximum: float
+    ) -> None:
         if control.minimum() != minimum or control.maximum() != maximum:
             control.setRange(minimum, maximum)
 
     @staticmethod
-    def _set_value_if_changed(control: DoubleSpinBox, value: float) -> None:
+    def _set_value_if_changed(control: ProductNumericSpinBox, value: float) -> None:
         if not math.isclose(control.value(), value, rel_tol=0.0, abs_tol=1e-9):
             control.setValue(value)
 
@@ -1342,8 +1342,12 @@ class ManualExperimentView(QWidget):
             experiment.status is ManualExperimentStatus.STIMULATING
             and experiment.deadline_ns is not None
         ):
-            remaining_ns = max(0, experiment.deadline_ns - self._clock_ns())
-            text = f"剩余 {remaining_ns / 1_000_000_000:.1f} 秒"
+            remaining_ns = experiment.deadline_ns - self._clock_ns()
+            text = (
+                f"剩余 {math.ceil(remaining_ns / 1_000_000_000)} 秒"
+                if remaining_ns > 0
+                else "正在完成…"
+            )
         elif experiment.status is ManualExperimentStatus.COMPLETED:
             text = "本次已完成"
         elif experiment.status is ManualExperimentStatus.RECOVERY_REQUIRED:

@@ -29,6 +29,7 @@ OlfactoryPilot-CN 是用于嗅觉刺激实验的 Windows 桌面控制软件，�
 - 产品 UI 的 page、primary/secondary surface、border、amber、primary/secondary text、success、warning 和 error 使用同一组 tokens；ScrollArea viewport 与内容容器透明，表单控件使用适合桌面内容的最大宽度。
 - 每个产品窗口的全局通知只有一个 sticky winner；严格按 critical > error > warning > info > success 抢占。同 identity 原地更新，dismiss 后不轮播已有 lower/equal backlog；被 actionable 阻挡的 transient 直接退休且不得在 condition 解除后回放。
 - 气口配置始终区分三层：面板气口 `external_port` → 控制通道 `internal_valve` → NI/芯片接口 `target`。当前默认八路为 02→02、04→03、06→04、08→05、12→06、14→07、16→08、18→09；它只是默认 HardwareProfile，不是永久硬编码规则。
+- 产品气流和秒级时间数值控件共用方向吸附规则：origin=0，气流 interval=100 ml/min，时间 interval=5 秒；仅箭头/步进键吸附到操作方向的严格相邻档位，直接输入保留通过领域校验的小数，显示隐藏 `.0` 与无意义 trailing zero。
 
 ### Simulation 产品边界
 
@@ -113,6 +114,7 @@ Epic/Story 的当前状态只维护在 `docs/sprint-artifacts/sprint-status.yaml
 - 正常或失败退出只清理当前 owned session；启动恢复只递归删除 marker 有效且 owner 可证已失活的 session。active、unknown、marker 无效及其他未知项目必须报告并保留；空 purpose 与 `.devtmp` 父目录只允许非递归删除。
 - `.gitignore` 只精确排除 `/.devtmp/`。HIL candidate 的 Git gate 仍检查全部其他 tracked/untracked 状态，不能用更宽的 temp、文件扩展名或根目录规则隐藏普通未跟踪内容。
 - clean-clone 验证只消费当前提交的 tracked 内容，worktree 与 venv 均位于同一个 owned session；不得从源工作区复制 `.devtmp`。
+- clean-clone 只用于 requirements 改动、repository structure 改动、bootstrap/CI 改动、packaging portability 改动、release readiness 或用户明确要求。普通 UI、bugfix、feature 与 HIL preparation 使用当前开发环境；本规则只限定触发时机，不降低 candidate 的 Git gate、构建或 HIL 要求。
 - `main` 是已经集成并通过测试的当前开发基线；`feature/`、`fix/`、`chore/` 与 `hil/` 使用短生命周期分支，不维护复杂 GitFlow。
 - 任务完成后依次通过 tests/build、人工确认、merge `main`，随后删除已完成分支；不要让 `main` 长期落后于实际产品。
 - HIL 与 release 历史用 tag、commit 和 evidence 表达，不依赖永久保留开发分支。merge、push 或改写共享分支必须等待人工明确批准。

@@ -24,7 +24,6 @@ from qfluentwidgets import (
     CaptionLabel,
     CardWidget,
     ComboBox,
-    DoubleSpinBox,
     HeaderCardWidget,
     IconInfoBadge,
     InfoBadge,
@@ -63,7 +62,11 @@ from app.views.port_formatting import (
 )
 from app.views.product_text import user_facing_text
 from app.views.product_theme import COLORS, apply_page_palette, make_viewport_transparent
-from app.views.spin_box_rules import apply_user_flow_step, apply_user_seconds_step
+from app.views.spin_box_rules import (
+    ProductNumericSpinBox,
+    apply_user_flow_step,
+    apply_user_seconds_step,
+)
 
 AMBER = COLORS.amber
 
@@ -493,15 +496,15 @@ class HardwareSettingsView(QWidget):
         verification_config_layout = QGridLayout()
         verification_config_layout.setHorizontalSpacing(12)
         verification_config_layout.setVerticalSpacing(8)
-        self.verification_flow_input = DoubleSpinBox(verification_config_card)
-        self.verification_flow_input.setRange(0.0, 1_000_000_000.0)
-        self.verification_flow_input.setDecimals(1)
+        self.verification_flow_input = ProductNumericSpinBox(verification_config_card)
+        self.verification_flow_input.setRange(0.0, 1500.0)
         apply_user_flow_step(self.verification_flow_input)
         self.verification_flow_input.setSuffix(" ml/min")
         self.verification_flow_input.setMaximumWidth(260)
-        self.verification_duration_input = DoubleSpinBox(verification_config_card)
-        self.verification_duration_input.setRange(0.0, 1_000_000_000.0)
-        self.verification_duration_input.setDecimals(1)
+        self.verification_duration_input = ProductNumericSpinBox(
+            verification_config_card
+        )
+        self.verification_duration_input.setRange(1.0, 60.0)
         apply_user_seconds_step(self.verification_duration_input)
         self.verification_duration_input.setSuffix(" 秒")
         self.verification_duration_input.setMaximumWidth(180)
@@ -635,6 +638,12 @@ class HardwareSettingsView(QWidget):
             lambda value: self._update_verification_config(flow_sccm=float(value))
         )
         self.verification_duration_input.valueChanged.connect(
+            lambda value: self._update_verification_config(duration_s=float(value))
+        )
+        self.verification_flow_input.outOfRangeCommitAttempted.connect(
+            lambda value: self._update_verification_config(flow_sccm=float(value))
+        )
+        self.verification_duration_input.outOfRangeCommitAttempted.connect(
             lambda value: self._update_verification_config(duration_s=float(value))
         )
         self.page_stack.setCurrentWidget(self.settings_home)
@@ -1061,6 +1070,15 @@ class HardwareSettingsView(QWidget):
                 self._draft.verification_config.to_dict()
             )
             self._invalid_verification_config_reason = ""
+            maximum_verification_flow = min(
+                self._draft.verification_config.max_approved_flow_sccm,
+                self._draft.max_sample_a_sccm,
+            )
+            self.verification_flow_input.setRange(
+                0.0,
+                maximum_verification_flow,
+            )
+            self.verification_duration_input.setRange(1.0, 60.0)
             self.verification_flow_input.setValue(
                 self._draft.verification_config.flow_sccm
             )
@@ -1345,7 +1363,9 @@ class HardwareSettingsView(QWidget):
                 )
                 now_ns = self._monotonic_ns()
                 remaining = verification.remaining_seconds(now_ns)
-                self.verification_remaining_label.setText(f"剩余 {remaining} 秒")
+                self.verification_remaining_label.setText(
+                    f"剩余 {remaining} 秒" if remaining else "正在安全收口"
+                )
                 duration_ns = max(1, int(verification.duration_s * 1_000_000_000))
                 elapsed_ns = max(0, now_ns - int(verification.started_ns or 0))
                 self.verification_progress.setValue(
@@ -1367,6 +1387,8 @@ class HardwareSettingsView(QWidget):
                 remaining = verification.remaining_seconds(self._monotonic_ns())
                 self.verification_remaining_label.setText(
                     f"请在 {remaining} 秒内选择检查结果"
+                    if remaining
+                    else "请选择检查结果"
                 )
         else:
             self.editor_card.headerLabel.setText(f"气口 {self._selected_port:02d}")

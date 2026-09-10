@@ -18,6 +18,7 @@ from app.models import (
     HardwareVerificationPhase,
     HardwareVerificationSnapshot,
     SelectorConfig,
+    VerificationConfig,
     VerificationStatus,
 )
 from app.views.hardware_settings_view import (
@@ -26,6 +27,7 @@ from app.views.hardware_settings_view import (
     SettingsPortTile,
 )
 from app.views.manual_experiment_view import PortTile
+from app.views.spin_box_rules import ProductNumericSpinBox
 
 
 def _channel(port: int, *, status: VerificationStatus = VerificationStatus.PENDING):
@@ -112,7 +114,9 @@ def test_settings_renders_20_port_candidate_and_natural_verification_text(qtbot)
     assert view.alicat_unit_inputs["A"].text() == "a"
 
 
-def test_verification_parameters_reject_without_silent_clamp_then_accept(qtbot) -> None:
+def test_verification_parameters_use_domain_ranges_and_keep_validation_feedback(
+    qtbot,
+) -> None:
     view = HardwareSettingsView()
     qtbot.addWidget(view)
     candidates = []
@@ -125,23 +129,61 @@ def test_verification_parameters_reject_without_silent_clamp_then_accept(qtbot) 
         can_request_physical_verification=True,
     )
 
-    view.verification_flow_input.setValue(2000)
-    assert view.verification_flow_input.value() == 2000
+    assert isinstance(view.verification_flow_input, ProductNumericSpinBox)
+    assert isinstance(view.verification_duration_input, ProductNumericSpinBox)
+    assert view.verification_flow_input.minimum() == 0
+    assert view.verification_flow_input.maximum() == 1500
+    assert view.verification_duration_input.minimum() == 1
+    assert view.verification_duration_input.maximum() == 60
+
+    view.verification_flow_input.lineEdit().selectAll()
+    QTest.keyClicks(view.verification_flow_input.lineEdit(), "2000")
+    QTest.keyClick(view.verification_flow_input.lineEdit(), Qt.Key.Key_Return)
+    assert view.verification_flow_input.value() == 1500
     assert view._draft.verification_config.flow_sccm == 1500
     assert not view.save_button.isEnabled()
     assert all(not button.isEnabled() for button in view.mock_buttons.values())
     assert "现场证据支持范围" in view.status_label.text()
 
-    view.verification_duration_input.setValue(61)
-    assert view.verification_duration_input.value() == 61
+    view.verification_flow_input.lineEdit().selectAll()
+    QTest.keyClicks(view.verification_flow_input.lineEdit(), "1400")
+    QTest.keyClick(view.verification_flow_input.lineEdit(), Qt.Key.Key_Return)
+    assert view._draft.verification_config.flow_sccm == 1400
+
+    view.verification_duration_input.lineEdit().selectAll()
+    QTest.keyClicks(view.verification_duration_input.lineEdit(), "61")
+    QTest.keyClick(view.verification_duration_input.lineEdit(), Qt.Key.Key_Return)
+    assert view.verification_duration_input.value() == 20
+    assert view._draft.verification_config.duration_s == 20
     assert "1–60 秒" in view.status_label.text()
-    view.verification_flow_input.setValue(1400)
-    assert not candidates
-    view.verification_duration_input.setValue(30)
+
+    view.verification_duration_input.lineEdit().selectAll()
+    QTest.keyClicks(view.verification_duration_input.lineEdit(), "30")
+    QTest.keyClick(view.verification_duration_input.lineEdit(), Qt.Key.Key_Return)
 
     assert candidates[-1].verification_config.flow_sccm == 1400
     assert candidates[-1].verification_config.duration_s == 30
     assert view.mock_buttons[2].isEnabled()
+
+
+def test_verification_flow_range_uses_smaller_profile_and_approved_limit(qtbot) -> None:
+    small_ceiling = 0.000000000123456789
+    profile = replace(
+        _profile(),
+        max_sample_a_sccm=small_ceiling,
+        verification_config=VerificationConfig(
+            flow_sccm=small_ceiling / 2,
+            duration_s=20,
+            max_approved_flow_sccm=small_ceiling * 2,
+        ),
+    )
+    view = HardwareSettingsView()
+    qtbot.addWidget(view)
+
+    view.render_profile(profile, revision=1, can_save=True)
+
+    assert view.verification_flow_input.maximum() == small_ceiling
+    assert view.verification_flow_input.value() == small_ceiling / 2
 
 
 def test_verification_parameters_share_steps_without_quantizing_keyboard_input(qtbot) -> None:
@@ -152,19 +194,19 @@ def test_verification_parameters_share_steps_without_quantizing_keyboard_input(q
     assert view.verification_flow_input.singleStep() == 100
     assert view.verification_duration_input.singleStep() == 5
     view.verification_flow_input.lineEdit().selectAll()
-    QTest.keyClicks(view.verification_flow_input.lineEdit(), "550")
+    QTest.keyClicks(view.verification_flow_input.lineEdit(), "550.25")
     QTest.keyClick(view.verification_flow_input.lineEdit(), Qt.Key.Key_Return)
-    assert view.verification_flow_input.value() == 550
+    assert view.verification_flow_input.value() == 550.25
     view.verification_flow_input.stepUp()
-    assert view.verification_flow_input.value() == 650
-    assert view.draft.verification_config.flow_sccm == 650
+    assert view.verification_flow_input.value() == 600
+    assert view.draft.verification_config.flow_sccm == 600
     view.verification_duration_input.lineEdit().selectAll()
-    QTest.keyClicks(view.verification_duration_input.lineEdit(), "7")
+    QTest.keyClicks(view.verification_duration_input.lineEdit(), "7.5")
     QTest.keyClick(view.verification_duration_input.lineEdit(), Qt.Key.Key_Return)
-    assert view.verification_duration_input.value() == 7
-    assert view.draft.verification_config.duration_s == 7
+    assert view.verification_duration_input.value() == 7.5
+    assert view.draft.verification_config.duration_s == 7.5
     view.verification_duration_input.stepUp()
-    assert view.verification_duration_input.value() == 12
+    assert view.verification_duration_input.value() == 10
 
 
 def test_basic_port_details_hide_polarity_and_verification_explanation(qtbot) -> None:
@@ -750,6 +792,8 @@ def test_awaiting_confirmation_only_offers_result_actions(qtbot) -> None:
     assert not view.verification_positive_button.isHidden()
     assert view.verification_task_title.text() == "气口 02 是否正确出气？"
     assert view.verification_task_detail.text() == "请选择刚才观察到的结果"
+    assert view.verification_remaining_label.text() == "请选择检查结果"
+    assert "0 秒内" not in view.verification_remaining_label.text()
 
 
 def test_countdown_uses_one_deadline_and_never_resets_on_status_refresh(qtbot) -> None:
@@ -772,7 +816,7 @@ def test_countdown_uses_one_deadline_and_never_resets_on_status_refresh(qtbot) -
     qtbot.addWidget(view)
     values = []
 
-    for second in range(21):
+    for second in range(20):
         now[0] = 1_000_000_000 + second * 1_000_000_000
         view.render_profile(
             profile,
@@ -783,8 +827,56 @@ def test_countdown_uses_one_deadline_and_never_resets_on_status_refresh(qtbot) -
         )
         values.append(int(view.verification_remaining_label.text().split()[1]))
 
-    assert values == list(range(20, -1, -1))
+    assert values == list(range(20, 0, -1))
+    now[0] = verification.deadline_ns
+    view.render_profile(
+        profile,
+        revision=3,
+        can_save=False,
+        message="到达截止时间",
+        verification=verification,
+    )
+    assert view.verification_remaining_label.text() == "正在安全收口"
     assert view.verification_progress.value() == 100
+
+
+@pytest.mark.parametrize(
+    ("remaining_ns", "expected"),
+    (
+        (4_200_000_000, "剩余 5 秒"),
+        (4_000_000_000, "剩余 4 秒"),
+        (200_000_000, "剩余 1 秒"),
+    ),
+)
+def test_verification_countdown_rounds_fractional_seconds_up(
+    qtbot, remaining_ns, expected
+) -> None:
+    profile = _profile()
+    channel = profile.registry.by_external_port(2)
+    deadline_ns = 30_000_000_000
+    view = HardwareSettingsView(
+        monotonic_ns=lambda: deadline_ns - remaining_ns
+    )
+    qtbot.addWidget(view)
+
+    view.render_profile(
+        profile,
+        revision=3,
+        can_save=False,
+        verification=HardwareVerificationSnapshot(
+            phase=HardwareVerificationPhase.RUNNING,
+            external_port=2,
+            started_ns=10_000_000_000,
+            deadline_ns=deadline_ns,
+            duration_s=20,
+            can_stop=True,
+            run_identity="fractional-countdown",
+            revision=3,
+            fingerprint=channel.mapping_fingerprint,
+        ),
+    )
+
+    assert view.verification_remaining_label.text() == expected
 
 
 @pytest.mark.parametrize("external_port", (None, 0, 21))
