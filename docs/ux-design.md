@@ -54,8 +54,8 @@ Settings 默认进入设置首页，以“气口配置”和“线路与设备�
 
 - 用户手动调节的气流 SpinBox 统一使用 100 ml/min 步进；用户手动调节的秒级时间 SpinBox 统一使用 5 s 步进，并复用集中规则。
 - 箭头和步进键使用 origin=0 的方向吸附：非档位值第一步到该方向严格相邻档位，多步再按完整 interval 继续；边界处停止且不 wrapping。气流示例：1225 向上/下为 1300/1200；时间示例：10.5 向上/下为 15/10。
-- 方向吸附仅发生在 `stepBy()`；用户仍可按控件当前允许的输入精度直接键盘输入任何通过现有校验的合法值，回车、失焦与保存均不按步进网格量化，也不改变持久化值。
-- 整数显示不带 `.0`，小数只隐藏无意义的 trailing zero；单位使用不可编辑 suffix，业务模型只接收 numeric value。
+- 方向吸附仅发生在 `stepBy()`；用户可直接键盘输入任何通过领域校验的整数或最多一位小数，回车、失焦与保存均不按步进网格量化。明确越界、负值、非有限值或第二位小数不得成为可提交的中间文本，键入和粘贴应由 Qt validator contract 即时拒绝，不得静默 round 或依赖提交回退。
+- 整数显示不带 `.0`，合法的一位小数原样显示；单位使用不可编辑 suffix，业务模型只接收 numeric value。这一位小数上限只约束产品手动 SpinBox，不降低 Worker deadline、receipt/timestamp、telemetry、协议/TXT/DAQ 或测试时钟精度。
 - 协议/TXT 的 `duration_ms`、parser 毫秒精度、Worker deadline、内部 timing 和测试时钟不受 UI 步进限制。
 - polarity 不在普通气口设置中暴露，只在线路高级编辑流程中显示和修改；`active_high`、mapping fingerprint 与 verification invalidation 语义保持不变。
 - 不用解释性小字重复说明显而易见的控件；本次实际参数只在需要用户确认的操作节点显示。安全前提、危险后果、合法范围、单位及无障碍提示不属于可删除的重复说明。

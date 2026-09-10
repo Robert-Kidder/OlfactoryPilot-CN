@@ -628,8 +628,8 @@ class ManualExperimentView(QWidget):
         self.derived_total_label = CaptionLabel("总流量 1500 ml/min", card)
         fields.addWidget(self._field("样品流量 A", self.sample_a_input), 0, 0)
         fields.addWidget(self._field("主气流 B", self.main_b_input), 0, 1)
-        fields.addWidget(self._field("真空流量 C", self.vacuum_c_input), 0, 2)
-        fields.addWidget(self.derived_total_label, 0, 3)
+        fields.addWidget(self._field("真空流量 C", self.vacuum_c_input), 1, 0)
+        fields.addWidget(self.derived_total_label, 1, 1)
         layout.addLayout(fields)
 
         supply_row = QHBoxLayout()
@@ -850,8 +850,16 @@ class ManualExperimentView(QWidget):
             self._set_value_if_changed(self.main_b_input, snapshot.draft.main_b_sccm)
             self._set_value_if_changed(self.vacuum_c_input, snapshot.draft.vacuum_c_sccm)
             self._set_value_if_changed(self.duration_input, snapshot.draft.duration_s)
+            self._draft = replace(
+                snapshot.draft,
+                sample_a_sccm=self.sample_a_input.value(),
+                main_b_sccm=self.main_b_input.value(),
+                vacuum_c_sccm=self.vacuum_c_input.value(),
+                duration_s=self.duration_input.value(),
+            )
+            self._snapshot = replace(snapshot, draft=self._draft)
             self.derived_total_label.setText(
-                f"总流量 {snapshot.draft.derived_total_sccm:g} ml/min"
+                f"总流量 {self._draft.derived_total_sccm:g} ml/min"
             )
         finally:
             self._rendering = False

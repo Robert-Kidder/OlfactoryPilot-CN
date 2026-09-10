@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import pytest
 from PySide6.QtCore import QLocale, Qt
+from PySide6.QtGui import QValidator
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QLineEdit
 
 from app.views.spin_box_rules import (
+    PRODUCT_NUMERIC_DECIMALS,
     ProductNumericSpinBox,
     directional_snap_value,
     format_product_number,
@@ -144,6 +146,128 @@ def test_product_spin_box_keeps_direct_decimal_input_but_snaps_arrow_steps(qtbot
     assert control.value() == 1200
 
 
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    (
+        ("", QValidator.State.Intermediate),
+        (".", QValidator.State.Intermediate),
+        ("5", QValidator.State.Acceptable),
+        ("5.5", QValidator.State.Acceptable),
+        ("1500", QValidator.State.Acceptable),
+        ("1500.5", QValidator.State.Acceptable),
+        ("1500.55", QValidator.State.Invalid),
+        ("2000.1", QValidator.State.Invalid),
+        ("99999999", QValidator.State.Invalid),
+        ("-1", QValidator.State.Invalid),
+        ("NaN", QValidator.State.Invalid),
+        ("Inf", QValidator.State.Invalid),
+        ("-Infinity", QValidator.State.Invalid),
+        ("1e-2", QValidator.State.Invalid),
+        ("1e309", QValidator.State.Invalid),
+    ),
+)
+def test_product_spin_box_validator_keeps_only_reasonable_intermediate_states(
+    qtbot, text, expected
+) -> None:
+    control = ProductNumericSpinBox()
+    qtbot.addWidget(control)
+    control.setRange(0, 2000)
+
+    assert PRODUCT_NUMERIC_DECIMALS == 1
+    assert control.decimals() == 1
+    assert control.validate(text, len(text))[0] is expected
+
+
+def test_product_spin_box_rejects_the_character_that_would_exceed_range(
+    qtbot,
+) -> None:
+    control = ProductNumericSpinBox()
+    qtbot.addWidget(control)
+    control.setRange(0, 2000)
+    control.setSuffix(" ml/min")
+    control.setValue(1500)
+
+    control.lineEdit().selectAll()
+    QTest.keyClicks(control.lineEdit(), "19000")
+
+    assert control.cleanText() == "1900"
+    QTest.keyClick(control.lineEdit(), Qt.Key.Key_Return)
+    assert control.value() == 1900
+
+
+def test_product_spin_box_rejects_a_second_fractional_digit_immediately(qtbot) -> None:
+    control = ProductNumericSpinBox()
+    qtbot.addWidget(control)
+    control.setRange(0, 2000)
+
+    control.lineEdit().selectAll()
+    QTest.keyClicks(control.lineEdit(), "1500.5")
+    QTest.keyClicks(control.lineEdit(), "5")
+
+    assert control.cleanText() == "1500.5"
+    QTest.keyClick(control.lineEdit(), Qt.Key.Key_Return)
+    assert control.value() == 1500.5
+
+
+@pytest.mark.parametrize(
+    "pasted_text",
+    (
+        "99999999",
+        "-1",
+        "2000.1",
+        "1500.55",
+        "NaN",
+        "Inf",
+        "-Infinity",
+        "1e-2",
+        "1e309",
+    ),
+)
+def test_product_spin_box_rejects_invalid_paste_without_replacing_legal_value(
+    qtbot, qt_app, pasted_text
+) -> None:
+    control = ProductNumericSpinBox()
+    qtbot.addWidget(control)
+    control.setRange(0, 2000)
+    control.setSuffix(" ml/min")
+    control.setValue(1500)
+    control.show()
+    control.setFocus()
+    control.lineEdit().selectAll()
+    qt_app.clipboard().setText(pasted_text)
+
+    QTest.keyClick(
+        control.lineEdit(),
+        Qt.Key.Key_V,
+        Qt.KeyboardModifier.ControlModifier,
+    )
+
+    assert control.cleanText() == "1500"
+    assert control.value() == 1500
+
+
+@pytest.mark.parametrize(
+    ("maximum", "suffix", "value"),
+    ((2000, " ml/min", 1999.9), (60, " 秒", 59.9)),
+)
+def test_product_spin_box_size_hint_fits_legal_value_suffix_and_arrows(
+    qtbot, maximum, suffix, value
+) -> None:
+    control = ProductNumericSpinBox()
+    qtbot.addWidget(control)
+    control.setRange(0, maximum)
+    control.setSuffix(suffix)
+    control.setValue(value)
+    control.resize(control.sizeHint())
+    control.show()
+
+    text_width = control.lineEdit().fontMetrics().horizontalAdvance(control.text())
+    margins = control.lineEdit().textMargins()
+    available_width = control.lineEdit().contentsRect().width()
+    assert text_width + margins.left() + margins.right() <= available_width
+    assert control.width() <= 320
+
+
 def test_time_spin_box_formats_fractional_values_and_keeps_suffix_numeric(qtbot) -> None:
     control = ProductNumericSpinBox()
     qtbot.addWidget(control)
@@ -195,19 +319,30 @@ def test_product_spin_box_uses_same_comma_locale_for_format_parse_and_step(
     assert control.value() == 15
 
 
-def test_product_spin_box_preserves_high_precision_value_and_range_endpoint(
-    qtbot,
-) -> None:
+def test_product_spin_box_preserves_one_decimal_value_and_range_endpoint(qtbot) -> None:
     control = ProductNumericSpinBox()
     qtbot.addWidget(control)
-    endpoint = 1.2345678901234567
-    value = 1.234567890123456
+    endpoint = 1.2
+    value = 1.1
     control.setRange(0, endpoint)
     control.setValue(value)
 
     assert control.maximum() == endpoint
     assert control.value() == value
     assert float(control.cleanText()) == value
+
+
+def test_product_spin_box_rounds_business_range_inward_to_input_precision(
+    qtbot,
+) -> None:
+    control = ProductNumericSpinBox()
+    qtbot.addWidget(control)
+
+    control.setRange(0.04, 1234.56)
+
+    assert control.minimum() == 0.1
+    assert control.maximum() == 1234.5
+    assert control.validate("1234.6", 6)[0] is QValidator.State.Invalid
 
 
 def test_product_spin_box_focus_commit_keeps_legal_off_grid_value(qtbot) -> None:

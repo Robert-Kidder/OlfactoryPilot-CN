@@ -29,7 +29,7 @@ OlfactoryPilot-CN 是用于嗅觉刺激实验的 Windows 桌面控制软件，�
 - 产品 UI 的 page、primary/secondary surface、border、amber、primary/secondary text、success、warning 和 error 使用同一组 tokens；ScrollArea viewport 与内容容器透明，表单控件使用适合桌面内容的最大宽度。
 - 每个产品窗口的全局通知只有一个 sticky winner；严格按 critical > error > warning > info > success 抢占。同 identity 原地更新，dismiss 后不轮播已有 lower/equal backlog；被 actionable 阻挡的 transient 直接退休且不得在 condition 解除后回放。
 - 气口配置始终区分三层：面板气口 `external_port` → 控制通道 `internal_valve` → NI/芯片接口 `target`。当前默认八路为 02→02、04→03、06→04、08→05、12→06、14→07、16→08、18→09；它只是默认 HardwareProfile，不是永久硬编码规则。
-- 产品气流和秒级时间数值控件共用方向吸附规则：origin=0，气流 interval=100 ml/min，时间 interval=5 秒；仅箭头/步进键吸附到操作方向的严格相邻档位，直接输入保留通过领域校验的小数，显示隐藏 `.0` 与无意义 trailing zero。
+- 产品气流和秒级时间数值控件共用方向吸附规则：origin=0，气流 interval=100 ml/min，时间 interval=5 秒；仅箭头/步进键吸附到操作方向的严格相邻档位。用户直接输入最多保留小数点后 1 位，明确越界、负值、非有限值或超过一位小数的键入/粘贴必须在 validator 阶段拒绝，不得留待提交时 round/回退；合法 non-grid 值不自动吸附，显示隐藏 `.0` 与无意义 trailing zero。
 
 ### Simulation 产品边界
 

@@ -1,16 +1,18 @@
 from __future__ import annotations
 
 import math
-from decimal import Decimal
+from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
 from typing import Protocol
 
-from PySide6.QtCore import QLocale, Qt, Signal
-from PySide6.QtGui import QFocusEvent, QKeyEvent, QValidator
+from PySide6.QtCore import QLocale, QRect, QSize
+from PySide6.QtGui import QValidator
+from PySide6.QtWidgets import QSizePolicy, QStyle, QStyleOptionSpinBox
 from qfluentwidgets import DoubleSpinBox
 
 FLOW_STEP_ML_MIN = 100.0
 DURATION_STEP_S = 5
-PRODUCT_NUMERIC_DECIMALS = 323
+PRODUCT_NUMERIC_DECIMALS = 1
+PRODUCT_NUMERIC_TEXT_PADDING = 12
 SNAP_ABS_TOLERANCE = 1e-9
 
 
@@ -111,20 +113,32 @@ def format_product_number(
 class ProductNumericSpinBox(DoubleSpinBox):
     """产品共享数值控件：方向吸附步进，直接输入不量化。"""
 
-    outOfRangeCommitAttempted = Signal(float)
-
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._step_origin = 0.0
         self.setDecimals(PRODUCT_NUMERIC_DECIMALS)
         self.setKeyboardTracking(False)
         self.setWrapping(False)
+        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
 
     def setStepOrigin(self, origin: float) -> None:  # noqa: N802 - Qt 风格 API
         origin = float(origin)
         if not math.isfinite(origin):
             raise ValueError("步进原点必须是有限数值。")
         self._step_origin = origin
+
+    def setRange(self, minimum: float, maximum: float) -> None:  # noqa: N802
+        safe_minimum = self._quantize_bound(minimum, rounding=ROUND_CEILING)
+        safe_maximum = self._quantize_bound(maximum, rounding=ROUND_FLOOR)
+        if safe_minimum > safe_maximum:
+            raise ValueError("产品数值范围内没有可用一位小数表示的值。")
+        super().setRange(safe_minimum, safe_maximum)
+
+    def setMinimum(self, minimum: float) -> None:  # noqa: N802 - Qt override
+        super().setMinimum(self._quantize_bound(minimum, rounding=ROUND_CEILING))
+
+    def setMaximum(self, maximum: float) -> None:  # noqa: N802 - Qt override
+        super().setMaximum(self._quantize_bound(maximum, rounding=ROUND_FLOOR))
 
     def stepBy(self, steps: int) -> None:  # noqa: N802 - Qt override
         self.interpretText()
@@ -148,27 +162,24 @@ class ProductNumericSpinBox(DoubleSpinBox):
 
     def validate(self, text: str, pos: int):  # noqa: ANN201 - Qt override
         state, validated_text, validated_pos = super().validate(text, pos)
-        value = self._parse_numeric_text(text)
-        if (
-            value is not None
-            and value >= 0
-            and (value < self.minimum() or value > self.maximum())
+        value_text = self._numeric_text(text)
+        value, accepted = self.locale().toDouble(value_text.strip())
+        if accepted and (
+            not math.isfinite(value)
+            or value < self.minimum()
+            or value > self.maximum()
+            or value != self._quantize_value(value)
         ):
-            return QValidator.State.Intermediate, text, pos
+            return QValidator.State.Invalid, text, pos
         return state, validated_text, validated_pos
 
-    def keyPressEvent(self, event: QKeyEvent) -> None:  # noqa: N802 - Qt override
-        if event.key() in {Qt.Key.Key_Return, Qt.Key.Key_Enter}:
-            if self._reject_out_of_range_commit():
-                event.accept()
-                return
-        super().keyPressEvent(event)
+    def sizeHint(self) -> QSize:  # noqa: N802 - Qt override
+        return self._content_aware_size(super().sizeHint())
 
-    def focusOutEvent(self, event: QFocusEvent) -> None:  # noqa: N802 - Qt override
-        self._reject_out_of_range_commit()
-        super().focusOutEvent(event)
+    def minimumSizeHint(self) -> QSize:  # noqa: N802 - Qt override
+        return self._content_aware_size(super().minimumSizeHint())
 
-    def _parse_numeric_text(self, text: str) -> float | None:
+    def _numeric_text(self, text: str) -> str:
         value_text = str(text)
         prefix = self.prefix()
         suffix = self.suffix()
@@ -176,20 +187,47 @@ class ProductNumericSpinBox(DoubleSpinBox):
             value_text = value_text[len(prefix) :]
         if suffix and value_text.endswith(suffix):
             value_text = value_text[: -len(suffix)]
-        value, accepted = self.locale().toDouble(value_text.strip())
-        if not accepted or not math.isfinite(value):
-            return None
-        return float(value)
+        return value_text
 
-    def _reject_out_of_range_commit(self) -> bool:
-        attempted = self._parse_numeric_text(self.lineEdit().text())
-        if attempted is None or self.minimum() <= attempted <= self.maximum():
-            return False
-        if attempted < 0:
-            return False
-        self.outOfRangeCommitAttempted.emit(attempted)
-        self.lineEdit().setText(
-            f"{self.prefix()}{self.textFromValue(self.value())}{self.suffix()}"
+    def _content_aware_size(self, base: QSize) -> QSize:
+        values = [self.minimum(), self.maximum()]
+        quantum = 10.0 ** -self.decimals()
+        if self.maximum() - self.minimum() >= quantum:
+            values.extend((self.minimum() + quantum, self.maximum() - quantum))
+        texts = (
+            f"{self.prefix()}{self.textFromValue(value)}{self.suffix()}"
+            for value in values
         )
-        self.lineEdit().selectAll()
-        return True
+        line_edit = self.lineEdit()
+        text_width = max(line_edit.fontMetrics().horizontalAdvance(text) for text in texts)
+        margins = line_edit.textMargins()
+        option = QStyleOptionSpinBox()
+        self.initStyleOption(option)
+        probe_width = max(1000, base.width())
+        option.rect = QRect(0, 0, probe_width, max(1, base.height()))
+        edit_rect = self.style().subControlRect(
+            QStyle.ComplexControl.CC_SpinBox,
+            option,
+            QStyle.SubControl.SC_SpinBoxEditField,
+            self,
+        )
+        chrome_width = max(0, probe_width - edit_rect.width())
+        required_width = (
+            text_width
+            + margins.left()
+            + margins.right()
+            + chrome_width
+            + PRODUCT_NUMERIC_TEXT_PADDING
+        )
+        return QSize(max(base.width(), required_width), base.height())
+
+    def _quantize_bound(self, value: float, *, rounding: str) -> float:
+        numeric = float(value)
+        if not math.isfinite(numeric):
+            raise ValueError("产品数值边界必须是有限数值。")
+        quantum = Decimal(1).scaleb(-self.decimals())
+        return float(Decimal(str(numeric)).quantize(quantum, rounding=rounding))
+
+    def _quantize_value(self, value: float) -> float:
+        quantum = Decimal(1).scaleb(-self.decimals())
+        return float(Decimal(str(float(value))).quantize(quantum))

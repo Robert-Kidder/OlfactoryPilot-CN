@@ -500,14 +500,12 @@ class HardwareSettingsView(QWidget):
         self.verification_flow_input.setRange(0.0, 1500.0)
         apply_user_flow_step(self.verification_flow_input)
         self.verification_flow_input.setSuffix(" ml/min")
-        self.verification_flow_input.setMaximumWidth(260)
         self.verification_duration_input = ProductNumericSpinBox(
             verification_config_card
         )
         self.verification_duration_input.setRange(1.0, 60.0)
         apply_user_seconds_step(self.verification_duration_input)
         self.verification_duration_input.setSuffix(" 秒")
-        self.verification_duration_input.setMaximumWidth(180)
         verification_config_layout.addWidget(CaptionLabel("验证流量"), 0, 0)
         verification_config_layout.addWidget(self.verification_flow_input, 0, 1)
         verification_config_layout.addWidget(CaptionLabel("最长验证时间"), 1, 0)
@@ -638,12 +636,6 @@ class HardwareSettingsView(QWidget):
             lambda value: self._update_verification_config(flow_sccm=float(value))
         )
         self.verification_duration_input.valueChanged.connect(
-            lambda value: self._update_verification_config(duration_s=float(value))
-        )
-        self.verification_flow_input.outOfRangeCommitAttempted.connect(
-            lambda value: self._update_verification_config(flow_sccm=float(value))
-        )
-        self.verification_duration_input.outOfRangeCommitAttempted.connect(
             lambda value: self._update_verification_config(duration_s=float(value))
         )
         self.page_stack.setCurrentWidget(self.settings_home)
@@ -1084,6 +1076,18 @@ class HardwareSettingsView(QWidget):
             )
             self.verification_duration_input.setValue(
                 self._draft.verification_config.duration_s
+            )
+            normalized_verification_config = replace(
+                self._draft.verification_config,
+                flow_sccm=self.verification_flow_input.value(),
+                duration_s=self.verification_duration_input.value(),
+            )
+            self._draft = replace(
+                self._draft,
+                verification_config=normalized_verification_config,
+            )
+            self._verification_config_values = (
+                normalized_verification_config.to_dict()
             )
             for channel in self._draft.channels:
                 port = channel.external_port

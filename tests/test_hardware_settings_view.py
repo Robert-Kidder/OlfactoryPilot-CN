@@ -135,12 +135,17 @@ def test_verification_parameters_use_domain_ranges_and_keep_validation_feedback(
     assert view.verification_flow_input.maximum() == 1500
     assert view.verification_duration_input.minimum() == 1
     assert view.verification_duration_input.maximum() == 60
+    assert view.verification_flow_input.decimals() == 1
+    assert view.verification_duration_input.decimals() == 1
+    assert not hasattr(view.verification_flow_input, "outOfRangeCommitAttempted")
 
-    view.verification_flow_input.lineEdit().selectAll()
-    QTest.keyClicks(view.verification_flow_input.lineEdit(), "2000")
+    view.verification_flow_input.lineEdit().setCursorPosition(4)
+    QTest.keyClicks(view.verification_flow_input.lineEdit(), "0")
     QTest.keyClick(view.verification_flow_input.lineEdit(), Qt.Key.Key_Return)
     assert view.verification_flow_input.value() == 1500
     assert view._draft.verification_config.flow_sccm == 1500
+
+    view._update_verification_config(flow_sccm=2000)
     assert not view.save_button.isEnabled()
     assert all(not button.isEnabled() for button in view.mock_buttons.values())
     assert "现场证据支持范围" in view.status_label.text()
@@ -151,11 +156,13 @@ def test_verification_parameters_use_domain_ranges_and_keep_validation_feedback(
     assert view._draft.verification_config.flow_sccm == 1400
 
     view.verification_duration_input.lineEdit().selectAll()
-    QTest.keyClicks(view.verification_duration_input.lineEdit(), "61")
+    QTest.keyClicks(view.verification_duration_input.lineEdit(), "60")
     QTest.keyClick(view.verification_duration_input.lineEdit(), Qt.Key.Key_Return)
-    assert view.verification_duration_input.value() == 20
-    assert view._draft.verification_config.duration_s == 20
-    assert "1–60 秒" in view.status_label.text()
+    view.verification_duration_input.lineEdit().setCursorPosition(2)
+    QTest.keyClicks(view.verification_duration_input.lineEdit(), "1")
+    QTest.keyClick(view.verification_duration_input.lineEdit(), Qt.Key.Key_Return)
+    assert view.verification_duration_input.value() == 60
+    assert view._draft.verification_config.duration_s == 60
 
     view.verification_duration_input.lineEdit().selectAll()
     QTest.keyClicks(view.verification_duration_input.lineEdit(), "30")
@@ -167,14 +174,14 @@ def test_verification_parameters_use_domain_ranges_and_keep_validation_feedback(
 
 
 def test_verification_flow_range_uses_smaller_profile_and_approved_limit(qtbot) -> None:
-    small_ceiling = 0.000000000123456789
+    small_ceiling = 1234.56
     profile = replace(
         _profile(),
         max_sample_a_sccm=small_ceiling,
         verification_config=VerificationConfig(
-            flow_sccm=small_ceiling / 2,
+            flow_sccm=1234.4,
             duration_s=20,
-            max_approved_flow_sccm=small_ceiling * 2,
+            max_approved_flow_sccm=1500,
         ),
     )
     view = HardwareSettingsView()
@@ -182,8 +189,8 @@ def test_verification_flow_range_uses_smaller_profile_and_approved_limit(qtbot) 
 
     view.render_profile(profile, revision=1, can_save=True)
 
-    assert view.verification_flow_input.maximum() == small_ceiling
-    assert view.verification_flow_input.value() == small_ceiling / 2
+    assert view.verification_flow_input.maximum() == 1234.5
+    assert view.verification_flow_input.value() == 1234.4
 
 
 def test_verification_parameters_share_steps_without_quantizing_keyboard_input(qtbot) -> None:
@@ -194,9 +201,9 @@ def test_verification_parameters_share_steps_without_quantizing_keyboard_input(q
     assert view.verification_flow_input.singleStep() == 100
     assert view.verification_duration_input.singleStep() == 5
     view.verification_flow_input.lineEdit().selectAll()
-    QTest.keyClicks(view.verification_flow_input.lineEdit(), "550.25")
+    QTest.keyClicks(view.verification_flow_input.lineEdit(), "550.5")
     QTest.keyClick(view.verification_flow_input.lineEdit(), Qt.Key.Key_Return)
-    assert view.verification_flow_input.value() == 550.25
+    assert view.verification_flow_input.value() == 550.5
     view.verification_flow_input.stepUp()
     assert view.verification_flow_input.value() == 600
     assert view.draft.verification_config.flow_sccm == 600
@@ -207,6 +214,55 @@ def test_verification_parameters_share_steps_without_quantizing_keyboard_input(q
     assert view.draft.verification_config.duration_s == 7.5
     view.verification_duration_input.stepUp()
     assert view.verification_duration_input.value() == 10
+
+
+def test_verification_numeric_controls_fit_legal_decimal_values_and_suffixes(
+    qtbot, qt_app
+) -> None:
+    view = HardwareSettingsView()
+    qtbot.addWidget(view)
+    view.resize(1000, 700)
+    view.render_profile(_profile(), revision=1, can_save=True)
+    view.open_port_settings()
+    view.verification_flow_input.setValue(1499.9)
+    view.verification_duration_input.setValue(59.9)
+    view.show()
+    qt_app.processEvents()
+
+    for control in (
+        view.verification_flow_input,
+        view.verification_duration_input,
+    ):
+        text_width = control.lineEdit().fontMetrics().horizontalAdvance(control.text())
+        margins = control.lineEdit().textMargins()
+        assert (
+            text_width + margins.left() + margins.right()
+            <= control.lineEdit().contentsRect().width()
+        )
+
+
+def test_settings_legacy_overprecision_is_normalized_to_visible_product_values(
+    qtbot,
+) -> None:
+    profile = replace(
+        _profile(),
+        verification_config=VerificationConfig(
+            flow_sccm=1234.44,
+            duration_s=5.84,
+            max_approved_flow_sccm=1500,
+        ),
+    )
+    view = HardwareSettingsView()
+    qtbot.addWidget(view)
+
+    view.render_profile(profile, revision=1, can_save=True)
+
+    assert view.verification_flow_input.value() == 1234.4
+    assert view.verification_duration_input.value() == 5.8
+    assert view.draft.verification_config.flow_sccm == 1234.4
+    assert view.draft.verification_config.duration_s == 5.8
+    assert view._verification_config_values["flow_sccm"] == 1234.4
+    assert view._verification_config_values["duration_s"] == 5.8
 
 
 def test_basic_port_details_hide_polarity_and_verification_explanation(qtbot) -> None:
@@ -843,6 +899,7 @@ def test_countdown_uses_one_deadline_and_never_resets_on_status_refresh(qtbot) -
 @pytest.mark.parametrize(
     ("remaining_ns", "expected"),
     (
+        (5_800_000_000, "剩余 6 秒"),
         (4_200_000_000, "剩余 5 秒"),
         (4_000_000_000, "剩余 4 秒"),
         (200_000_000, "剩余 1 秒"),

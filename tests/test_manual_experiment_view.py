@@ -8,6 +8,7 @@ from PySide6.QtTest import QTest
 from qfluentwidgets import InfoBarIcon
 
 from app.models import (
+    AppState,
     ChannelDescriptor,
     ChannelRegistry,
     ChannelVerification,
@@ -18,6 +19,7 @@ from app.models import (
     ManualSupplyIntent,
     VerificationStatus,
 )
+from app.views.main_window import MainWindow
 from app.views.manual_experiment_view import (
     ManualExperimentDraft,
     ManualExperimentView,
@@ -254,6 +256,15 @@ def test_manual_flow_fields_edit_independent_abc_and_emit_domain_intents(qtbot) 
     assert view.vacuum_c_input.singleStep() == FLOW_STEP_ML_MIN
     assert view.duration_input.singleStep() == DURATION_STEP_S
     assert all(
+        control.decimals() == 1
+        for control in (
+            view.sample_a_input,
+            view.main_b_input,
+            view.vacuum_c_input,
+            view.duration_input,
+        )
+    )
+    assert all(
         isinstance(control, ProductNumericSpinBox)
         for control in (
             view.sample_a_input,
@@ -302,22 +313,22 @@ def test_fluent_spin_boxes_follow_steps_and_disabled_state(qtbot) -> None:
     )
     assert isinstance(view.main_b_input, ProductNumericSpinBox)
     view.main_b_input.lineEdit().selectAll()
-    QTest.keyClicks(view.main_b_input.lineEdit(), "550.25")
+    QTest.keyClicks(view.main_b_input.lineEdit(), "550.5")
     QTest.keyClick(view.main_b_input.lineEdit(), Qt.Key.Key_Return)
-    assert view.main_b_input.value() == 550.25
-    assert view.draft.main_b_sccm == 550.25
+    assert view.main_b_input.value() == 550.5
+    assert view.draft.main_b_sccm == 550.5
     view.main_b_input.stepUp()
     assert view.main_b_input.value() == 600
     view.main_b_input.stepDown()
     assert view.main_b_input.value() == 500
     view.sample_a_input.lineEdit().selectAll()
-    QTest.keyClicks(view.sample_a_input.lineEdit(), "500.125")
+    QTest.keyClicks(view.sample_a_input.lineEdit(), "500.5")
     QTest.keyClick(view.sample_a_input.lineEdit(), Qt.Key.Key_Return)
     view.vacuum_c_input.lineEdit().selectAll()
-    QTest.keyClicks(view.vacuum_c_input.lineEdit(), "0.75")
+    QTest.keyClicks(view.vacuum_c_input.lineEdit(), "0.8")
     QTest.keyClick(view.vacuum_c_input.lineEdit(), Qt.Key.Key_Return)
-    assert view.draft.sample_a_sccm == 500.125
-    assert view.draft.vacuum_c_sccm == 0.75
+    assert view.draft.sample_a_sccm == 500.5
+    assert view.draft.vacuum_c_sccm == 0.8
     view.duration_input.lineEdit().selectAll()
     QTest.keyClicks(view.duration_input.lineEdit(), "7.5")
     QTest.keyClick(view.duration_input.lineEdit(), Qt.Key.Key_Return)
@@ -328,6 +339,128 @@ def test_fluent_spin_boxes_follow_steps_and_disabled_state(qtbot) -> None:
 
     view.render_snapshot(ManualExperimentViewSnapshot(controls_enabled=False))
     assert not view.main_b_input.isEnabled()
+
+
+def test_manual_numeric_controls_fit_legal_decimal_values_and_suffixes(
+    qtbot, qt_app
+) -> None:
+    class ControllerStub:
+        def __getattr__(self, _name):
+            return lambda *_args, **_kwargs: None
+
+    state = AppState.from_config(
+        {
+            "language": "zh-CN",
+            "window_title": "数值布局测试",
+            "log_level": "INFO",
+            "low_flow_threshold": 0.2,
+            "safety_state": "SAFE",
+        }
+    )
+    window = MainWindow(ControllerStub(), state)
+    qtbot.addWidget(window)
+    window.resize(1180, 720)
+    window.show()
+    qt_app.processEvents()
+    view = window.manual_experiment_view
+    view.render_snapshot(
+        ManualExperimentViewSnapshot(
+            controls_enabled=True,
+            draft=ManualExperimentDraft(
+                sample_a_sccm=1500.5,
+                main_b_sccm=1500.5,
+                vacuum_c_sccm=1500.5,
+                duration_s=10.5,
+            ),
+            max_total_sccm=2000,
+            max_sample_a_sccm=2000,
+            max_vacuum_c_sccm=2000,
+            max_duration_s=60,
+        )
+    )
+    qt_app.processEvents()
+
+    assert window.size().width() == 1180
+    assert view.minimumSizeHint().width() <= view.width()
+
+    for control in (
+        view.sample_a_input,
+        view.main_b_input,
+        view.vacuum_c_input,
+        view.duration_input,
+    ):
+        text_width = control.lineEdit().fontMetrics().horizontalAdvance(control.text())
+        margins = control.lineEdit().textMargins()
+        assert (
+            text_width + margins.left() + margins.right()
+            <= control.lineEdit().contentsRect().width()
+        )
+
+
+@pytest.mark.parametrize("pasted_text", ("NaN", "Inf", "-Infinity", "99999999"))
+def test_invalid_numeric_paste_never_reaches_manual_draft(
+    qtbot, qt_app, pasted_text
+) -> None:
+    view = ManualExperimentView()
+    qtbot.addWidget(view)
+    view.render_snapshot(
+        ManualExperimentViewSnapshot(
+            controls_enabled=True,
+            draft=ManualExperimentDraft(main_b_sccm=1500),
+            max_total_sccm=2000,
+        )
+    )
+    view.main_b_input.show()
+    view.main_b_input.setFocus()
+    view.main_b_input.lineEdit().selectAll()
+    qt_app.clipboard().setText(pasted_text)
+
+    QTest.keyClick(
+        view.main_b_input.lineEdit(),
+        Qt.Key.Key_V,
+        Qt.KeyboardModifier.ControlModifier,
+    )
+
+    assert view.main_b_input.cleanText() == "1500"
+    assert view.draft.main_b_sccm == 1500
+
+
+def test_manual_legacy_overprecision_is_normalized_to_visible_product_values(
+    qtbot,
+) -> None:
+    view = ManualExperimentView()
+    qtbot.addWidget(view)
+    view.render_snapshot(
+        ManualExperimentViewSnapshot(
+            controls_enabled=True,
+            can_apply_flow=True,
+            can_release=True,
+            ports=_port_snapshots(),
+            supply_enabled=False,
+            draft=ManualExperimentDraft(
+                selected_external_ports=(2,),
+                sample_a_sccm=100.04,
+                main_b_sccm=1500.04,
+                vacuum_c_sccm=3.04,
+                duration_s=5.84,
+            ),
+        )
+    )
+    supply_intents = []
+    release_intents = []
+    view.supply_requested.connect(supply_intents.append)
+    view.release_requested.connect(release_intents.append)
+
+    assert view.draft.sample_a_sccm == 100
+    assert view.draft.main_b_sccm == 1500
+    assert view.draft.vacuum_c_sccm == 3
+    assert view.draft.duration_s == 5.8
+    view.apply_flow_button.click()
+    view.release_button.click()
+    assert supply_intents[-1].sample_a_sccm == 100
+    assert supply_intents[-1].main_b_sccm == 1500
+    assert supply_intents[-1].vacuum_c_sccm == 3
+    assert release_intents[-1].duration_ns == 5_800_000_000
 
 
 def test_manual_timer_only_refreshes_countdown_and_a_wording_is_exact(qtbot) -> None:
@@ -712,6 +845,43 @@ def test_one_second_snapshot_duration_is_not_silently_clamped(qtbot) -> None:
     assert view.duration_input.value() == 1
     view.release_button.click()
     assert intents[-1].duration_ns == 1_000_000_000
+
+
+def test_fractional_duration_keeps_exact_deadline_intent_and_starts_at_six_seconds(
+    qtbot,
+) -> None:
+    now_ns = 10_000_000_000
+    view = ManualExperimentView(monotonic_ns=lambda: now_ns)
+    qtbot.addWidget(view)
+    view.render_snapshot(
+        ManualExperimentViewSnapshot(
+            controls_enabled=True,
+            can_release=True,
+            ports=_port_snapshots(),
+            draft=ManualExperimentDraft(
+                selected_external_ports=(2,), duration_s=5
+            ),
+        )
+    )
+    intents = []
+    view.release_requested.connect(intents.append)
+
+    view.duration_input.lineEdit().selectAll()
+    QTest.keyClicks(view.duration_input.lineEdit(), "5.8")
+    QTest.keyClick(view.duration_input.lineEdit(), Qt.Key.Key_Return)
+    assert view.draft.duration_s == 5.8
+    view.release_button.click()
+    assert intents[-1].duration_ns == 5_800_000_000
+
+    view.render_snapshot(
+        ManualExperimentViewSnapshot(
+            experiment=ManualExperimentSnapshot(
+                status=ManualExperimentStatus.STIMULATING,
+                deadline_ns=now_ns + intents[-1].duration_ns,
+            )
+        )
+    )
+    assert view.countdown_label.text() == "剩余 6 秒"
 
 
 def test_identical_snapshot_does_not_mutate_tiles_and_one_port_updates_once(qtbot) -> None:
