@@ -1427,8 +1427,10 @@ def test_story35_benchmark_session_is_finalized_with_preserved_quality_before_sa
 
 
 def test_story35_native_recording_binds_both_owners_collects_fences_and_validates(
-    tmp_path,
+    tmp_path_factory,
 ) -> None:
+    tmp_path = tmp_path_factory.getbasetemp() / "h35"
+    tmp_path.mkdir(exist_ok=True)
     class FakeActuation:
         def __init__(self) -> None:
             self.recorder = None

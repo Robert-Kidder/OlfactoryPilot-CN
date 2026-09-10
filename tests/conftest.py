@@ -1,10 +1,7 @@
 from __future__ import annotations
 
 import os
-import shutil
-import stat
 import sys
-import tempfile
 from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -15,63 +12,85 @@ from PySide6.QtWidgets import QApplication, QDialog, QMainWindow, QMenu
 from shiboken6 import delete as delete_qt_object
 from shiboken6 import isValid
 
+from scripts.dev_temp import (
+    CURRENT_SESSION_ENV,
+    CURRENT_TOKEN_ENV,
+    SESSION_ENV,
+    TOKEN_ENV,
+    DevTempError,
+    Session,
+    claim_session_from_environment,
+    cleanup_session,
+    create_session,
+)
+
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
-_MANAGED_BASETEMP_ATTRIBUTE = "_olfactorypilot_managed_basetemp"
+_MANAGED_SESSION_ATTRIBUTE = "_olfactorypilot_managed_devtemp_session"
+_PREVIOUS_SESSION_ENV_ATTRIBUTE = "_olfactorypilot_previous_devtemp_environment"
 _BASETEMP_REDIRECT_NOTICE = (
-    "仓库内 --basetemp 已重定向到系统临时目录，以避免污染 Git/HIL evidence gate。"
+    "pytest 临时目录已重定向到仓库内 owned session，以免污染仓库父目录或系统 TEMP。"
 )
 
 
 @pytest.hookimpl(tryfirst=True)
 def pytest_configure(config: pytest.Config) -> None:
-    """Redirect only repository-contained basetemp before pytest builds its factory."""
-    requested = config.option.basetemp
-    if requested is None:
-        return
-
-    requested_path = Path(requested)
-    if not requested_path.is_absolute():
-        requested_path = Path.cwd() / requested_path
-    resolved_requested = requested_path.resolve()
-    if not resolved_requested.is_relative_to(_PROJECT_ROOT):
-        return
-
-    system_temp_root = Path(tempfile.gettempdir()).resolve()
-    if system_temp_root.is_relative_to(_PROJECT_ROOT):
-        raise pytest.UsageError(
-            "系统临时目录位于仓库内，无法安全重定向 --basetemp。"
-        )
-    managed_basetemp = Path(
-        tempfile.mkdtemp(prefix="olfactorypilot-pytest-", dir=system_temp_root)
-    ).resolve()
-    if managed_basetemp.is_relative_to(_PROJECT_ROOT):
-        shutil.rmtree(managed_basetemp, onerror=_retry_remove_readonly)
-        raise pytest.UsageError(
-            "pytest 临时目录仍位于仓库内，已拒绝使用以避免污染 Git/HIL evidence gate。"
-        )
-    config.option.basetemp = str(managed_basetemp)
-    setattr(config, _MANAGED_BASETEMP_ATTRIBUTE, managed_basetemp)
+    """在 TempPathFactory 构造前建立或认领唯一 repo-local session。"""
+    try:
+        session = claim_session_from_environment(_PROJECT_ROOT)
+        if session is None:
+            session = create_session("pytest", _PROJECT_ROOT)
+    except (DevTempError, OSError) as error:
+        raise pytest.UsageError(f"无法建立 pytest owned session：{error}") from error
+    config.option.basetemp = str(session.basetemp)
+    setattr(config, _MANAGED_SESSION_ATTRIBUTE, session)
+    setattr(
+        config,
+        _PREVIOUS_SESSION_ENV_ATTRIBUTE,
+        (
+            os.environ.get(CURRENT_SESSION_ENV),
+            os.environ.get(CURRENT_TOKEN_ENV),
+        ),
+    )
+    os.environ.pop(SESSION_ENV, None)
+    os.environ.pop(TOKEN_ENV, None)
+    os.environ[CURRENT_SESSION_ENV] = str(session.path)
+    os.environ[CURRENT_TOKEN_ENV] = session.token
     print(_BASETEMP_REDIRECT_NOTICE, file=sys.stderr)
 
 
 @pytest.hookimpl(trylast=True)
 def pytest_unconfigure(config: pytest.Config) -> None:
-    """Delete only the unique OS temp directory owned by this pytest session."""
-    managed_basetemp = getattr(config, _MANAGED_BASETEMP_ATTRIBUTE, None)
-    if managed_basetemp is not None:
-        delattr(config, _MANAGED_BASETEMP_ATTRIBUTE)
-        if not managed_basetemp.exists():
-            return
-        shutil.rmtree(managed_basetemp, onerror=_retry_remove_readonly)
-
-
-def _retry_remove_readonly(function, path: str, error_info) -> None:
-    """Retry Windows cleanup for read-only files created by nested Git repos."""
-    error = error_info[1]
-    if not isinstance(error, PermissionError):
-        raise error
-    os.chmod(path, os.stat(path, follow_symlinks=False).st_mode | stat.S_IWRITE)
-    function(path)
+    """只清理由本 pytest 进程持有的完整 session。"""
+    session: Session | None = getattr(config, _MANAGED_SESSION_ATTRIBUTE, None)
+    if session is None:
+        return
+    delattr(config, _MANAGED_SESSION_ATTRIBUTE)
+    cleanup_error: DevTempError | OSError | None = None
+    try:
+        cleanup_session(session.path, session.token)
+    except (DevTempError, OSError) as error:
+        cleanup_error = error
+        print(f"pytest owned session 清理失败并已保留：{error}", file=sys.stderr)
+    finally:
+        previous_session, previous_token = getattr(
+            config,
+            _PREVIOUS_SESSION_ENV_ATTRIBUTE,
+            (None, None),
+        )
+        if hasattr(config, _PREVIOUS_SESSION_ENV_ATTRIBUTE):
+            delattr(config, _PREVIOUS_SESSION_ENV_ATTRIBUTE)
+        for name, previous in (
+            (CURRENT_SESSION_ENV, previous_session),
+            (CURRENT_TOKEN_ENV, previous_token),
+        ):
+            if previous is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = previous
+    if cleanup_error is not None:
+        raise pytest.UsageError(
+            f"pytest owned session 未能正常清理：{cleanup_error}"
+        )
 
 
 def _cleanup_qt_root_widgets(app: QApplication) -> None:

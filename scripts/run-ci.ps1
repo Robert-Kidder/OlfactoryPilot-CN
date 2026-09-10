@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [ValidateSet("lint", "test-fast", "test", "build", "ci")]
     [string]$Task = "ci"
@@ -30,28 +30,36 @@ try {
         }
     }
 
-    function New-PytestBaseTemp {
-        if ($env:OLFACTORYPILOT_PYTEST_BASETEMP) {
-            $baseTemp = [System.IO.Path]::GetFullPath($env:OLFACTORYPILOT_PYTEST_BASETEMP)
-            $repoPath = [System.IO.Path]::GetFullPath($repoRoot)
-            $repoPrefix = $repoPath + [System.IO.Path]::DirectorySeparatorChar
-            $insideRepository = $baseTemp.Equals(
-                $repoPath,
-                [System.StringComparison]::OrdinalIgnoreCase
-            ) -or $baseTemp.StartsWith(
-                $repoPrefix,
-                [System.StringComparison]::OrdinalIgnoreCase
-            )
-            if ($insideRepository) {
-                throw "OLFACTORYPILOT_PYTEST_BASETEMP must be outside the repository: $baseTemp"
-            }
-            if (Test-Path -LiteralPath $baseTemp) {
-                throw "OLFACTORYPILOT_PYTEST_BASETEMP must not already exist: $baseTemp"
-            }
-            return $baseTemp
+    function New-PytestSession {
+        $helperPython = if ($env:OLFACTORYPILOT_DEV_PYTHON) {
+            $env:OLFACTORYPILOT_DEV_PYTHON
         }
-        $name = "op-pytest-$PID-$([guid]::NewGuid().ToString('N'))"
-        return Join-Path (Split-Path -Parent $repoRoot) $name
+        else {
+            "python"
+        }
+        $helper = Join-Path $repoRoot "scripts/dev_temp.py"
+        $json = & $helperPython $helper create --purpose pytest --project-root $repoRoot --owner-pid $PID
+        if ($LASTEXITCODE -ne 0) {
+            throw "无法创建 pytest owned session。"
+        }
+        return $json | ConvertFrom-Json
+    }
+
+    function Remove-PytestSession {
+        param(
+            [Parameter(Mandatory = $true)]
+            $Session
+        )
+
+        $helperPython = if ($env:OLFACTORYPILOT_DEV_PYTHON) {
+            $env:OLFACTORYPILOT_DEV_PYTHON
+        }
+        else {
+            "python"
+        }
+        $helper = Join-Path $repoRoot "scripts/dev_temp.py"
+        & $helperPython $helper cleanup --session $Session.path --token $Session.token --owner-pid $PID
+        return $LASTEXITCODE
     }
 
     function Invoke-Pytest {
@@ -61,35 +69,51 @@ try {
             [string[]]$Arguments = @()
         )
 
-        $managedBaseTemp = -not [bool]$env:OLFACTORYPILOT_PYTEST_BASETEMP
-        $baseTemp = New-PytestBaseTemp
+        $session = New-PytestSession
+        $baseTemp = $session.basetemp
+        $previousSession = $env:OLFACTORYPILOT_DEVTEMP_SESSION
+        $previousToken = $env:OLFACTORYPILOT_DEVTEMP_TOKEN
+        $previousExpectedBaseTemp = $env:OLFACTORYPILOT_EXPECTED_BASETEMP
+        $env:OLFACTORYPILOT_DEVTEMP_SESSION = $session.path
+        $env:OLFACTORYPILOT_DEVTEMP_TOKEN = $session.token
         $env:OLFACTORYPILOT_EXPECTED_BASETEMP = $baseTemp
         $pythonArguments = @("-m", "pytest") + $Arguments + @("--basetemp", $baseTemp)
         $exitCode = 1
-        $cleanupError = $null
+        $cleanupExitCode = 0
         try {
             Write-Host "==> $Stage"
             & python @pythonArguments
             $exitCode = $LASTEXITCODE
         }
         finally {
-            if ($managedBaseTemp -and (Test-Path -LiteralPath $baseTemp)) {
-                try {
-                    Remove-Item -LiteralPath $baseTemp -Recurse -Force
-                }
-                catch {
-                    $cleanupError = $_
-                    [Console]::Error.WriteLine(
-                        "Failed to clean pytest basetemp '$baseTemp': $($_.Exception.Message)"
-                    )
-                }
+            if ($null -eq $previousSession) {
+                Remove-Item Env:OLFACTORYPILOT_DEVTEMP_SESSION -ErrorAction SilentlyContinue
+            }
+            else {
+                $env:OLFACTORYPILOT_DEVTEMP_SESSION = $previousSession
+            }
+            if ($null -eq $previousToken) {
+                Remove-Item Env:OLFACTORYPILOT_DEVTEMP_TOKEN -ErrorAction SilentlyContinue
+            }
+            else {
+                $env:OLFACTORYPILOT_DEVTEMP_TOKEN = $previousToken
+            }
+            if ($null -eq $previousExpectedBaseTemp) {
+                Remove-Item Env:OLFACTORYPILOT_EXPECTED_BASETEMP -ErrorAction SilentlyContinue
+            }
+            else {
+                $env:OLFACTORYPILOT_EXPECTED_BASETEMP = $previousExpectedBaseTemp
+            }
+            $cleanupExitCode = Remove-PytestSession -Session $session
+            if ($cleanupExitCode -ne 0) {
+                [Console]::Error.WriteLine("Failed to clean pytest owned session '$($session.path)'.")
             }
         }
         if ($exitCode -ne 0) {
             [Console]::Error.WriteLine("Stage failed: $Stage (Python exit code $exitCode).")
             exit $exitCode
         }
-        if ($null -ne $cleanupError) {
+        if ($cleanupExitCode -ne 0) {
             exit 1
         }
     }

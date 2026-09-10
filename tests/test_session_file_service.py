@@ -142,7 +142,9 @@ def test_preview_samples_wall_clock_once_and_preserves_original_values(tmp_path:
     assert not preview.editable
 
 
-def test_preview_enforces_240_utf16_unit_absolute_path_budget(tmp_path: Path) -> None:
+def test_preview_enforces_240_utf16_unit_absolute_path_budget(tmp_path_factory) -> None:
+    tmp_path = tmp_path_factory.getbasetemp() / "path-budget"
+    tmp_path.mkdir(exist_ok=True)
     output = tmp_path / ("父目录" * 5)
     output.mkdir()
     service = SessionFileService(clock=CountingClock())

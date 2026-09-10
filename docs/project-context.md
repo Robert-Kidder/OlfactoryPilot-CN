@@ -30,6 +30,14 @@ OlfactoryPilot-CN 是用于嗅觉刺激实验的 Windows 桌面控制软件，�
 - 每个产品窗口的全局通知只有一个 sticky winner；严格按 critical > error > warning > info > success 抢占。同 identity 原地更新，dismiss 后不轮播已有 lower/equal backlog；被 actionable 阻挡的 transient 直接退休且不得在 condition 解除后回放。
 - 气口配置始终区分三层：面板气口 `external_port` → 控制通道 `internal_valve` → NI/芯片接口 `target`。当前默认八路为 02→02、04→03、06→04、08→05、12→06、14→07、16→08、18→09；它只是默认 HardwareProfile，不是永久硬编码规则。
 
+### Simulation 产品边界
+
+- simulation 与 real 使用同一套正式产品 UI，不得增加模拟专用页面、“模拟验证”按钮、Mock 用户文案、测试专用设置或普通用户无需理解的内部说明。
+- simulation 启动只允许一个非侵入式全局标记，让开发人员知道当前没有控制真实硬件；不得改变页面结构、产品工作流或普通用户文案。
+- 默认 clone 和普通开发启动必须保持 Mock HAL 安全；`--simulation` 不得访问 NI、Alicat 或阀门。
+- 模拟动作、截图 fixture 与 `MOCK_VERIFIED` 不得呈现为真实设备可用、现场确认或 `PHYSICAL_VERIFIED`；backend 的 `MOCK_VERIFIED` / `PHYSICAL_VERIFIED` 证据隔离保持不变。
+- offscreen smoke 可以构造正式窗口和处理 Qt 事件，但不承担真实 HIL、物理气路或视觉人工验收声明。
+
 ## 架构原则
 
 - 采用 MVC + Worker + HAL。
@@ -98,6 +106,16 @@ Manual 长期领域规则：可编辑 setpoint 只有独立 A/B/C；`total_deliv
 ## 项目进度来源
 
 Epic/Story 的当前状态只维护在 `docs/sprint-artifacts/sprint-status.yaml`。本文档只说明项目背景、技术基线和长期规则，不重复写动态进度，避免与 sprint 状态文件不同步。
+
+## 开发临时目录与 Git 规则
+
+- pytest、CI、截图审查和 clean-clone 只使用仓库内 `.devtmp/<purpose>/run-<uuid>/`；每个 session 的 marker 保存项目、用途、run、创建时间、PID 和进程启动 identity。
+- 正常或失败退出只清理当前 owned session；启动恢复只递归删除 marker 有效且 owner 可证已失活的 session。active、unknown、marker 无效及其他未知项目必须报告并保留；空 purpose 与 `.devtmp` 父目录只允许非递归删除。
+- `.gitignore` 只精确排除 `/.devtmp/`。HIL candidate 的 Git gate 仍检查全部其他 tracked/untracked 状态，不能用更宽的 temp、文件扩展名或根目录规则隐藏普通未跟踪内容。
+- clean-clone 验证只消费当前提交的 tracked 内容，worktree 与 venv 均位于同一个 owned session；不得从源工作区复制 `.devtmp`。
+- `main` 是已经集成并通过测试的当前开发基线；`feature/`、`fix/`、`chore/` 与 `hil/` 使用短生命周期分支，不维护复杂 GitFlow。
+- 任务完成后依次通过 tests/build、人工确认、merge `main`，随后删除已完成分支；不要让 `main` 长期落后于实际产品。
+- HIL 与 release 历史用 tag、commit 和 evidence 表达，不依赖永久保留开发分支。merge、push 或改写共享分支必须等待人工明确批准。
 
 ## 文档层级
 

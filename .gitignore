@@ -20,6 +20,7 @@ dist/
 .pytest_cache/
 .ruff_cache/
 .diagnostics/
+/.devtmp/
 
 # IDE/editor local settings
 .vscode/

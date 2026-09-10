@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import os
 import sys
-import tempfile
 import time
 from dataclasses import replace
 from pathlib import Path
@@ -22,6 +21,7 @@ from app.models import (
     HardwareVerificationSnapshot,
     VerificationStatus,
 )
+from scripts.dev_temp import cleanup_session, create_session
 
 
 def _evidence(channel, status: VerificationStatus) -> ChannelVerification:
@@ -65,12 +65,13 @@ def _save(widget, output_dir: Path, name: str) -> Path:
 
 
 def main() -> int:
-    output_dir = REPO_ROOT / "docs" / "screenshots"
+    output_dir = REPO_ROOT / "docs" / "sprint-artifacts" / "evidence" / "screenshots"
     output_dir.mkdir(parents=True, exist_ok=True)
     created: list[Path] = []
+    session = create_session("ui-capture", REPO_ROOT)
 
-    with tempfile.TemporaryDirectory(prefix="olfactorypilot-settings-") as temp_dir:
-        local_config = Path(temp_dir) / "config.json"
+    try:
+        local_config = session.path / "config.json"
         app, window = build_application(
             DEFAULT_CONFIG,
             start_worker=False,
@@ -192,6 +193,8 @@ def main() -> int:
 
         window.close()
         app.processEvents()
+    finally:
+        cleanup_session(session.path, session.token)
 
     for path in created:
         print(path)

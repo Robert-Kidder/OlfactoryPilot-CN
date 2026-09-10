@@ -59,7 +59,7 @@ context:
 - [x] `app/views/hardware_settings_view.py`, `app/controllers/main_controller.py`：开始确认→RUNNING 倒计时/确定进度/立即停止→AWAITING_CONFIRMATION→结果。停止、安全失效、断连、退出和过期确认均拒绝成功证据；页内任务不发全局进度通知，成功 transient、可行动失败走现有 winner。
 - [x] `app/views/port_formatting.py`, `app/views/product_theme.py`, `app/views/manual_experiment_view.py`, `app/views/main_window.py`, `app/main.py`：共享编号优先与 alias elide helper；集中 page/surface/secondary/border/amber/text/success/warning/error tokens，viewport transparent，Card 保持原生层级、Mica关闭。Manual只改同步、名称/状态、“总流量”；Header徽标内容宽度、外部geometry稳定。
 - [x] `tests/test_hardware_profile.py`, `tests/test_hardware_profile_store.py`, `tests/test_hardware_settings_view.py`, `tests/test_manual_experiment_view.py`, `tests/test_manual_experiment_integration.py`, `tests/test_product_ui.py`, `tests/test_notification_coordinator.py`：覆盖下列契约及矩阵，更新旧自动验证完成/alias优先/只读设置断言；保留失败补偿、拒绝越权、自然退出回归。
-- [x] `scripts/capture_story_4_6_ui.py`, `docs/screenshots/`：用隔离 simulation 配置生成十类截图并检查实际画面；状态展示 fixture 不写 production evidence。`docs/ux-design.md`, `docs/architecture.md`, `docs/project-context.md` 只更新长期约定；现场未证实项归 architecture 的 C.3 HIL commissioning checklist。
+- [x] `scripts/capture_story_4_6_ui.py`, `docs/sprint-artifacts/evidence/screenshots/`：用隔离 simulation 配置生成十类截图并检查实际画面；状态展示 fixture 不写 production evidence。`docs/ux-design.md`, `docs/architecture.md`, `docs/project-context.md` 只更新长期约定；现场未证实项归 architecture 的 C.3 HIL commissioning checklist。
 
 **Acceptance Criteria:**
 - Given 气口04启用、空alias、通道03，when 改为柠檬并停用保存，then Manual立即显示“气口 04”主标题、“柠檬”副标题及不可用状态；返回Settings保持一致，无需重开页面或应用。

@@ -1,0 +1,21 @@
+{
+  "schema": 1,
+  "classification": "simulation-ui-reference-fixture",
+  "physical_or_hil_evidence": false,
+  "source_revision": "4b277d162a6bffd470c8e201d9d40ff43d184739",
+  "files": {
+    "manual-profile-sync.png": "3e81c98a62b8bd2308258b4e6153373b2cf204a29e875a46ec471bf9b6fa719c",
+    "settings-hardware-edit.png": "8084abec0d70ec43e29a6737fee7d05a99c1f0759017f98b95458182681b53cb",
+    "settings-hardware-view.png": "e42831922a021efbbe4af90bdaa02ff0194454f7fcec12e9c152f237b266ea1f",
+    "settings-home.png": "f088de45e6f043f3c131c03719f193aa8bfe222866096723dcfd08086f79ad33",
+    "settings-port-alias.png": "9387b67d4783960e49273c8f59e84c16895156ba410fcbc95113d9ce120d22f3",
+    "settings-port-configuration.png": "9387b67d4783960e49273c8f59e84c16895156ba410fcbc95113d9ce120d22f3",
+    "settings-port-states.png": "9387b67d4783960e49273c8f59e84c16895156ba410fcbc95113d9ce120d22f3",
+    "story-4-6-manual-experiment.png": "7a2976df94bae873e9c304d866733a2d1e61f63cd6645d649f94dc93b482894a",
+    "story-4-6-port-settings-advanced.png": "b27edd27b653d0017c5c5d36b53527263b4866fabb4b9bb351642c3a11e4a93f",
+    "story-4-6-port-settings.png": "a506883daf8c5724085b7c4d541a2a9b9155d050853a9014726cf26c9c42789a",
+    "verification-result-confirmation.png": "8758b670a0accbf865ff0f130a3254c79a36d2e45ca3382c99ec9aa81c6aa3b1",
+    "verification-running.png": "bddb269686a7ed644680e7a97092c9057bb6353d76fe49fde476220ed0e340b7",
+    "verification-start-confirmation.png": "f39a86f54bc5223f3fe5ac9a5525cf1b6a5d782e3db3b6cfb3d96b453b3defab"
+  }
+}

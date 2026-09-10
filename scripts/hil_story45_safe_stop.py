@@ -46,6 +46,7 @@ from app.models import (  # noqa: E402
     SelectorRoute,
     normalize_digital_target,
 )
+from scripts.dev_temp import path_is_in_current_session  # noqa: E402
 
 ShutdownService = importlib.import_module(
     "app.services.shutdown_service"
@@ -1178,7 +1179,9 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("宿主进程已加载硬件模块；拒绝运行 mock-only CLI。")
     scenarios = SCENARIOS if args.scenario == "all" else (args.scenario,)
     resolved_output_root = args.output_root.resolve()
-    if resolved_output_root.is_relative_to(PROJECT_ROOT):
+    if resolved_output_root.is_relative_to(
+        PROJECT_ROOT
+    ) and not path_is_in_current_session(resolved_output_root, PROJECT_ROOT):
         parser.error("证据目录必须位于 Git 仓库外，避免污染候选版本记录。")
     existing = [
         str(args.output_root / scenario)

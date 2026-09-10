@@ -548,9 +548,20 @@ def test_normal_requires_post_stop_operator_observation(tmp_path, monkeypatch, c
         evidence_dir=output_dir,
         observation=LIVE.ALLOWED_OPERATOR_OBSERVATIONS[0],
     )
+    monkeypatch.setattr(LIVE, "_inside_project", lambda _path: False)
     assert LIVE._command_record_observation(args) == 0
     recorded = json.loads((output_dir / "summary.json").read_text(encoding="utf-8"))
     assert recorded["verification_passed"] is True
+
+
+def test_record_observation_rejects_repository_local_evidence() -> None:
+    args = SimpleNamespace(
+        evidence_dir=LIVE.PROJECT_ROOT / "docs" / "forbidden-hil-evidence",
+        observation=LIVE.ALLOWED_OPERATOR_OBSERVATIONS[0],
+    )
+
+    with pytest.raises(ValueError, match="HIL 证据目录必须位于仓库外"):
+        LIVE._command_record_observation(args)
 
 
 def test_cli_has_no_live_all_mode():
