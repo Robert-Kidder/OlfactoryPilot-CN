@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import time
+from dataclasses import dataclass
+from enum import StrEnum
 from typing import TYPE_CHECKING
 
 from PySide6.QtCore import Qt, QTimer
@@ -46,6 +48,70 @@ _INTERNAL_UI_TERMS = (
     "Mock",
     "关闭阶段",
 )
+
+
+class ProductConnectionState(StrEnum):
+    """The only connection states exposed by the normal product UI."""
+
+    CONNECTING = "CONNECTING"
+    CONNECTED = "CONNECTED"
+    DISCONNECTED = "DISCONNECTED"
+
+
+@dataclass(frozen=True, slots=True)
+class ConnectionPresentation:
+    state: ProductConnectionState
+    text: str
+    level: InfoLevel
+    show_reconnect: bool
+
+
+_CONNECTING_PHASES = frozenset(
+    {
+        "CONNECTING",
+        "PREPARING_SAFE_OUTPUTS",
+        "SELF_CHECKING",
+        "ZEROING_FLOWS",
+        "VERIFYING_READINESS",
+    }
+)
+
+_DISCONNECTED_PHASES = frozenset(
+    {
+        "DISCONNECTED",
+        "FAILED",
+        "RUNTIME_DISCONNECTED",
+        "RECOVERY_REQUIRED",
+    }
+)
+
+
+def connection_presentation_for_phase(phase: str) -> ConnectionPresentation:
+    """Map detailed internal phases onto the three product presentations."""
+
+    normalized = str(phase).strip().upper()
+    if normalized in _CONNECTING_PHASES:
+        return ConnectionPresentation(
+            ProductConnectionState.CONNECTING,
+            "正在连接…",
+            InfoLevel.WARNING,
+            False,
+        )
+    if normalized == "CONNECTED":
+        return ConnectionPresentation(
+            ProductConnectionState.CONNECTED,
+            "设备已连接",
+            InfoLevel.SUCCESS,
+            False,
+        )
+    if normalized in _DISCONNECTED_PHASES:
+        return ConnectionPresentation(
+            ProductConnectionState.DISCONNECTED,
+            "设备未连接",
+            InfoLevel.ERROR,
+            True,
+        )
+    raise ValueError(f"未知 connection phase：{phase!r}")
 
 
 class MainWindow(FluentWindow):
@@ -97,7 +163,7 @@ class MainWindow(FluentWindow):
         super().closeEvent(event)
 
     def _build_actions(self) -> None:
-        self._connect_button = PushButton(FIF.CONNECT, "重试连接", self)
+        self._connect_button = PushButton(FIF.CONNECT, "重新连接", self)
         self._reset_button = PushButton(FIF.SYNC, "重置设备", self)
         self._stop_button = PushButton(FIF.POWER_BUTTON, "全局停止", self)
         self._help_button = PushButton(FIF.HELP, "帮助", self)
@@ -235,22 +301,7 @@ class MainWindow(FluentWindow):
         return user_facing_text(f"上次关闭：{status_word}（{ts_text}）{reason}")
 
     @staticmethod
-    def _connection_summary(telemetry: Telemetry, *, hardware_ready: bool) -> str:
-        if not telemetry.connected:
-            return "设备未连接"
-        if not hardware_ready:
-            return "设备检查未通过"
-        return {
-            "SAFE": "设备已连接",
-            "LOW_FLOW": "气流不足",
-            "DATA_STALE": "设备通信中断",
-            "RECOVERY_REQUIRED": "需要安全恢复",
-            "FAULT": "设备状态异常",
-            "UNKNOWN": "设备状态待确认",
-        }.get(telemetry.safety_state, "设备状态异常")
-
-    @staticmethod
-    def _connection_action(telemetry: Telemetry, *, hardware_ready: bool) -> str:
+    def _safety_action(telemetry: Telemetry, *, hardware_ready: bool) -> str:
         if telemetry.connected and not hardware_ready:
             return "请检查设备后重新连接"
         if not telemetry.connected or telemetry.safety_state == "SAFE":
@@ -274,16 +325,12 @@ class MainWindow(FluentWindow):
         text = self._format_shutdown(event)
         if self._shutdown_label.text() != text:
             self._shutdown_label.setText(text)
-        if event and event.get("result") != "success":
-            self.manual_experiment_view.show_condition_notice(
-                "上次关闭未完成",
-                text,
-                source="last-shutdown",
-                condition_key="last-shutdown-failed",
-                severity="critical",
+        if event and "result" in event and event.get("result") != "success":
+            self.render_connection_safety_alert(
+                "设备未能正常停止，请立即关闭设备电源"
             )
-        else:
-            self.manual_experiment_view.resolve_notice_condition(source="last-shutdown")
+        elif event and "result" in event:
+            self.render_connection_safety_alert("")
 
     def render_telemetry(
         self,
@@ -297,33 +344,9 @@ class MainWindow(FluentWindow):
         effective_hardware_ready = (
             True if hardware_ready is None else bool(hardware_ready)
         )
-        summary = self._connection_summary(
-            telemetry,
-            hardware_ready=effective_hardware_ready,
-        )
         telemetry_text = self._format_telemetry(telemetry)
         if self._telemetry_label.text() != telemetry_text:
             self._telemetry_label.setText(telemetry_text)
-        connection_action = self._connection_action(
-            telemetry,
-            hardware_ready=effective_hardware_ready,
-        )
-        if self._connection_phase == "DISCONNECTED":
-            if self._connection_badge.text() != summary:
-                self._connection_badge.setText(summary)
-            if self._connection_action_label.text() != connection_action:
-                self._connection_action_label.setText(connection_action)
-            if self._connection_action_label.isVisible() != bool(connection_action):
-                self._connection_action_label.setVisible(bool(connection_action))
-            level = (
-                InfoLevel.SUCCESS
-                if connected
-                and effective_hardware_ready
-                and telemetry.safety_state == "SAFE"
-                else InfoLevel.ERROR
-            )
-            if self._connection_badge.level != level:
-                self._connection_badge.setLevel(level)
         current_state = telemetry.safety_state if connected else "DATA_STALE"
         self.manual_experiment_view.set_header_safety_state(current_state)
         if current_state == "LOW_FLOW" and expected_manual_flow_transition:
@@ -351,7 +374,7 @@ class MainWindow(FluentWindow):
         elif connected and current_state != "SAFE":
             self.manual_experiment_view.show_condition_notice(
                 "当前状态不允许操作",
-                self._connection_action(
+                self._safety_action(
                     telemetry,
                     hardware_ready=effective_hardware_ready,
                 )
@@ -365,46 +388,13 @@ class MainWindow(FluentWindow):
 
     def render_connection_phase(self, phase: str) -> None:
         self._connection_phase = str(phase)
-        connecting = self._connection_phase in {
-            "CONNECTING",
-            "PREPARING_SAFE_OUTPUTS",
-            "SELF_CHECKING",
-            "ZEROING_FLOWS",
-            "VERIFYING_READINESS",
-        }
-        retry = self._connection_phase in {
-            "FAILED",
-            "RECOVERY_REQUIRED",
-            "RUNTIME_DISCONNECTED",
-        }
-        if connecting:
-            self._connection_badge.setText("正在连接设备…")
-            self._connection_badge.setLevel(InfoLevel.WARNING)
-            self._connection_action_label.setText("")
-            self._connection_action_label.hide()
-        elif self._connection_phase == "CONNECTED":
-            self._connection_badge.setText("设备已连接")
-            self._connection_badge.setLevel(InfoLevel.SUCCESS)
-            self._connection_action_label.setText("")
-            self._connection_action_label.hide()
-        elif self._connection_phase == "RUNTIME_DISCONNECTED":
-            self._connection_badge.setText("设备通信中断")
-            self._connection_badge.setLevel(InfoLevel.ERROR)
-            self._connection_action_label.setText("请检查设备后重试")
-            self._connection_action_label.show()
-        elif retry:
-            self._connection_badge.setText("连接失败")
-            self._connection_badge.setLevel(InfoLevel.ERROR)
-            self._connection_action_label.setText("请检查设备后重试")
-            self._connection_action_label.show()
-        else:
-            self._connection_badge.setText("设备未连接")
-            self._connection_action_label.setText("")
-            self._connection_action_label.hide()
-        self._connect_button.setText(
-            "重新连接" if self._connection_phase == "RUNTIME_DISCONNECTED" else "重试连接"
-        )
-        self._connect_button.setVisible(retry)
+        presentation = connection_presentation_for_phase(self._connection_phase)
+        self._connection_badge.setText(presentation.text)
+        self._connection_badge.setLevel(presentation.level)
+        self._connection_action_label.setText("")
+        self._connection_action_label.hide()
+        self._connect_button.setText("重新连接")
+        self._connect_button.setVisible(presentation.show_reconnect)
 
     def queue_presentation(
         self,
@@ -502,6 +492,23 @@ class MainWindow(FluentWindow):
         else:
             self.manual_experiment_view.clear_notice_event(source="actuation-alert")
 
+    def render_connection_safety_alert(self, message: str) -> None:
+        """Show only connection failures that require immediate physical action."""
+
+        friendly = user_facing_text(message)
+        if friendly:
+            self.manual_experiment_view.show_condition_notice(
+                "需要立即处理",
+                friendly,
+                severity="critical",
+                source="connection-safety",
+                condition_key="connection-safety",
+            )
+        else:
+            self.manual_experiment_view.resolve_notice_condition(
+                source="connection-safety"
+            )
+
     def ingest_breath_samples(self, samples, *, timestamp: float | None = None) -> None:
         if hasattr(self, "calibration_view"):
             self.calibration_view.ingest_samples(samples, timestamp=timestamp)
@@ -548,13 +555,7 @@ class MainWindow(FluentWindow):
             prefix
             + ("\n" + "\n".join(diagnostic_summary) if diagnostic_summary else "")
         )
-        if not effective_ready:
-            self.manual_experiment_view.show_notice(
-                "连接失败",
-                "；".join(summary) or "设备检查未通过，请检查连接后重试。",
-                severity="error",
-                source="self-check",
-                notice_key="self-check-failed",
-            )
-        else:
-            self.manual_experiment_view.clear_notice_event(source="self-check")
+        # Connection phases already provide the complete ordinary-user
+        # presentation. Diagnostic self-check details remain in the hidden
+        # diagnostic label and logs; only explicit safety alerts create bars.
+        self.manual_experiment_view.clear_notice_event(source="self-check")

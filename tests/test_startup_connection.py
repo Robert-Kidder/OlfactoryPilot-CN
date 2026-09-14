@@ -6,6 +6,11 @@ import pytest
 from PySide6.QtWidgets import QApplication
 
 from app.main import DEFAULT_CONFIG, build_application
+from app.models import (
+    ManualExperimentIdentity,
+    ManualExperimentSnapshot,
+    ManualExperimentStatus,
+)
 from app.services import MockHAL
 from app.services.flow_service import FlowApplyResult
 
@@ -285,8 +290,10 @@ def test_startup_failure_has_no_auto_retry_and_manual_retry_reuses_transaction(q
     assert requested == ["startup"]
     assert controller._connection_request_count == 1
     assert controller._connection_timeout_timer.isActive() is False
-    assert window._connect_button.text() == "重试连接"
-    assert window._connection_badge.text() == "连接失败"
+    assert window._connect_button.text() == "重新连接"
+    assert window._connection_badge.text() == "设备未连接"
+    assert window._connect_button.isVisible()
+    assert window.manual_experiment_view.notice_frame is None
 
     window._connect_button.click()
     wait_until(qt_app, lambda: controller.state.telemetry.connected)
@@ -309,6 +316,38 @@ def test_partial_do_acquisition_failure_attempts_same_owner_cleanup_and_requires
     assert controller.state.telemetry.connected is False
     assert controller.state.hardware_ready is False
     assert controller._unsafe_shutdown_latched is True
+    assert window._connection_badge.text() == "设备未连接"
+    assert window._connect_button.isVisible()
+    assert window.manual_experiment_view.current_notice_title == "需要立即处理"
+    assert "立即关闭设备电源" in window.manual_experiment_view.detail_label.text()
+    controller.teardown()
+    window.close()
+
+
+def test_unsafe_shutdown_retry_failure_keeps_latch_and_safety_alert(qt_app):
+    hal = RaisingPrepareHAL()
+    _, window = build_application(DEFAULT_CONFIG, simulation=True, hal=hal)
+    controller = window.controller
+    controller._unsafe_shutdown_latched = True
+    window.show()
+    window.render_connection_phase("RECOVERY_REQUIRED")
+    window.render_connection_safety_alert(
+        "设备未能正常停止，请立即关闭设备电源"
+    )
+
+    window._connect_button.click()
+    wait_until(qt_app, lambda: controller._connection_phase == "RECOVERY_REQUIRED")
+
+    assert hal.prepare_count == 1
+    assert controller._unsafe_shutdown_latched is True
+    assert controller._unsafe_shutdown_retry_in_progress is False
+    assert controller.state.telemetry.connected is False
+    assert window._connection_badge.text() == "设备未连接"
+    assert window.manual_experiment_view.current_notice_title == "需要立即处理"
+    assert (
+        window.manual_experiment_view.detail_label.text()
+        == "设备未能正常停止，请立即关闭设备电源"
+    )
     controller.teardown()
     window.close()
 
@@ -361,9 +400,128 @@ def test_runtime_disconnect_fails_closed_without_auto_reconnect(qt_app):
     assert controller._connection_request_count == request_count
     assert controller.state.telemetry.connected is False
     assert controller.state.hardware_ready is False
+    assert window._connection_badge.text() == "设备未连接"
     assert window._connect_button.text() == "重新连接"
-    controller.shutdown_and_teardown()
-    window.close()
+    assert window._connect_button.isVisible()
+    for _ in range(20):
+        qt_app.processEvents()
+    assert controller._connection_request_count == request_count
+
+    window._connect_button.click()
+    controller.handle_telemetry(
+        {
+            "connected": True,
+            "airflow": 999.0,
+            "timestamp": 0.0,
+            "application_safety_state": "SAFE",
+            "application_safety_reason": "queued before Global Stop",
+            "airflow_sample_timestamp": -1.0,
+        }
+    )
+    assert controller.state.telemetry.connected is False
+    wait_until(qt_app, lambda: controller._connection_phase == "CONNECTED")
+    assert controller._connection_request_count == request_count + 1
+    assert window._connection_badge.text() == "设备已连接"
+    assert not window._connect_button.isVisible()
+    assert all(value == 0.0 for _channel, value, _comp in hal.flow_commands[-3:])
+    assert not any(hal._digital_state.values())
+    close_window(window, qt_app)
+
+
+def test_global_stop_success_allows_manual_reconnect_without_auto_retry(qt_app):
+    hal = CountingHAL()
+    _, window = build_application(DEFAULT_CONFIG, simulation=True, hal=hal)
+    controller = window.controller
+    window.show()
+    controller.schedule_startup_auto_connect()
+    wait_until(qt_app, lambda: controller._connection_phase == "CONNECTED")
+    request_count = controller._connection_request_count
+    window.manual_experiment_view.clear_notice()
+    old_identity = ManualExperimentIdentity("manual-before-stop", 1, 0)
+    old_snapshot = ManualExperimentSnapshot(
+        status=ManualExperimentStatus.STIMULATING,
+        identity=old_identity,
+        selected_external_ports=(2,),
+        open_confirmed=(2,),
+        possibly_open=(2,),
+    )
+    controller._manual_generation = 1
+    controller._manual_snapshot = old_snapshot
+
+    controller.stop_hardware()
+    qt_app.processEvents()
+    controller._handle_manual_snapshot(old_snapshot)
+
+    assert controller._connection_phase == "DISCONNECTED"
+    assert controller.state.telemetry.connected is False
+    assert controller.state.hardware_ready is False
+    assert window._connection_badge.text() == "设备未连接"
+    assert window._connect_button.text() == "重新连接"
+    assert window._connect_button.isVisible()
+    assert controller._manual_snapshot.status is ManualExperimentStatus.IDLE
+    assert controller._manual_snapshot.identity is None
+    assert controller._manual_snapshot.open_confirmed == ()
+    assert controller._manual_snapshot.possibly_open == ()
+    assert "已安全停止" not in window._connection_badge.text()
+    notice = window.manual_experiment_view.notice_frame
+    assert notice is None or not notice.isVisibleTo(window)
+    for _ in range(20):
+        qt_app.processEvents()
+    assert controller._connection_request_count == request_count
+
+    window._connect_button.click()
+    controller.handle_telemetry(
+        {
+            "connected": True,
+            "airflow": 999.0,
+            "timestamp": 0.0,
+            "application_safety_state": "SAFE",
+            "application_safety_reason": "queued before Global Stop",
+            "airflow_sample_timestamp": -1.0,
+        }
+    )
+    assert controller.state.telemetry.connected is False
+    wait_until(qt_app, lambda: controller._connection_phase == "CONNECTED")
+    assert controller._connection_request_count == request_count + 1
+    assert window._connection_badge.text() == "设备已连接"
+    assert not window._connect_button.isVisible()
+    assert all(value == 0.0 for _channel, value, _comp in hal.flow_commands[-3:])
+    assert not any(hal._digital_state.values())
+    close_window(window, qt_app)
+
+
+def test_global_stop_failure_keeps_fail_closed_warning(qt_app):
+    hal = CountingHAL()
+    _, window = build_application(DEFAULT_CONFIG, simulation=True, hal=hal)
+    controller = window.controller
+    window.show()
+    controller.schedule_startup_auto_connect()
+    wait_until(qt_app, lambda: controller._connection_phase == "CONNECTED")
+    original_shutdown = controller.shutdown_service.shutdown
+    controller.shutdown_service.shutdown = lambda **_kwargs: {
+        "source": "stop",
+        "result": "unsafe",
+        "error": "valve close receipt timeout",
+        "ts": time.time(),
+    }
+
+    controller.stop_hardware()
+    qt_app.processEvents()
+
+    assert controller._connection_phase == "RECOVERY_REQUIRED"
+    assert controller._unsafe_shutdown_latched is True
+    assert controller.state.telemetry.connected is False
+    assert controller.state.hardware_ready is False
+    assert window._connection_badge.text() == "设备未连接"
+    assert window.manual_experiment_view.current_notice_title == "需要立即处理"
+    assert (
+        window.manual_experiment_view.detail_label.text()
+        == "设备未能正常停止，请立即关闭设备电源"
+    )
+    assert "receipt" not in window.manual_experiment_view.detail_label.text()
+
+    controller.shutdown_service.shutdown = original_shutdown
+    close_window(window, qt_app)
 
 
 def test_queued_precommit_disconnected_payload_does_not_undo_connection(qt_app):

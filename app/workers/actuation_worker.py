@@ -827,7 +827,7 @@ class ActuationWorker(QThread):
         return handed_off
 
     def complete_global_safe_stop_handoff(self) -> bool:
-        """Clear maintenance admission state only after global owners handed off."""
+        """Publish neutral UI state only after every global owner handed off."""
 
         if self.isRunning() or not self._do_handed_off:
             return False
@@ -847,6 +847,21 @@ class ActuationWorker(QThread):
                 lease_held=False,
                 recording_ready=False,
             )
+            self._manual_snapshot = ManualExperimentSnapshot()
+            self._manual_plan = None
+            self._manual_lease_token = None
+            self._manual_expected.clear()
+            self._manual_receipts.clear()
+            self._manual_possibly_open.clear()
+            self._manual_pending_flow_id = None
+            self._manual_pending_flow_command = None
+            self._manual_pending_flow_role = ""
+            self._manual_flow_result = None
+            self._manual_flow_deadline_ns = None
+            self._manual_waiting_for_safe_flow = False
+            self._manual_waiting_for_safe_flow_role = ""
+            self._manual_start_pending = False
+        self.manual_snapshot_ready.emit(self._manual_snapshot)
         return True
 
     def bind_session_recorder(

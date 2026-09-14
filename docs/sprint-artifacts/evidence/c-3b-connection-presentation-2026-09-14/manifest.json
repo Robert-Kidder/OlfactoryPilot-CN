@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "evidence_kind": "simulation_ui_reference",
+  "hal": "MockHAL",
+  "real_hardware_access": false,
+  "post_stop_wait_seconds": 10.0,
+  "request_count_after_startup": 1,
+  "request_count_after_wait": 1,
+  "request_count_after_reconnect": 2,
+  "screenshots": [
+    {
+      "file": "device-connected.png",
+      "sha256": "44F91073A19654A6097C89EF02D70CD34A316524CA98D10471800EDB7EB16F86"
+    },
+    {
+      "file": "device-disconnected-reconnect.png",
+      "sha256": "34586683C8192B96937BF61101A1B839CA8FBC602D9641B6D4C60835BF67DA0F"
+    },
+    {
+      "file": "device-reconnected.png",
+      "sha256": "44F91073A19654A6097C89EF02D70CD34A316524CA98D10471800EDB7EB16F86"
+    }
+  ]
+}

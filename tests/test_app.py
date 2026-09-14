@@ -1604,7 +1604,7 @@ def test_connect_failure_surfaces_reason_and_allows_retry(qt_app):
     assert state.status_message == "连接失败，请检查设备后重试"
     assert controller._connect_in_progress is False
     assert window._connect_button.isEnabled() is True
-    assert window._connect_button.text() == "重试连接"
+    assert window._connect_button.text() == "重新连接"
     assert window._connect_button.toolTip() == ""
     assert window._self_check_label.wordWrap() is True
     assert "\n" in window._self_check_label.text()
@@ -2334,7 +2334,7 @@ def test_self_check_failure_atomically_clears_actuation_interlock(qt_app):
     assert state.telemetry.connected is False
 
 
-def test_persisted_unsafe_shutdown_requires_explicit_connect_retry(qt_app):
+def test_persisted_unsafe_shutdown_retry_keeps_latch_until_transaction_completes(qt_app):
     state = AppState.from_config({"low_flow_threshold": 0.2, "safety_state": "SAFE"})
     state.last_shutdown_event = {"result": "unsafe", "error": "close timeout"}
     worker = HardwareWorker(telemetry_hz=1)
@@ -2350,7 +2350,8 @@ def test_persisted_unsafe_shutdown_requires_explicit_connect_retry(qt_app):
     controller.connect_hardware()
 
     assert starts == {"hardware": 0, "flow": 0, "actuation": 1}
-    assert controller._unsafe_shutdown_latched is False
+    assert controller._unsafe_shutdown_latched is True
+    assert controller._unsafe_shutdown_retry_in_progress is True
 
 
 def test_latency_critical_workers_start_at_high_priority(qt_app):

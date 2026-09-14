@@ -1026,6 +1026,38 @@ def test_pending_manual_start_is_cancelled_by_stop_before_owner_consumes_it() ->
     assert worker.post_manual_start(plan, lease_token=lease)
 
 
+def test_successful_global_handoff_clears_manual_actual_open_evidence() -> None:
+    worker, _, _, _, plan, lease, _, _ = _fixture()
+    worker._manual_plan = plan
+    worker._manual_lease_token = lease
+    worker._manual_possibly_open = {target.internal_valve for target in plan.targets}
+    worker._manual_snapshot = replace(
+        worker.manual_snapshot,
+        status=ManualExperimentStatus.RECOVERY_REQUIRED,
+        identity=plan.identity,
+        selected_external_ports=tuple(
+            target.external_port for target in plan.targets
+        ),
+        open_confirmed=tuple(target.external_port for target in plan.targets),
+        possibly_open=tuple(target.external_port for target in plan.targets),
+        recovery_reason="全局停止正在收口",
+    )
+    emitted = []
+    worker.manual_snapshot_ready.connect(emitted.append)
+
+    assert worker.complete_global_safe_stop_handoff()
+
+    snapshot = worker.manual_snapshot
+    assert snapshot.status is ManualExperimentStatus.IDLE
+    assert snapshot.open_confirmed == ()
+    assert snapshot.close_confirmed == ()
+    assert snapshot.possibly_open == ()
+    assert worker._manual_plan is None
+    assert worker._manual_lease_token is None
+    assert worker._manual_possibly_open == set()
+    assert emitted[-1] == snapshot
+
+
 def test_current_registry_close_failure_is_not_cleared_by_legacy_alias_success() -> None:
     failed_target = "Dev2/P1.1"
 

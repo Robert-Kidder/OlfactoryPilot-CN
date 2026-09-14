@@ -3,6 +3,7 @@ from __future__ import annotations
 import time
 from types import SimpleNamespace
 
+import pytest
 from PySide6.QtWidgets import QAbstractButton, QLabel, QMessageBox
 from qfluentwidgets import InfoLevel
 
@@ -188,17 +189,17 @@ def test_production_telemetry_order_keeps_low_flow_feedback_as_error(qt_app) -> 
                 "safety_state": "LOW_FLOW",
             }
         )
-        window.manual_experiment_view.resolve_notice_condition(source="last-shutdown")
         qt_app.processEvents()
 
         assert window.manual_experiment_view.current_notice_severity == "error"
+        assert window.manual_experiment_view.current_notice_title == "气流不足"
         assert window.manual_experiment_view.notice_frame is not None
         assert window.manual_experiment_view.notice_frame.isVisibleTo(window)
     finally:
         window.close()
 
 
-def test_connected_but_unsafe_device_is_not_shown_as_success(qt_app) -> None:
+def test_connected_but_unsafe_device_keeps_simple_connection_header(qt_app) -> None:
     _, window = build_application(
         DEFAULT_CONFIG,
         start_worker=False,
@@ -210,12 +211,13 @@ def test_connected_but_unsafe_device_is_not_shown_as_success(qt_app) -> None:
         telemetry.connected = True
         telemetry.safety_state = "FAULT"
         telemetry.safety_reason = "设备状态异常"
+        window.render_connection_phase("CONNECTED")
         window.render_telemetry(telemetry)
         qt_app.processEvents()
 
-        assert window._connection_badge.text() == "设备状态异常"
-        assert window._connection_action_label.text() == "请检查设备状态"
-        assert window._connection_badge.level == InfoLevel.ERROR
+        assert window._connection_badge.text() == "设备已连接"
+        assert window._connection_action_label.text() == ""
+        assert window._connection_badge.level == InfoLevel.SUCCESS
         assert window.manual_experiment_view.current_notice_severity == "error"
         assert "当前状态不允许操作" in window.manual_experiment_view.current_notice_title
     finally:
@@ -246,16 +248,16 @@ def test_safety_notice_is_transition_driven_and_reentry_can_notify_again(qt_app)
         visible = "\n".join(_visible_texts(window))
         assert "LOW_FLOW" not in visible
         assert "SAFE" not in visible
-        assert "气流不足" in visible
-        assert "请检查供气和管路" in visible
+        assert "气流不足" not in visible
+        assert "请检查供气和管路" not in visible
 
         window.controller._render_manual_snapshot()
         window.render_telemetry(telemetry)
         qt_app.processEvents()
         assert window.manual_experiment_view.notice_frame is None
         visible = "\n".join(_visible_texts(window))
-        assert "气流不足" in visible
-        assert "请检查供气和管路" in visible
+        assert "气流不足" not in visible
+        assert "请检查供气和管路" not in visible
 
         telemetry.safety_state = "SAFE"
         telemetry.safety_reason = "Alicat 气流正常"
@@ -426,7 +428,7 @@ def test_real_actuation_alert_caller_updates_stable_notice_in_place(qt_app) -> N
         window.close()
 
 
-def test_real_self_check_caller_updates_stable_notice_in_place(qt_app) -> None:
+def test_self_check_failure_stays_in_diagnostics_without_notice(qt_app) -> None:
     _, window = build_application(DEFAULT_CONFIG, start_worker=False, simulation=True)
     try:
         window.show()
@@ -440,16 +442,13 @@ def test_real_self_check_caller_updates_stable_notice_in_place(qt_app) -> None:
             name="气流计", status="FAIL", reason="读数异常", suggestion="重新连接"
         )
         window.render_self_check([first], False)
-        frame = view.notice_frame
-        identity = view._notice_identity
         creation_count = view.notice_creation_count
 
         window.render_self_check([updated], False)
 
-        assert frame is not None and view.notice_frame is frame
-        assert view._notice_identity == identity
+        assert view.notice_frame is None
         assert view.notice_creation_count == creation_count
-        assert "读数异常" in view.detail_label.text()
+        assert "读数异常" in window._self_check_label.text()
     finally:
         window.close()
 
@@ -483,22 +482,25 @@ def test_expected_manual_low_flow_transition_creates_no_safety_notice(qt_app) ->
         window.close()
 
 
-def test_connected_self_check_failure_is_not_presented_as_ready(qt_app) -> None:
+def test_failed_connection_uses_disconnected_product_presentation(qt_app) -> None:
     _, window = build_application(
         DEFAULT_CONFIG,
         start_worker=False,
         simulation=True,
     )
     try:
-        telemetry = window.state.telemetry
-        telemetry.connected = True
-        telemetry.safety_state = "SAFE"
+        window.show()
+        qt_app.processEvents()
+        window.render_connection_phase("SELF_CHECKING")
+        assert window._connection_badge.text() == "正在连接…"
+        assert not window._connect_button.isVisible()
+        window.render_connection_phase("FAILED")
 
-        window.render_telemetry(telemetry, hardware_ready=False)
-
-        assert window._connection_badge.text() == "设备检查未通过"
-        assert window._connection_action_label.text() == "请检查设备后重新连接"
+        assert window._connection_badge.text() == "设备未连接"
+        assert window._connection_action_label.text() == ""
         assert window._connection_badge.level == InfoLevel.ERROR
+        assert window._connect_button.text() == "重新连接"
+        assert window._connect_button.isVisible()
     finally:
         window.close()
 
@@ -516,6 +518,7 @@ def test_connected_normal_header_has_no_internal_safety_code_or_success_notice(q
         telemetry.connected = True
         telemetry.safety_state = "SAFE"
         telemetry.safety_reason = "Alicat 气流正常"
+        window.render_connection_phase("CONNECTED")
         window.render_telemetry(telemetry)
         window.render_self_check([], True)
         qt_app.processEvents()
@@ -549,13 +552,14 @@ def test_connected_data_stale_episode_notifies_after_disconnected_idle(qt_app) -
 
         telemetry.connected = True
         telemetry.safety_reason = "气流采样已过期"
+        window.render_connection_phase("CONNECTED")
         window.render_telemetry(telemetry)
         qt_app.processEvents()
 
         assert window.manual_experiment_view.notice_frame is not None
         assert "设备数据中断" in window.manual_experiment_view.current_notice_title
-        assert window._connection_badge.text() == "设备通信中断"
-        assert window._connection_action_label.text() == "请检查设备连接"
+        assert window._connection_badge.text() == "设备已连接"
+        assert window._connection_action_label.text() == ""
         visible = "\n".join(_visible_texts(window))
         assert "DATA_STALE" not in visible
     finally:
@@ -574,11 +578,12 @@ def test_unknown_connected_safety_code_uses_natural_persistent_header_text(qt_ap
         telemetry.connected = True
         telemetry.safety_state = "INTERNAL_STATE_42"
         telemetry.safety_reason = "epoch=7 owner=manual"
+        window.render_connection_phase("CONNECTED")
         window.render_telemetry(telemetry)
         qt_app.processEvents()
 
-        assert window._connection_badge.text() == "设备状态异常"
-        assert window._connection_action_label.text() == "请检查设备状态"
+        assert window._connection_badge.text() == "设备已连接"
+        assert window._connection_action_label.text() == ""
         visible = "\n".join(_visible_texts(window))
         assert "INTERNAL_STATE_42" not in visible
         assert "epoch=7" not in visible
@@ -617,6 +622,63 @@ def test_mica_is_disabled_and_overlay_does_not_change_core_geometry(qt_app) -> N
             window._connection_action_slot.geometry(),
             window.manual_experiment_view.geometry(),
         ) == baseline
+    finally:
+        window.close()
+
+
+def test_connection_product_states_keep_header_geometry_stable(qt_app) -> None:
+    _, window = build_application(DEFAULT_CONFIG, start_worker=False, simulation=True)
+    try:
+        window.show()
+        qt_app.processEvents()
+        baseline = (
+            window._connection_status_slot.geometry(),
+            window._connection_action_slot.geometry(),
+            window._stop_button.geometry(),
+            window.manual_experiment_view.geometry(),
+        )
+
+        for phase, text, reconnect_visible in (
+            ("SELF_CHECKING", "正在连接…", False),
+            ("CONNECTED", "设备已连接", False),
+            ("DISCONNECTED", "设备未连接", True),
+            ("FAILED", "设备未连接", True),
+            ("RUNTIME_DISCONNECTED", "设备未连接", True),
+            ("RECOVERY_REQUIRED", "设备未连接", True),
+        ):
+            window.render_connection_phase(phase)
+            qt_app.processEvents()
+            assert window._connection_badge.text() == text
+            assert window._connect_button.isVisible() is reconnect_visible
+            assert (
+                window._connection_status_slot.geometry(),
+                window._connection_action_slot.geometry(),
+                window._stop_button.geometry(),
+                window.manual_experiment_view.geometry(),
+            ) == baseline
+    finally:
+        window.close()
+
+
+def test_unknown_connection_phase_is_rejected(qt_app) -> None:
+    _, window = build_application(DEFAULT_CONFIG, start_worker=False, simulation=True)
+    try:
+        with pytest.raises(ValueError, match="未知 connection phase"):
+            window.render_connection_phase("FUTURE_ACTIVE_PHASE")
+    finally:
+        window.close()
+
+
+def test_nonfinite_connected_sample_is_presented_as_missing_not_zero(qt_app) -> None:
+    _, window = build_application(DEFAULT_CONFIG, start_worker=False, simulation=True)
+    try:
+        window.state.telemetry.connected = True
+        window.state.telemetry.airflow = float("nan")
+
+        window.controller._render_manual_snapshot()
+        qt_app.processEvents()
+
+        assert window.manual_experiment_view._snapshot.telemetry_a_sccm is None
     finally:
         window.close()
 
@@ -662,6 +724,7 @@ def test_queued_presentation_coalesces_to_latest_coherent_generation(qt_app) -> 
 
         window.queue_presentation(base)
         window.queue_presentation(latest)
+        window.render_connection_phase("CONNECTED")
         qt_app.processEvents()
 
         assert window._rendered_presentation_generation == 101

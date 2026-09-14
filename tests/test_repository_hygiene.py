@@ -619,6 +619,86 @@ def test_ui_capture_failure_removes_its_owned_session(
     assert after == before
 
 
+def test_c3b_connection_capture_is_simulation_only_and_owned() -> None:
+    source = (PROJECT_ROOT / "scripts" / "capture_c3b_connection_ui.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'create_session("ui-capture", REPO_ROOT)' in source
+    assert "cleanup_session(session.path, session.token)" in source
+    assert "simulation=True" in source
+    assert 'local_config_path=session.path / "config.json"' in source
+    assert "c-3b-connection-presentation-2026-09-14" in source
+    assert "RealHAL" not in source
+    assert "run-clean-clone" not in source
+
+
+def test_c3b_connection_capture_failure_removes_its_owned_session(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from scripts import capture_c3b_connection_ui as capture
+
+    purpose_root = PROJECT_ROOT / ".devtmp" / "ui-capture"
+    before = set(purpose_root.glob("run-*")) if purpose_root.exists() else set()
+
+    def fail_build(*_args, **_kwargs):
+        raise RuntimeError("injected c3b capture failure")
+
+    monkeypatch.setattr(capture, "EVIDENCE_DIR", tmp_path / "evidence")
+    monkeypatch.setattr(capture, "build_application", fail_build)
+    with pytest.raises(RuntimeError, match="injected c3b capture failure"):
+        capture.main()
+
+    after = set(purpose_root.glob("run-*")) if purpose_root.exists() else set()
+    assert after == before
+
+
+def test_c3b_connection_capture_refuses_to_overwrite_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from scripts import capture_c3b_connection_ui as capture
+
+    evidence_dir = tmp_path / "accepted-evidence"
+    evidence_dir.mkdir()
+    marker = evidence_dir / "keep.txt"
+    marker.write_text("accepted", encoding="utf-8")
+    monkeypatch.setattr(capture, "EVIDENCE_DIR", evidence_dir)
+
+    with pytest.raises(FileExistsError, match="拒绝覆盖"):
+        capture.main()
+
+    assert marker.read_text(encoding="utf-8") == "accepted"
+
+
+def test_c3b_connection_evidence_manifest_matches_screenshots() -> None:
+    evidence_dir = (
+        PROJECT_ROOT
+        / "docs"
+        / "sprint-artifacts"
+        / "evidence"
+        / "c-3b-connection-presentation-2026-09-14"
+    )
+    manifest = json.loads((evidence_dir / "manifest.json").read_text(encoding="utf-8"))
+
+    assert manifest["evidence_kind"] == "simulation_ui_reference"
+    assert manifest["hal"] == "MockHAL"
+    assert manifest["real_hardware_access"] is False
+    assert manifest["post_stop_wait_seconds"] >= 10.0
+    assert manifest["request_count_after_startup"] == 1
+    assert manifest["request_count_after_wait"] == 1
+    assert manifest["request_count_after_reconnect"] == 2
+    assert [item["file"] for item in manifest["screenshots"]] == [
+        "device-connected.png",
+        "device-disconnected-reconnect.png",
+        "device-reconnected.png",
+    ]
+    for item in manifest["screenshots"]:
+        digest = hashlib.sha256((evidence_dir / item["file"]).read_bytes()).hexdigest()
+        assert digest.upper() == item["sha256"]
+
+
 def test_simulation_screenshot_manifest_matches_accepted_bytes() -> None:
     screenshot_root = PROJECT_ROOT / "docs" / "sprint-artifacts" / "evidence" / "screenshots"
     manifest = json.loads((screenshot_root / "manifest.json").read_text(encoding="utf-8"))

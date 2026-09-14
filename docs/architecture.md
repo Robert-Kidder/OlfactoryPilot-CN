@@ -62,9 +62,11 @@ tests/                 # 自动化测试
 ### 启动与连接生命周期
 
 - App 配置解析、`RealHAL.from_config()`/构造、Controller/View 构建和 `window.show()` 全部是 passive 阶段，不打开串口、不创建 DAQ task、不执行自检或输出。
-- 主窗口显示且 Qt event loop 能处理 queued event 后，每个进程生命周期只消费一次 startup auto-connect。它与失败后的“重试连接”、运行中断线后的“重新连接”共用唯一连接 transaction；没有设置、配置或 CLI 可以关闭此产品行为。
+- 主窗口显示且 Qt event loop 能处理 queued event 后，每个进程生命周期只消费一次 startup auto-connect。它与任何未连接状态下的人工“重新连接”共用唯一连接 transaction；没有设置、配置或 CLI 可以关闭此产品行为。
 - transaction 顺序为 `DISCONNECTED → PREPARING_SAFE_OUTPUTS → SELF_CHECKING → ZEROING_FLOWS(B/C/A) → VERIFYING_READINESS → CONNECTED`。HardwareWorker 启动本身保持 idle，自检只能由 transaction 显式请求；安全 DO、自检、三路清零回读和新的零流量样本全部成功后才发布 `connected=True`。
-- startup 任一步失败都停止自动尝试并清理已接管资源；无法确认安全收敛时进入 `RECOVERY_REQUIRED`。运行中断线先 fail-closed，再等待人工重新连接，绝不自动恢复上一次实验动作。
+- Controller 保留完整内部阶段，但 View 通过单一 presentation 映射层只发布 `CONNECTING / CONNECTED / DISCONNECTED` 三种产品状态，分别显示“正在连接…”、“设备已连接”、“设备未连接”；普通界面不解释内部阶段或失败来源。
+- startup 任一步失败都停止自动尝试并清理已接管资源；运行中断线也先 fail-closed，再等待人工重新连接。Global Stop 成功后释放 owner、NI/serial 与运行身份，进入可人工重新连接的 `DISCONNECTED`，且重新连接只能进入新的安全 idle，绝不恢复上一次实验动作。
+- 无法确认阀门关闭、流量归零或 SafeStop 完成时进入 `RECOVERY_REQUIRED` 并保持 unsafe latch；普通连接 badge 仍为“设备未连接”，另用持续的用户安全提示要求立即断电，详细内部原因只进入日志/evidence。
 - 尚未开始 acquisition 时，关闭窗口或点击全局停止不得为了“安全”首次创建 task、打开串口或启动 worker。
 
 ### 执行域隔离

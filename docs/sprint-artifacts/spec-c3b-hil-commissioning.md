@@ -6,6 +6,7 @@ status: 'in-review'
 route: 'dispatch'
 review_loop_iteration: 1
 offline_lifecycle_remediation: 'done'
+offline_connection_presentation: 'done'
 physical_commissioning_status: 'pending-c3b-3-real-connect'
 baseline_commit: '2cc3a8986eaa95aeb7a963ee05f3caea484deb1f'
 context:
@@ -43,8 +44,10 @@ context:
 | 全局停止 | 活动或状态不确定 | A=0→selector补偿→阀1–20关闭→A/B/C=0→释放资源 | 证据不完整则进入人工恢复 |
 | 正常启动 | 窗口首次显示且事件循环开始 | queued auto-connect 恰好请求一次同一连接 transaction | 连接中拒绝重复请求 |
 | 窗口立即关闭 | auto-connect 已排队但 callback 未执行 | callback 安全 no-op，硬件 I/O=0 | 不启动后台 owner |
-| startup 失败 | 任一连接阶段失败 | fail-closed、释放已接管资源并显示“连接失败 / 重试连接” | 不调度自动重试 |
-| 运行中断线 | 已连接后通信中断 | 先安全收口，显示“设备通信中断 / 重新连接” | 不自动重连或恢复实验 |
+| startup 失败 | 任一连接阶段失败 | fail-closed、释放已接管资源并显示“设备未连接 / 重新连接” | 不调度自动重试 |
+| Global Stop 成功 | 已连接且安全收口、资源释放完成 | 显示“设备未连接 / 重新连接” | 不自动重连；重连不恢复旧动作 |
+| 运行中断线 | 已连接后通信中断 | 先安全收口，再显示“设备未连接 / 重新连接” | 不自动重连或恢复实验 |
+| 安全收口无法确认 | 阀门关闭、流量归零或 SafeStop 无法确认 | badge 仍为“设备未连接”，另持续提示用户立即断电 | 保持 fail-closed，详细原因只进日志/evidence |
 | DO 首次接管 | active-high/active-low odor 与 selector 极性 | 每个 task 的第一次物理 drive 是完整安全 packed image | 无法计算或写入安全 image 即拒绝连接 |
 
 </frozen-after-approval>
@@ -101,6 +104,7 @@ context:
 - 2026-09-10：完成官方协议支持的 `VE`/无参数 `LSS` 只读查询，确认 A/B/C firmware=`10v14.0-R24`、mode=`S`；B/C Setpoint Source blocker 已解除，非零 setpoint 与 App Connect 授权仍未解决。
 - 2026-09-10：完成 C.3b-2C；A/B/C setpoint 从 `1500/1500/500` 逐台清零，LSS 从 `S/S/S` 逐台改为 `U/U/U`。Alicat 安全初值 blocker 已解除；真实 App Connect 与气味阀真实初始关闭确认仍未授权/完成。
 - 2026-09-11：人工重新确定产品启动语义为“窗口显示后自动连接一次”；移除原启动授权 open question，新增 passive startup、one-shot、统一 transaction、失败不自动重试、运行中断线不自动恢复和安全 DO 首次 image 约束。C.3b-3 真实连接仍未执行。
+- 2026-09-14：人工进一步统一产品连接表现为“正在连接…”、“设备已连接”、“设备未连接”三态；startup failure、Global Stop 成功及 runtime disconnect 安全收口成功均显示“设备未连接 / 重新连接”。这项决定取代 Review B8 的旧终止性 UI 结论，但不削弱 SafeStop、unsafe latch 或严重安全提示。C.3b-3 真实连接仍未执行。
 
 ## Review Triage Log
 
@@ -129,6 +133,7 @@ context:
 | Edge E7 | medium | direct-fix | connection phase 拥有 Header；普通 telemetry 不再覆盖 connecting/failed/runtime-disconnected。 |
 | Edge E8 | low | direct-fix | 失败态 badge 色彩回归已补齐。 |
 | Gap G1 | medium | direct-fix | `hil_cleaning_gate.py` 改用权威 connection transaction；未运行真实入口。 |
+| UX U1 | n/a | supersedes B8 | 2026-09-14 人工产品决策明确 Global Stop 成功后显示“设备未连接 / 重新连接”，人工重连复用唯一 transaction 且不恢复旧动作；失败仍保持 fail-closed 与持续断电提示。 |
 | Gap G2 | medium | direct-fix | clean-clone smoke 源码改为 show 后 one-shot auto-connect，并断言 connected/ready；本轮未运行 clean-clone。 |
 | Gap G3 | high | direct-fix | 新增 current-profile pull-down/polarity blocker 行为测试和离线配置审计。 |
 | Gap G4 | high | direct-fix | 新增 prepare timeout、异常及 partial acquisition cleanup 回归。 |

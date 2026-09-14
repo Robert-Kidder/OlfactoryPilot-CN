@@ -435,6 +435,7 @@ class MainController(QObject):
             self._handle_physical_verification_worker_result
         )
         self._manual_generation = 0
+        self._unsafe_shutdown_retry_in_progress = False
         self._presentation_generation = 0
         self._latest_airflow_sample_timestamp = float(state.telemetry.timestamp)
         self._last_manual_supply_restored_at = 0.0
@@ -581,7 +582,7 @@ class MainController(QObject):
         if configuration_block:
             self._set_configuration_block_status(configuration_block)
             return False
-        if self._unsafe_shutdown_latched:
+        if self._unsafe_shutdown_latched and not self._unsafe_shutdown_retry_in_progress:
             self._block_for_unsafe_shutdown(
                 "检测到未经人工确认的关闭失败；请点击连接以明确重试。"
             )
@@ -952,7 +953,6 @@ class MainController(QObject):
                 self.state.update_status("设备通信中断，请检查设备后重新连接")
                 if self.view:
                     self.view.render_connection_phase("RUNTIME_DISCONNECTED")
-                    self.view.update_status(self.state.status_message)
             return
         sample_timestamp = payload.get("airflow_sample_timestamp")
         if (
@@ -1425,7 +1425,11 @@ class MainController(QObject):
         if not self._connect_in_progress or self._connection_phase != "SELF_CHECKING":
             LOG.warning("Ignoring self-check result outside connection transaction")
             return
-        if hardware_ready and self._unsafe_shutdown_latched:
+        if (
+            hardware_ready
+            and self._unsafe_shutdown_latched
+            and not self._unsafe_shutdown_retry_in_progress
+        ):
             LOG.warning("Ignoring self-check ready while unsafe shutdown latch is set")
             hardware_ready = False
         # Self-check is an intermediate gate.  Keep public readiness false
@@ -1466,8 +1470,6 @@ class MainController(QObject):
         if configuration_block:
             self._set_configuration_block_status(configuration_block)
             return
-        if self._unsafe_shutdown_latched:
-            self._unsafe_shutdown_latched = False
         self.request_hardware_connection(source="retry")
 
     def connect_hardware(self) -> None:
@@ -1513,17 +1515,18 @@ class MainController(QObject):
     def request_hardware_connection(self, *, source: str) -> bool:
         """Single safe transaction used by startup, retry and reconnect."""
 
-        if self._telemetry_terminal_stopped:
+        reconnect_after_global_stop = bool(self._telemetry_terminal_stopped)
+        if reconnect_after_global_stop and source != "retry":
             self._connection_phase = "DISCONNECTED"
-            self.state.update_status("已执行全局停止，请关闭并重新启动应用。")
+            self.state.update_status("设备未连接")
             if self.view:
                 self.view.render_connection_phase("DISCONNECTED")
-                self.view.update_status(self.state.status_message)
             return False
         configuration_block = self._configuration_runtime_block_reason()
         if configuration_block:
             self._connection_phase = "FAILED"
-            self._set_configuration_block_status(configuration_block)
+            self.state.update_status(configuration_block)
+            self._refresh_toolbar_state()
             if self.view:
                 self.view.render_connection_phase("FAILED")
             return False
@@ -1540,7 +1543,6 @@ class MainController(QObject):
             LOG.error("Power-on pull-down safety blocker | targets=%s", blockers)
             if self.view:
                 self.view.render_connection_phase("FAILED")
-                self.view.update_status(self.state.status_message)
             return False
 
         if self._unsafe_shutdown_latched:
@@ -1552,7 +1554,16 @@ class MainController(QObject):
                 if self.view:
                     self.view.render_connection_phase("FAILED")
                 return False
-            self._unsafe_shutdown_latched = False
+            # An explicit retry may attempt a new safe acquisition, but the
+            # previous unsafe-shutdown latch and user alert remain authoritative
+            # until the complete connection transaction proves a safe idle.
+            self._unsafe_shutdown_retry_in_progress = True
+        else:
+            self._unsafe_shutdown_retry_in_progress = False
+        if reconnect_after_global_stop:
+            # Global Stop fences queued telemetry/results until the user asks
+            # for a fresh transaction. It is not a second connection path.
+            self._telemetry_terminal_stopped = False
         self._connection_request_count += 1
         self._connect_in_progress = True
         self._connection_phase = "PREPARING_SAFE_OUTPUTS"
@@ -1566,8 +1577,9 @@ class MainController(QObject):
             self.worker.reject_connection()
         self.state.update_status("正在连接设备…")
         if self.view:
-            self.view.update_status(self.state.status_message)
             self.view.render_connection_phase("CONNECTING")
+            if not self._unsafe_shutdown_retry_in_progress:
+                self.view.render_connection_safety_alert("")
         if not self._start_actuation_owner():
             self._fail_connection("安全数字输出准备未能启动", acquired=False)
             return False
@@ -3733,6 +3745,17 @@ class MainController(QObject):
 
     @Slot(object)
     def _handle_manual_snapshot(self, snapshot: ManualExperimentSnapshot) -> None:
+        if (
+            snapshot.identity is not None
+            and snapshot.identity.generation < self._manual_generation
+        ):
+            LOG.debug(
+                "Ignoring fenced manual snapshot | operation=%s | generation=%s | fence=%s",
+                snapshot.identity.operation_id,
+                snapshot.identity.generation,
+                self._manual_generation,
+            )
+            return
         self._manual_snapshot = snapshot
         if snapshot.supply_restored_at is not None:
             self._last_manual_supply_restored_at = max(
@@ -3818,14 +3841,22 @@ class MainController(QObject):
                 f"手动实验需要恢复：{self._manual_snapshot.recovery_reason}；"
                 "安全动作：owner 正在执行统一清零/关闭；下一步：完成全局停止后重新连接。"
             )
+        presentation_airflow = float(self.state.telemetry.airflow)
+        presentation_connected = bool(self.state.telemetry.connected)
+        if not math.isfinite(presentation_airflow):
+            # The immutable presentation requires a finite carrier value, but
+            # a non-finite sample is missing data, never a measured zero. Mark
+            # the presentation disconnected so the View suppresses the value.
+            presentation_airflow = 0.0
+            presentation_connected = False
         self._presentation_generation += 1
         presentation = ManualPresentationSnapshot(
             generation=self._presentation_generation,
-            connected=bool(self.state.telemetry.connected),
+            connected=presentation_connected,
             hardware_ready=bool(self.state.hardware_ready),
             safety_state=str(self.state.telemetry.safety_state),
             safety_reason=str(self.state.telemetry.safety_reason),
-            airflow=float(self.state.telemetry.airflow),
+            airflow=presentation_airflow,
             telemetry_timestamp=float(self._latest_airflow_sample_timestamp),
             experiment=self._manual_snapshot,
             controls_enabled=ready and idle,
@@ -5152,10 +5183,10 @@ class MainController(QObject):
         )
         if event.get("result") == "success":
             self._telemetry_terminal_stopped = True
-        self._handle_shutdown_event(event, success_message="已停止/已关闭阀门")
+        self._handle_shutdown_event(event, success_message="设备未连接")
         if finalize_session:
             self._finish_session_after_global_stop(event)
-        if hasattr(self, "valve_service"):
+        if event.get("result") == "success" and hasattr(self, "valve_service"):
             self.valve_service.reset_cached_state()
         self._connect_in_progress = False
         self._hardware_acquired = event.get("result") != "success"
@@ -6076,6 +6107,8 @@ class MainController(QObject):
         self._hardware_acquired = True
         self._has_seen_connection = True
         self._runtime_disconnect_cleanup_started = False
+        self._unsafe_shutdown_latched = False
+        self._unsafe_shutdown_retry_in_progress = False
         self.state.hardware_ready = True
         self.state.telemetry.connected = True
         self.state.flow_setpoints_ready = True
@@ -6101,6 +6134,8 @@ class MainController(QObject):
         recovery_required: bool = False,
     ) -> None:
         self._connection_timeout_timer.stop()
+        recovering_unsafe_shutdown = self._unsafe_shutdown_retry_in_progress
+        self._unsafe_shutdown_retry_in_progress = False
         if hasattr(self.worker, "reject_connection"):
             self.worker.reject_connection()
         self._connect_in_progress = False
@@ -6124,21 +6159,23 @@ class MainController(QObject):
                 force=True,
             )
             self._hardware_acquired = cleanup_event.get("result") != "success"
+            self._handle_shutdown_event(cleanup_event, success_message="设备未连接")
         cleanup_ok = (
             not recovery_required
+            and not recovering_unsafe_shutdown
             and (cleanup_event is None or cleanup_event.get("result") == "success")
         )
         self._connection_phase = "FAILED" if cleanup_ok else "RECOVERY_REQUIRED"
         if cleanup_ok:
             status = "连接失败，请检查设备后重试"
         else:
-            status = "连接失败且未能确认安全状态，请立即现场停止或断电"
+            status = "设备未能正常停止，请立即关闭设备电源"
             self._unsafe_shutdown_latched = True
         LOG.error("Hardware connection failed | reason=%s | cleanup=%s", reason, cleanup_event)
         self.state.update_status(status)
         if self.view:
             self.view.render_connection_phase(self._connection_phase)
-            self.view.update_status(status)
+            self.view.render_connection_safety_alert("" if cleanup_ok else status)
         self._refresh_toolbar_state()
 
     @Slot(str, float, float, float)
@@ -6190,6 +6227,7 @@ class MainController(QObject):
     def _handle_shutdown_event(self, event: dict, *, success_message: str) -> None:
         success = event.get("result") == "success"
         self._unsafe_shutdown_latched = not success
+        self._unsafe_shutdown_retry_in_progress = False
         self.state.flow_setpoints_ready = False
         flow_lease_idle = self.flow_worker.lease_snapshot.kind == DeviceLeaseKind.IDLE
         if flow_lease_idle:
@@ -6198,7 +6236,13 @@ class MainController(QObject):
         if success and flow_lease_idle:
             self.actuation_interlock.disarm_airflow_monitor()
             self._cleaning_lease_token = None
-            self.actuation_worker.complete_global_safe_stop_handoff()
+            self._manual_lease_token = None
+            self._manual_supply_identity = None
+            if self.actuation_worker.complete_global_safe_stop_handoff():
+                # Fence any worker-thread Manual snapshot queued before the
+                # successful global owner handoff.
+                self._manual_generation += 1
+                self._manual_snapshot = self.actuation_worker.manual_snapshot
             self._cleaning_runtime = replace(
                 self._cleaning_runtime,
                 lease_held=False,
@@ -6215,8 +6259,12 @@ class MainController(QObject):
         )
         self.state.update_status(message)
         if self.view:
-            self.view.update_status(message)
+            if event.get("source") not in {"stop", "connect_failure"}:
+                self.view.update_status(message)
             self.view.render_last_shutdown(event)
+            self.view.render_connection_safety_alert(
+                "" if success else "设备未能正常停止，请立即关闭设备电源"
+            )
         self._render_manual_snapshot()
 
     def _latch_restart_failure(self, reason: str) -> None:
@@ -6241,7 +6289,9 @@ class MainController(QObject):
         )
         self.state.update_status(message)
         if self.view:
-            self.view.update_status(message)
+            self.view.render_connection_safety_alert(
+                "设备未能正常停止，请立即关闭设备电源"
+            )
         self._render_manual_snapshot()
 
     def update_breath_threshold(self, name: str, value: float) -> None:
