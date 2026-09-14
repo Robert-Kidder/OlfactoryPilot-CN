@@ -57,7 +57,7 @@ tests/                 # 自动化测试
 - `FlowWorker` 是 Alicat 串口单写者。Controller 只提交 flow intent；`ActuationWorker` 先检查协议设备租约与 interlock，再把获准命令交给 `FlowWorker`。
 - `ActuationInterlockIngress` 是 producer-safe 的 immutable readiness store。AI/telemetry/serial producer 先更新 generation 和 unsafe latch，再发 UI 消息；只有动作 owner 在 readiness 恢复且阀门已确认关闭后才能清除 latch。
 - shutdown 的强制安全偏序为：停止新提交与失效 normal epoch → 请求 MFC A 清零并等待匹配成功 receipt → 才允许把 A 路三通选择阀切换到定义的安全路线。气味阀 1–20、B/C、ActuationWorker/DO、HardwareWorker/AI 与 FlowWorker/serial 的其余收敛顺序由 `SafeStopPlan` 明确定义；关键回执失败或状态不确定时进入 `RECOVERY_REQUIRED`。DO owner 未交还时禁止跨线程复用旧 task 做兜底写入。
-- RealHAL 按 device/port 建立持久 DO task。首次接管时先完成全部 channel 配置，再以 `Task.write(safe_packed_image, auto_start=True)` 让隐式启动的第一次物理 drive 就是按气味阀 active-high/active-low 与 selector polarity 计算的完整端口安全 image；后续 deadline 路径只更新端口状态向量并调用 `Task.write(auto_start=False)`。最终资源分组及 `<20ms` 性能仍必须由真实 Windows/NI HIL 证据确认。
+- RealHAL 按 device/port 建立持久 DO task。首次接管时先完成全部 channel 配置，再以 `Task.write(safe_packed_image, auto_start=True)` 让第一次物理 drive 就是按气味阀 active-high/active-low 与 selector polarity 计算的完整端口安全 image；该单点 On-Demand 写返回后必须显式 `Task.start()` 建立会话期 Running 状态，后续 deadline 与 Global Stop 路径才可在同一 task 上调用 `Task.write(auto_start=False)`。最终安全写确认后才能 close/release；意外 stop 只触发 fail-closed，不得隐式 restart/retry。每次 acquisition 的每个 port 仅记录一次 packed safe image 审计证据。最终资源分组及 `<20ms` 性能仍必须由真实 Windows/NI HIL 证据确认。
 
 ### 启动与连接生命周期
 

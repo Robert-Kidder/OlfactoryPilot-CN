@@ -47,11 +47,18 @@ FLOW_FIELD_INDEX = {
 @dataclass
 class _DOPortSession:
     task: object
+    session_id: str
     device: str
     port: str
     first_line: int
     last_line: int
     states: list[bool]
+    prepared: bool = False
+    safe_image_written: bool = False
+    running: bool = False
+    released: bool = False
+    safe_write_started_ns: int | None = None
+    safe_write_actual_ns: int | None = None
 
 
 class RealHAL(HalBase):
@@ -131,6 +138,7 @@ class RealHAL(HalBase):
         self._do_sessions: dict[tuple[str, str], _DOPortSession] = {}
         self._do_owner_thread_id: int | None = None
         self._do_prepare_failed = False
+        self._do_acquisition_sequence = 0
         # HardwareWorker lazily creates the AI task on its own thread.
 
     @property
@@ -430,6 +438,20 @@ class RealHAL(HalBase):
                 wall_timestamp=self._wall_clock(),
                 message=f"DO task 尚未准备或不包含目标：{device}/{normalized}",
             )
+        if not (
+            session.prepared
+            and session.safe_image_written
+            and session.running
+            and not session.released
+        ):
+            return DigitalWriteAck(
+                success=False,
+                started_ns=None,
+                actual_ns=None,
+                wall_timestamp=self._wall_clock(),
+                message=f"DO session 不在可写运行状态：{session.session_id}",
+                uncertain=True,
+            )
         candidate = list(session.states)
         candidate[bit - session.first_line] = bool(state)
         # CHAN_FOR_ALL_LINES expects a packed integer for a multi-line port
@@ -445,6 +467,15 @@ class RealHAL(HalBase):
                 timeout=max(0.001, int(timeout_ms) / 1000),
             )
         except Exception as exc:
+            if getattr(exc, "error_code", None) == -200846:
+                # NI-DAQmx has explicitly reported that this On-Demand task is
+                # not Running. Latch that lifecycle fact; never auto-start or
+                # retry an action whose first physical result is uncertain.
+                session.running = False
+                LOG.error(
+                    "DO session no longer running | session=%s | error_code=-200846",
+                    session.session_id,
+                )
             # A failed close is physically uncertain.  Keeping the previous
             # cached True bit could reassert that valve on the next packed-port
             # write, so fail the target's software intent toward the safe state.
@@ -475,7 +506,13 @@ class RealHAL(HalBase):
         if self._do_sessions:
             if self._do_prepare_failed:
                 return False
-            return self._do_owner_thread_id == owner
+            return self._do_owner_thread_id == owner and all(
+                session.prepared
+                and session.safe_image_written
+                and session.running
+                and not session.released
+                for session in self._do_sessions.values()
+            )
         if LineGrouping is None or not hasattr(LineGrouping, "CHAN_FOR_ALL_LINES"):
             return False
         groups: dict[tuple[str, str], set[int]] = {}
@@ -499,6 +536,8 @@ class RealHAL(HalBase):
                 )
                 return False
         created: list[_DOPortSession] = []
+        self._do_acquisition_sequence += 1
+        acquisition_sequence = self._do_acquisition_sequence
         try:
             for (device, port), bits in sorted(groups.items()):
                 first = min(bits)
@@ -513,6 +552,7 @@ class RealHAL(HalBase):
                 ]
                 session = _DOPortSession(
                     task=task,
+                    session_id=f"do-{acquisition_sequence}-{device}-{port}",
                     device=device,
                     port=port,
                     first_line=first,
@@ -526,6 +566,7 @@ class RealHAL(HalBase):
                     f"{device}/{port}/{suffix}",
                     line_grouping=LineGrouping.CHAN_FOR_ALL_LINES,
                 )
+                session.prepared = True
             # NI-DAQmx documents that auto_start=True implicitly starts a task.
             # For software-timed DO, make that first physical drive the complete
             # safe packed image; never start a task before its safe value exists.
@@ -540,13 +581,55 @@ class RealHAL(HalBase):
                     if len(session.states) == 1
                     else packed_state
                 )
-                session.task.write(write_value, auto_start=True, timeout=1.0)
+                session.safe_write_started_ns = int(self._monotonic_ns_clock())
+                try:
+                    session.task.write(write_value, auto_start=True, timeout=1.0)
+                except Exception as exc:
+                    LOG.exception(
+                        "DO safe image | device=%s | port=%s | lines=%s:%s | "
+                        "logical_safe_states=%s | packed=0x%X | result=failed | "
+                        "session=%s | started_ns=%s | actual_ns=none | error=%s",
+                        session.device,
+                        session.port,
+                        session.first_line,
+                        session.last_line,
+                        "".join("1" if state else "0" for state in session.states),
+                        packed_state,
+                        session.session_id,
+                        session.safe_write_started_ns,
+                        exc,
+                    )
+                    raise
+                session.safe_write_actual_ns = int(self._monotonic_ns_clock())
+                session.safe_image_written = True
+                LOG.info(
+                    "DO safe image | device=%s | port=%s | lines=%s:%s | "
+                    "logical_safe_states=%s | packed=0x%X | result=success | "
+                    "session=%s | started_ns=%s | actual_ns=%s",
+                    session.device,
+                    session.port,
+                    session.first_line,
+                    session.last_line,
+                    "".join("1" if state else "0" for state in session.states),
+                    packed_state,
+                    session.session_id,
+                    session.safe_write_started_ns,
+                    session.safe_write_actual_ns,
+                )
+                # An auto-started single-point On-Demand write does not provide
+                # a persistent Running task for later auto_start=False writes.
+                # Start only after the first physical drive is the safe image.
+                session.task.start()
+                session.running = True
+                LOG.info("DO session running | session=%s", session.session_id)
         except Exception:
             LOG.exception("预建 NI-DAQmx DO task 失败")
             failed: list[_DOPortSession] = []
             for session in created:
                 try:
                     session.task.close()
+                    session.running = False
+                    session.released = True
                 except Exception:
                     LOG.exception("回滚 DO task 失败")
                     failed.append(session)
@@ -569,6 +652,8 @@ class RealHAL(HalBase):
         for session in sessions:
             try:
                 session.task.close()
+                session.running = False
+                session.released = True
             except Exception:
                 LOG.exception("释放 NI-DAQmx DO task 失败")
                 failed.append(session)

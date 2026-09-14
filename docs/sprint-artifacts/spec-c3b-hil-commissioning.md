@@ -7,7 +7,8 @@ route: 'dispatch'
 review_loop_iteration: 1
 offline_lifecycle_remediation: 'done'
 offline_connection_presentation: 'done'
-physical_commissioning_status: 'pending-c3b-3-real-connect'
+offline_do_lifecycle_remediation: 'done'
+physical_commissioning_status: 'blocked-pending-c3b-3-real-stop-retest'
 baseline_commit: '2cc3a8986eaa95aeb7a963ee05f3caea484deb1f'
 context:
   - '{project-root}/docs/project-context.md'
@@ -97,6 +98,7 @@ context:
 - 2026-09-11：产品明确启动后自动尝试连接一次，不提供开关；C.3b-3A 审计发现 worker 启动即接管 DO/串口、自检且过早发布 connected。真实 App Connect 尚未执行，本轮只做离线整改与验证。
 - 2026-09-14：离线整改、三层复审和完整离线验证均已完成，记录为 `offline_lifecycle_remediation=done`；活动 spec 仍保持 `in-review`，`physical_commissioning_status` 为 `pending-c3b-3-real-connect`，不得据此宣称真实 App Connect 或后续气口验证已完成。
 - 当前 `config/local_config.json` 的 21 个受管输出均计算为 safe LOW；在“USB-6001 上电 DIO 为 input 且弱 pull-down”的已知前提下，未发现当前 profile 的 polarity blocker。这是代码/配置判断，不是现场证据。
+- 2026-09-14 首次真实 C.3b-3 已执行：startup auto-connect、自检、B→C→A 清零和零流量 idle 通过；Global Stop 首个 selector safe write 触发 NI-DAQmx `-200846`，selector/odor 安全回执不确定，系统正确进入 `RECOVERY_REQUIRED`，操作者随后断电。根因是首次 `auto_start=True` 单点 On-Demand safe write 返回后，DO task 未保持会话期 Running，而后续 `auto_start=False` 写错误地只以“session 对象存在”作为可写依据。历史 evidence 保持 FAIL；离线修复不能替代真实复测。
 
 ## Spec Change Log
 
@@ -105,6 +107,7 @@ context:
 - 2026-09-10：完成 C.3b-2C；A/B/C setpoint 从 `1500/1500/500` 逐台清零，LSS 从 `S/S/S` 逐台改为 `U/U/U`。Alicat 安全初值 blocker 已解除；真实 App Connect 与气味阀真实初始关闭确认仍未授权/完成。
 - 2026-09-11：人工重新确定产品启动语义为“窗口显示后自动连接一次”；移除原启动授权 open question，新增 passive startup、one-shot、统一 transaction、失败不自动重试、运行中断线不自动恢复和安全 DO 首次 image 约束。C.3b-3 真实连接仍未执行。
 - 2026-09-14：人工进一步统一产品连接表现为“正在连接…”、“设备已连接”、“设备未连接”三态；startup failure、Global Stop 成功及 runtime disconnect 安全收口成功均显示“设备未连接 / 重新连接”。这项决定取代 Review B8 的旧终止性 UI 结论，但不削弱 SafeStop、unsafe latch 或严重安全提示。C.3b-3 真实连接仍未执行。
+- 2026-09-14：首次真实 C.3b-3 的连接与零流量阶段通过，Global Stop 因 NI On-Demand DO task 生命周期错误失败并进入 `RECOVERY_REQUIRED`；真实失败已由独立 evidence commit 固化。C.3b-3C 只做离线修复，commissioning 继续 blocked，等待同规格真实重跑。
 
 ## Review Triage Log
 

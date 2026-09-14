@@ -103,6 +103,7 @@ if TYPE_CHECKING:
     from app.views import MainWindow
 
 LOG = logging.getLogger(__name__)
+UNCONFIRMED_SAFE_STOP_MESSAGE = "设备未能正常停止，请立即关闭设备电源"
 
 
 @dataclass(frozen=True, slots=True)
@@ -5668,6 +5669,7 @@ class MainController(QObject):
                 "result": receipt.result.value,
                 "measurement_point": receipt.measurement_point,
                 "stale": receipt.stale,
+                "message": receipt.message,
             },
         )
         if receipt.operation_id is None:
@@ -5684,12 +5686,20 @@ class MainController(QObject):
                 > self.actuation_worker.metrics.config.single_limit_ms
             )
             if severe or receipt.result.value != "success":
-                message = receipt.message or (
-                    "阀门时序严重超限；确认全部阀门关闭后重新布防。"
-                    if severe
-                    else "阀门动作失败；请检查硬件并执行安全停止。"
-                )
-                self.view.render_actuation_alert(message, severe=True)
+                if receipt.category is ActuationCategory.SAFETY:
+                    # Safe-stop receipt diagnostics (DAQmx codes, task state,
+                    # owner identity) remain in logs. Reuse the single durable
+                    # operator condition instead of showing a second raw alert.
+                    self.view.render_connection_safety_alert(
+                        UNCONFIRMED_SAFE_STOP_MESSAGE
+                    )
+                else:
+                    message = (
+                        "阀门时序严重超限；请执行全局停止并检查设备。"
+                        if severe
+                        else "阀门动作失败；请检查设备并执行全局停止。"
+                    )
+                    self.view.render_actuation_alert(message, severe=True)
 
     @Slot(object)
     def _handle_actuation_plan_result(self, result: dict) -> None:
@@ -6123,6 +6133,7 @@ class MainController(QObject):
         self.state.update_status("设备已连接")
         if self.view:
             self.view.render_connection_phase("CONNECTED")
+            self.view.render_connection_safety_alert("")
             self.view.update_status(self.state.status_message)
         self._refresh_toolbar_state()
 
@@ -6169,7 +6180,7 @@ class MainController(QObject):
         if cleanup_ok:
             status = "连接失败，请检查设备后重试"
         else:
-            status = "设备未能正常停止，请立即关闭设备电源"
+            status = UNCONFIRMED_SAFE_STOP_MESSAGE
             self._unsafe_shutdown_latched = True
         LOG.error("Hardware connection failed | reason=%s | cleanup=%s", reason, cleanup_event)
         self.state.update_status(status)
@@ -6219,7 +6230,12 @@ class MainController(QObject):
             self._unsafe_shutdown_latched = True
             self.state.hardware_ready = False
             self.state.telemetry.connected = False
-            message = f"上次关闭未完成（{source}）：{reason or '请重新自检确认安全'}"
+            LOG.error(
+                "Previous shutdown was not confirmed | source=%s | reason=%s",
+                source,
+                reason or "unknown",
+            )
+            message = UNCONFIRMED_SAFE_STOP_MESSAGE
         else:
             message = "上次已安全关闭，可以重新连接"
         self.state.update_status(message)
@@ -6255,7 +6271,7 @@ class MainController(QObject):
         message = (
             success_message
             if success
-            else f"关闭未完成：{event.get('error') or '请人工检查并重新自检'}"
+            else UNCONFIRMED_SAFE_STOP_MESSAGE
         )
         self.state.update_status(message)
         if self.view:
@@ -6263,7 +6279,7 @@ class MainController(QObject):
                 self.view.update_status(message)
             self.view.render_last_shutdown(event)
             self.view.render_connection_safety_alert(
-                "" if success else "设备未能正常停止，请立即关闭设备电源"
+                "" if success else UNCONFIRMED_SAFE_STOP_MESSAGE
             )
         self._render_manual_snapshot()
 
@@ -6290,7 +6306,7 @@ class MainController(QObject):
         self.state.update_status(message)
         if self.view:
             self.view.render_connection_safety_alert(
-                "设备未能正常停止，请立即关闭设备电源"
+                UNCONFIRMED_SAFE_STOP_MESSAGE
             )
         self._render_manual_snapshot()
 

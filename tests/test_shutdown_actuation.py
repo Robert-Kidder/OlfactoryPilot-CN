@@ -47,13 +47,11 @@ class _Actuation:
         close=True,
         selector=True,
         stopped=True,
-        fallback=True,
     ) -> None:
         self.order = order
         self.close = close
         self.selector = selector
         self.stopped = stopped
-        self.fallback = fallback
 
     def fence_for_safe_stop(self, **values):
         self.order.append(f"fence:{values['timeout_ms']}")
@@ -86,10 +84,6 @@ class _Actuation:
     def handoff_maintenance_for_safe_stop(self) -> bool:
         self.order.append("maintenance_handoff")
         return True
-
-    def fallback_close_all_after_handoff(self) -> bool:
-        self.order.append("fallback")
-        return self.fallback
 
 
 class _Flow:
@@ -177,18 +171,24 @@ def test_shutdown_orders_close_handoff_ai_then_serial(tmp_path, caplog) -> None:
     assert "Shutdown guard blocked" not in caplog.text
 
 
-def test_shutdown_fallback_only_after_do_owner_handoff(tmp_path) -> None:
+def test_shutdown_close_failure_never_reacquires_do_after_owner_handoff(
+    tmp_path,
+) -> None:
     order = []
     service = _service(
         state=_state(),
         worker=_Hardware(order),
-        actuation_worker=_Actuation(order, close=False, stopped=True, fallback=True),
+        actuation_worker=_Actuation(order, close=False, stopped=True),
         flow_worker=_Flow(order),
         retry_limit=0,
         record_path=tmp_path / "fallback.json",
     )
-    assert service.shutdown(source="test")["result"] == "success"
-    assert order.index("fallback") > order.index("actuation_stop:2000")
+    event = service.shutdown(source="test")
+
+    assert event["result"] == "recovery_required"
+    assert "fallback" not in order
+    assert "actuation_stop:2000" in order
+    assert event["valves_closed"] is False
 
 
 def test_shutdown_does_not_cross_thread_fallback_when_daq_owner_is_stuck(tmp_path) -> None:

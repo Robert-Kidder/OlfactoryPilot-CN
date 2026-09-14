@@ -297,8 +297,7 @@ class MainWindow(FluentWindow):
         )
         result = event.get("result") or ""
         status_word = "已正常关闭" if result == "success" else "关闭未完成"
-        reason = event.get("error") or event.get("reason") or ""
-        return user_facing_text(f"上次关闭：{status_word}（{ts_text}）{reason}")
+        return user_facing_text(f"上次关闭：{status_word}（{ts_text}）")
 
     @staticmethod
     def _safety_action(telemetry: Telemetry, *, hardware_ready: bool) -> str:

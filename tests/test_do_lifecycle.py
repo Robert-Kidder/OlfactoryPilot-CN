@@ -1,13 +1,402 @@
 from types import SimpleNamespace
 
+import pytest
+
 from app.services.hal import DigitalWriteAck
+
+
+class FakeDaqError(RuntimeError):
+    def __init__(self, message: str, *, error_code: int) -> None:
+        super().__init__(message)
+        self.error_code = error_code
+
+
+def _install_stateful_on_demand_fake(
+    monkeypatch,
+    real_hal_module,
+    *,
+    fail_start_indices: set[int] | None = None,
+):
+    """Install a fake that models auto-started single-point writes as non-persistent."""
+
+    tasks = []
+    events = []
+    failing = fail_start_indices or set()
+
+    class FakeDOChannels:
+        def __init__(self, task):
+            self.task = task
+
+        def add_do_chan(self, target, *, line_grouping=None):
+            self.task.target = target
+            events.append((self.task.index, "add", target, line_grouping))
+
+    class StatefulOnDemandTask:
+        def __init__(self):
+            self.index = len(tasks)
+            self.target = ""
+            self.running = False
+            self.closed = False
+            self.last_value = None
+            self.do_channels = FakeDOChannels(self)
+            tasks.append(self)
+            events.append((self.index, "create"))
+
+        def write(self, value, *, auto_start=None, timeout=None):
+            if self.closed:
+                raise FakeDaqError("task is closed", error_code=-200088)
+            events.append(
+                (self.index, "write", self.target, value, auto_start, self.running, timeout)
+            )
+            if auto_start:
+                # A single-point On-Demand auto-started write drives the value,
+                # then returns the task to a non-running state. This is the
+                # behavior exposed by the real C.3b-3 -200846 failure.
+                self.last_value = value
+                self.running = False
+                return 1
+            if not self.running:
+                raise FakeDaqError(
+                    "Write cannot be performed when auto start is false and task is not running",
+                    error_code=-200846,
+                )
+            self.last_value = value
+            return 1
+
+        def start(self):
+            if self.closed:
+                raise FakeDaqError("task is closed", error_code=-200088)
+            events.append((self.index, "start", self.target))
+            if self.index in failing:
+                raise FakeDaqError("synthetic persistent start failure", error_code=-200220)
+            if self.running:
+                raise FakeDaqError("task already running", error_code=-200479)
+            self.running = True
+
+        def stop(self):
+            events.append((self.index, "stop", self.target))
+            self.running = False
+
+        def close(self):
+            events.append((self.index, "close", self.target, self.running))
+            self.running = False
+            self.closed = True
+
+    monkeypatch.setattr(
+        real_hal_module,
+        "nidaqmx",
+        SimpleNamespace(Task=StatefulOnDemandTask),
+    )
+    monkeypatch.setattr(
+        real_hal_module,
+        "LineGrouping",
+        SimpleNamespace(CHAN_FOR_ALL_LINES="ALL", CHAN_PER_LINE="PER"),
+    )
+    monkeypatch.setattr(real_hal_module, "_NIDAQMX_IMPORT_ERROR", None)
+    return StatefulOnDemandTask, tasks, events
+
+
+def test_stateful_fake_reproduces_legacy_on_demand_200846(monkeypatch) -> None:
+    import app.services.real_hal as real_hal_module
+
+    task_type, _, _ = _install_stateful_on_demand_fake(monkeypatch, real_hal_module)
+    task = task_type()
+    task.do_channels.add_do_chan("Dev1/port0/line0", line_grouping="ALL")
+
+    task.write(False, auto_start=True, timeout=1.0)
+
+    assert task.running is False
+    with pytest.raises(FakeDaqError) as error:
+        task.write(False, auto_start=False, timeout=0.1)
+    assert error.value.error_code == -200846
+
+
+def test_real_hal_safe_write_precedes_persistent_start_and_later_write(
+    monkeypatch,
+) -> None:
+    import app.services.real_hal as real_hal_module
+
+    _, tasks, events = _install_stateful_on_demand_fake(monkeypatch, real_hal_module)
+    hal = real_hal_module.RealHAL(
+        serial_port="COM1",
+        valve_lines=["Dev1/P0.0", "Dev1/P0.1", "Dev1/P0.2"],
+        digital_safe_levels={
+            "Dev1/P0.0": False,
+            "Dev1/P0.1": True,
+            "Dev1/P0.2": False,
+        },
+    )
+
+    assert hal.prepare_do_output() is True
+    assert tasks[0].running is True
+    assert events[:4] == [
+        (0, "create"),
+        (0, "add", "Dev1/port0/line0:2", "ALL"),
+        (0, "write", "Dev1/port0/line0:2", 2, True, False, 1.0),
+        (0, "start", "Dev1/port0/line0:2"),
+    ]
+
+    ack = hal.write_digital_ack(
+        device="Dev1",
+        line="P0.0",
+        state=True,
+        timeout_ms=100,
+    )
+
+    assert ack.success is True
+    assert events[-1][1:] == (
+        "write",
+        "Dev1/port0/line0:2",
+        3,
+        False,
+        True,
+        0.1,
+    )
+
+
+def test_real_hal_persistent_start_failure_rolls_back_after_safe_image(
+    monkeypatch,
+) -> None:
+    import app.services.real_hal as real_hal_module
+
+    _, tasks, events = _install_stateful_on_demand_fake(
+        monkeypatch,
+        real_hal_module,
+        fail_start_indices={0},
+    )
+    hal = real_hal_module.RealHAL(
+        serial_port="COM1",
+        valve_lines=["Dev1/P0.0"],
+    )
+
+    assert hal.prepare_do_output() is False
+    assert events[:5] == [
+        (0, "create"),
+        (0, "add", "Dev1/port0/line0", "ALL"),
+        (0, "write", "Dev1/port0/line0", False, True, False, 1.0),
+        (0, "start", "Dev1/port0/line0"),
+        (0, "close", "Dev1/port0/line0", False),
+    ]
+    assert tasks[0].last_value is False
+    assert tasks[0].closed is True
+    assert hal.do_resources_in_use is False
+
+
+def test_real_hal_late_port_start_failure_releases_prior_running_session(
+    monkeypatch,
+) -> None:
+    import app.services.real_hal as real_hal_module
+
+    _, tasks, events = _install_stateful_on_demand_fake(
+        monkeypatch,
+        real_hal_module,
+        fail_start_indices={1},
+    )
+    hal = real_hal_module.RealHAL(
+        serial_port="COM1",
+        valve_lines=["Dev1/P0.0", "Dev2/P1.0"],
+    )
+
+    assert hal.prepare_do_output() is False
+    assert len(tasks) == 2
+    assert all(task.closed for task in tasks)
+    first_start = events.index((0, "start", "Dev1/port0/line0"))
+    second_safe_write = next(
+        index
+        for index, event in enumerate(events)
+        if event[:2] == (1, "write") and event[4] is True
+    )
+    first_close = next(
+        index for index, event in enumerate(events) if event[:2] == (0, "close")
+    )
+    assert first_start < second_safe_write < first_close
+    assert hal.do_resources_in_use is False
+
+
+def test_real_hal_unexpected_task_stop_fails_without_restart_or_rewrite(
+    monkeypatch,
+) -> None:
+    import app.services.real_hal as real_hal_module
+
+    _, tasks, events = _install_stateful_on_demand_fake(monkeypatch, real_hal_module)
+    hal = real_hal_module.RealHAL(
+        serial_port="COM1",
+        valve_lines=["Dev1/P0.0"],
+    )
+    assert hal.prepare_do_output() is True
+    task = tasks[0]
+    task.stop()
+    event_count = len(events)
+
+    ack = hal.write_digital_ack(
+        device="Dev1",
+        line="P0.0",
+        state=False,
+        timeout_ms=100,
+    )
+
+    assert ack.success is False
+    assert ack.uncertain is True
+    assert "not running" in ack.message
+    assert events[event_count:] == [
+        (0, "write", "Dev1/port0/line0", False, False, False, 0.1)
+    ]
+    assert hal.prepare_do_output() is False
+    second_ack = hal.write_digital_ack(
+        device="Dev1",
+        line="P0.0",
+        state=False,
+        timeout_ms=100,
+    )
+    assert second_ack.success is False
+    assert second_ack.uncertain is True
+    assert "不在可写运行状态" in second_ack.message
+    assert events[event_count:] == [
+        (0, "write", "Dev1/port0/line0", False, False, False, 0.1)
+    ]
+    assert sum(event[1] == "start" for event in events) == 1
+
+
+def test_global_stop_style_safe_writes_finish_before_do_release(monkeypatch) -> None:
+    import app.services.real_hal as real_hal_module
+
+    _, tasks, events = _install_stateful_on_demand_fake(monkeypatch, real_hal_module)
+    hal = real_hal_module.RealHAL(
+        serial_port="COM1",
+        valve_lines=["Dev1/P0.0", "Dev1/P0.1", "Dev1/P0.2"],
+        digital_safe_levels={
+            "Dev1/P0.0": False,
+            "Dev1/P0.1": True,
+            "Dev1/P0.2": False,
+        },
+    )
+    assert hal.prepare_do_output() is True
+    assert hal.write_digital_ack(
+        device="Dev1", line="P0.0", state=True, timeout_ms=100
+    ).success
+    assert hal.write_digital_ack(
+        device="Dev1", line="P0.2", state=True, timeout_ms=100
+    ).success
+
+    for line, safe_level in (("P0.0", False), ("P0.1", True), ("P0.2", False)):
+        assert hal.write_digital_ack(
+            device="Dev1",
+            line=line,
+            state=safe_level,
+            timeout_ms=100,
+        ).success
+    last_safe_write = len(events) - 1
+
+    assert hal.release_do_output() is True
+    close_index = next(
+        index for index, event in enumerate(events) if event[1] == "close"
+    )
+    assert last_safe_write < close_index
+    later_writes = [event for event in events if event[1] == "write"][1:]
+    assert all(event[4] is False and event[5] is True for event in later_writes)
+    assert tasks[0].last_value == 2
+
+
+def test_real_hal_reconnect_uses_new_running_task_after_safe_release(
+    monkeypatch,
+) -> None:
+    import app.services.real_hal as real_hal_module
+
+    _, tasks, events = _install_stateful_on_demand_fake(monkeypatch, real_hal_module)
+    hal = real_hal_module.RealHAL(
+        serial_port="COM1",
+        valve_lines=["Dev1/P0.0"],
+    )
+    assert hal.prepare_do_output() is True
+    first = tasks[0]
+    assert hal.write_digital_ack(
+        device="Dev1", line="P0.0", state=False, timeout_ms=100
+    ).success
+    last_safe_write_index = len(events) - 1
+
+    assert hal.release_do_output() is True
+    first_close_index = next(
+        index for index, event in enumerate(events) if event[1] == "close"
+    )
+    assert last_safe_write_index < first_close_index
+    assert first.closed is True
+
+    assert hal.prepare_do_output() is True
+    assert len(tasks) == 2
+    assert tasks[1] is not first
+    assert tasks[1].running is True
+    assert tasks[1].last_value is False
+    assert sum(event[1] == "start" for event in events) == 2
+
+
+def test_real_hal_safe_image_audit_is_emitted_once_per_port(
+    monkeypatch,
+    caplog,
+) -> None:
+    import app.services.real_hal as real_hal_module
+
+    _install_stateful_on_demand_fake(monkeypatch, real_hal_module)
+    clock = iter((101, 102, 201, 202))
+    hal = real_hal_module.RealHAL(
+        serial_port="COM1",
+        valve_lines=["Dev1/P0.0", "Dev1/P0.1", "Dev2/P1.0"],
+        digital_safe_levels={
+            "Dev1/P0.0": False,
+            "Dev1/P0.1": True,
+            "Dev2/P1.0": False,
+        },
+        monotonic_ns_clock=lambda: next(clock),
+    )
+
+    with caplog.at_level("INFO", logger="app.services.real_hal"):
+        assert hal.prepare_do_output() is True
+        assert hal.prepare_do_output() is True
+
+    safe_lines = [line for line in caplog.messages if line.startswith("DO safe image |")]
+    assert len(safe_lines) == 2
+    assert any(
+        "device=Dev1" in line
+        and "port=port0" in line
+        and "lines=0:1" in line
+        and "logical_safe_states=01" in line
+        and "packed=0x2" in line
+        and "result=success" in line
+        and "started_ns=101" in line
+        and "actual_ns=102" in line
+        for line in safe_lines
+    )
+    assert any(
+        "device=Dev2" in line
+        and "port=port1" in line
+        and "lines=0:0" in line
+        and "packed=0x0" in line
+        and "result=success" in line
+        for line in safe_lines
+    )
 
 
 def test_real_hal_prebuilds_one_task_per_device_port_and_reuses_it(monkeypatch) -> None:
     import app.services.real_hal as real_hal_module
 
     tasks = []
-    clock_values = iter((1_000, 1_100, 2_000, 2_100, 3_000, 3_100))
+    clock_values = iter(
+        (
+            100,
+            110,
+            200,
+            210,
+            300,
+            310,
+            400,
+            410,
+            1_000,
+            1_100,
+            2_000,
+            2_100,
+            3_000,
+            3_100,
+        )
+    )
 
     class FakeAIChannels:
         def add_ai_voltage_chan(self, name, *, terminal_config=None):
@@ -285,7 +674,7 @@ def test_failed_packed_close_cannot_be_reasserted_by_later_port_write(monkeypatc
     import app.services.real_hal as real_hal_module
 
     tasks = []
-    clock_values = iter((1_000, 1_100, 2_000, 3_000, 3_100))
+    clock_values = iter((100, 110, 1_000, 1_100, 2_000, 3_000, 3_100))
 
     class FakeChannels:
         def add_do_chan(self, target, *, line_grouping=None):
@@ -356,6 +745,9 @@ def test_failed_active_low_close_keeps_safe_level_in_next_packed_write(monkeypat
             self.writes = []
             self.fail_next = False
             tasks.append(self)
+
+        def start(self):
+            return None
 
         def write(self, value, **_kwargs):
             self.writes.append(value)
@@ -499,6 +891,7 @@ def test_first_do_drive_is_complete_safe_image_with_polarity(monkeypatch) -> Non
     assert events == [
         ("add", "Dev1/port0/line0:2"),
         ("write", "Dev1/port0/line0:2", 2, True),
+        ("start", "Dev1/port0/line0:2"),
     ]
 
 

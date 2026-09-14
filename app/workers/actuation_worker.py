@@ -2886,47 +2886,6 @@ class ActuationWorker(QThread):
         self._settle_cancelled_receipts(cancelled)
         self._reject_queued_messages(queued_messages)
 
-    def fallback_close_all_after_handoff(self) -> bool:
-        """Rebuild a DO session only after the previous owner has fully released it."""
-        if self.isRunning() or not self._do_handed_off or self.valve_service is None:
-            return False
-        hal = self._writer_hal()
-        if hal is None or not hal.prepare_do_output():
-            return False
-        success = True
-        released = False
-        try:
-            self._safety_close_failed_targets.clear()
-            for step in self._all_configured_close_steps():
-                self._sequence += 1
-                command = ActuationCommand(
-                    command_id=f"fallback-close-{step.logical_valve}-{self._sequence}",
-                    execution_epoch=self.protocol_state.execution_epoch,
-                    arm_epoch=self.protocol_state.arm_epoch,
-                    sequence=self._sequence,
-                    trial_id=None,
-                    trial_index=None,
-                    valve=step.logical_valve,
-                    action=ActuationAction.CLOSE,
-                    category=ActuationCategory.SAFETY,
-                    expected_ns=int(self._clock_ns()),
-                    duration_ns=None,
-                    wall_timestamp=float(self._wall_clock()),
-                    safety_generation=self.interlock.read()[0],
-                    target_device=step.device,
-                    target_line=step.line,
-                    physical_level=step.physical_level,
-                )
-                receipt = self.writer(command)
-                success = success and receipt.result == ActuationResult.SUCCESS
-                if receipt.result == ActuationResult.SUCCESS:
-                    self._confirm_closed(receipt.valve)
-                    self.valve_service.commit_receipt(receipt)
-        finally:
-            released = hal.release_do_output() is True
-            self._do_handed_off = released
-        return success and released
-
     def _writer_hal(self):
         hal = getattr(self.writer, "hal", None)
         if hal is not None:

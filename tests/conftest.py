@@ -157,6 +157,31 @@ def qtbot(qt_app):
 
 
 @pytest.fixture(autouse=True)
+def isolate_repository_shutdown_evidence(monkeypatch):
+    """Keep live HIL shutdown evidence outside ordinary test read/write effects."""
+    from app.services.shutdown_service import ShutdownService
+
+    repository_record = (
+        _PROJECT_ROOT / "logs" / "last_shutdown_event.json"
+    ).resolve()
+    original_load = ShutdownService.load_last_event
+    original_persist = ShutdownService._persist_event
+
+    def isolated_load(record_path=None):
+        if record_path is not None and Path(record_path).resolve() == repository_record:
+            return None
+        return original_load(record_path)
+
+    def isolated_persist(service, event):
+        if Path(service.record_path).resolve() == repository_record:
+            return None
+        return original_persist(service, event)
+
+    monkeypatch.setattr(ShutdownService, "load_last_event", isolated_load)
+    monkeypatch.setattr(ShutdownService, "_persist_event", isolated_persist)
+
+
+@pytest.fixture(autouse=True)
 def deterministic_qt_thread_teardown(monkeypatch):
     """Track every Controller created by a test and join all owned threads."""
     from app.controllers.main_controller import MainController

@@ -2194,10 +2194,11 @@ def test_last_shutdown_banner_blocks_controls(qt_app):
     window = MainWindow(controller, state)
     controller.bind_view(window)
 
-    assert "未完成" in state.status_message
+    assert state.status_message == "设备未能正常停止，请立即关闭设备电源"
     assert window._reset_button.isEnabled() is False
     assert window._stop_button.isEnabled() is False
     assert "未完成" in window._shutdown_label.text()
+    assert "timeout" not in window._shutdown_label.text()
 
 
 def test_shutdown_record_path_resolves_outside_config_dir(tmp_path: Path, qt_app):

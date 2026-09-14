@@ -312,12 +312,6 @@ class ShutdownService:
             )
             if not do_handed_off:
                 errors.append("DO ownership 未在超时内交还；禁止跨线程复用旧 task，需人工确认。")
-            elif not odors_closed:
-                odors_closed = self._call_bool(
-                    self.actuation_worker.fallback_close_all_after_handoff,
-                    "DO ownership 交还后的气味阀兜底关闭",
-                    errors,
-                )
             lease_released = False
             if identity is not None and flows_zero and self.flow_worker is not None:
                 lease_released = self._call_bool(

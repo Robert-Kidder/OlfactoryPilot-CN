@@ -7,6 +7,10 @@ from PySide6.QtWidgets import QApplication
 
 from app.main import DEFAULT_CONFIG, build_application
 from app.models import (
+    ActuationAction,
+    ActuationCategory,
+    ActuationReceipt,
+    ActuationResult,
     ManualExperimentIdentity,
     ManualExperimentSnapshot,
     ManualExperimentStatus,
@@ -352,6 +356,32 @@ def test_unsafe_shutdown_retry_failure_keeps_latch_and_safety_alert(qt_app):
     window.close()
 
 
+def test_unsafe_shutdown_retry_success_clears_safety_alert_only_after_connected(
+    qt_app,
+):
+    hal = CountingHAL()
+    _, window = build_application(DEFAULT_CONFIG, simulation=True, hal=hal)
+    controller = window.controller
+    controller._unsafe_shutdown_latched = True
+    window.show()
+    window.render_connection_phase("RECOVERY_REQUIRED")
+    window.render_connection_safety_alert(
+        "设备未能正常停止，请立即关闭设备电源"
+    )
+
+    window._connect_button.click()
+    assert controller._unsafe_shutdown_retry_in_progress is True
+    assert window.manual_experiment_view.current_notice_title == "需要立即处理"
+    wait_until(qt_app, lambda: controller.state.telemetry.connected)
+
+    assert controller._connection_phase == "CONNECTED"
+    assert controller._unsafe_shutdown_latched is False
+    assert controller._unsafe_shutdown_retry_in_progress is False
+    assert window.manual_experiment_view.current_notice_title == ""
+    assert "立即关闭设备电源" not in window.manual_experiment_view.detail_label.text()
+    close_window(window, qt_app)
+
+
 def test_do_prepare_exception_fails_transaction_without_self_check(qt_app):
     hal = RaisingPrepareHAL()
     _, window = build_application(DEFAULT_CONFIG, simulation=True, hal=hal)
@@ -521,6 +551,61 @@ def test_global_stop_failure_keeps_fail_closed_warning(qt_app):
     assert "receipt" not in window.manual_experiment_view.detail_label.text()
 
     controller.shutdown_service.shutdown = original_shutdown
+    close_window(window, qt_app)
+
+
+def test_safety_receipt_driver_error_is_logged_but_not_exposed_in_ui(
+    qt_app,
+    caplog,
+):
+    _, window = build_application(
+        DEFAULT_CONFIG,
+        start_worker=False,
+        simulation=True,
+    )
+    controller = window.controller
+    window.show()
+    raw_error = (
+        "NI-DAQmx 数字输出异常：Write cannot be performed when auto start is false; "
+        "Status Code: -200846; Task Name: hidden"
+    )
+    receipt = ActuationReceipt(
+        command_id="safe-stop-selector-test",
+        execution_epoch=1,
+        arm_epoch=1,
+        sequence=1,
+        trial_id=None,
+        trial_index=None,
+        valve=0,
+        action=ActuationAction.CLOSE,
+        category=ActuationCategory.SAFETY,
+        expected_ns=1,
+        started_ns=2,
+        actual_ns=None,
+        wall_timestamp=1.0,
+        offset_ms=None,
+        jitter_ms=None,
+        result=ActuationResult.UNCERTAIN,
+        measurement_point="daqmx_write_ack",
+        message=raw_error,
+    )
+
+    with caplog.at_level("INFO", logger="protocol_execution"):
+        controller._handle_actuation_receipt(receipt)
+        qt_app.processEvents()
+
+    assert raw_error in caplog.text
+    assert window._actuation_alert_label.text() == ""
+    assert window.manual_experiment_view.current_notice_title == "需要立即处理"
+    assert (
+        window.manual_experiment_view.detail_label.text()
+        == "设备未能正常停止，请立即关闭设备电源"
+    )
+    visible_text = " ".join(
+        widget.text() for widget in window.findChildren(type(window._status_label))
+    )
+    assert "NI-DAQmx" not in visible_text
+    assert "-200846" not in visible_text
     close_window(window, qt_app)
 
 

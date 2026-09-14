@@ -59,6 +59,7 @@ OlfactoryPilot-CN 是用于嗅觉刺激实验的 Windows 桌面控制软件，�
 - 正式启动固定为“先完整显示窗口，再 queued 自动连接一次”。构造/show 前不接管硬件；自动连接与所有人工“重新连接”共用安全 transaction，失败不定时或循环重试。Global Stop 或运行中断线安全收口后保持未连接，等待人工重新连接；成功后也不恢复先前动作。普通用户没有 auto-connect 设置，CLI/config/env 也不得提供关闭开关。
 - 内部连接阶段只用于安全编排、日志和测试；普通 Header 统一映射为“正在连接…”、“设备已连接”、“设备未连接”三种状态。未连接且没有连接事务时显示“重新连接”，只有无法确认安全收口时才额外显示面向用户的持续断电提示。
 - 连接阶段依次完成安全 DO 首次 image、自检、B/C/A 清零回读和 fresh 零流量 readiness，最后才发布 connected。HardwareWorker 启动不自动自检；未 acquisition 的退出与全局停止不得首次触碰 NI/serial。
+- USB-6001 software-timed On-Demand DO 会话必须采用“polarity-aware safe packed write → 显式 start → 会话内 `auto_start=False` 写 → 最终安全写确认 → release”的单 owner 生命周期。session 对象存在不等于 task 正在 Running；意外停止不得自动重启或重发。
 
 ## 目标用户
 
