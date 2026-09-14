@@ -1,6 +1,6 @@
 # C.3b HIL Commissioning Checklist（进行中）
 
-> **状态：C.3b-1、C.3b-2A、VE/LSS 只读查询和 C.3b-2C Alicat 安全初始状态规范化已完成；真实 App Connect 与任何 NI/selector/气味阀动作仍未授权。** 证据见 [live-data poll](c-3b-2a-alicat-read-only-poll-2026-09-10.md)、[VE/LSS 查询](c-3b-alicat-ve-lss-read-only-2026-09-10.md) 和 [2C 规范化](c-3b-alicat-safe-state-normalization-2026-09-10.md)。本文件不代表真实气口验证完成。
+> **状态：C.3b-1、C.3b-2A、VE/LSS 只读查询和 C.3b-2C 已完成；C.3b-3 首次真实自动连接通过，但第一次真实 Global Stop 因 NI-DAQmx `-200846` 无法确认阀门/selector 安全收口，当前阻断。** 证据见 [live-data poll](c-3b-2a-alicat-read-only-poll-2026-09-10.md)、[VE/LSS 查询](c-3b-alicat-ve-lss-read-only-2026-09-10.md)、[2C 规范化](c-3b-alicat-safe-state-normalization-2026-09-10.md) 和 [首次真实连接/停止](c-3b-first-real-app-connect-2026-09-14.md)。本文件不代表真实气口验证完成。
 
 ## 现场门禁
 
@@ -11,7 +11,7 @@
 - [ ] **E. 单口首轮：** 第一轮只验证一个气口，不批量验证8路。
 - [ ] **F. 完整留证：** 记录 command、exact receipt、NI target、flow setpoint/readback、verification run identity、open/close 时间、safe-close 完成和用户现场观察。
 - [ ] **G. 真实 timing evidence：** USB-6001 DO 为 software-timed；C.3b 实测 command→DAQ write receipt、early result→close receipt、timeout→close receipt latency，UI countdown/fake clock 不得替代真实 timing evidence。
-- [ ] **H. 异常即停：** 出现 unexpected valve/flow、通信中断、receipt mismatch、安全状态变化、mapping 与现场出口不符或无法安全归零/关闭，立即停止本轮并执行既有 global stop/recovery，不得自动继续下一气口。
+- [x] **H. 异常即停：** 第一次真实 Global Stop 出现 NI-DAQmx `-200846`，selector/阀门关闭回执不确定；立即停止、禁止重试并由操作者断电。现场未观察到气流或异常动作，但软件回执仍不足以确认安全收口。
 
 ## 当前 preflight 状态
 
@@ -26,9 +26,10 @@
 | Alicat B | 规范化通过 | firmware `10v14.0-R24`；LSS `S → U`，最终 setpoint=`0` |
 | Alicat C | 规范化通过 | firmware `10v14.0-R24`；LSS `S → U`，最终 setpoint=`0` |
 | 现场安全准备 | 通过 | 无受试者/气味样品，出口畅通，操作者可立即停止/断电 |
-| 真实 App Connect | 未授权 | 不得执行 |
+| 真实 App Connect | **连接通过，停止阻断** | 2026-09-14 startup auto-connect exactly once；self-check 与 B/C/A zero 通过；Global Stop 进入 `RECOVERY_REQUIRED` |
 | A/B/C 安全初值 | **通过** | 2C 最终 setpoint=`0/0/0 sccm`、mass flow=`0/0/0 sccm` |
 | Setpoint Source | **通过** | 2C 最终 LSS=`U/U/U` |
+| 第一次真实 Global Stop | **失败/阻断** | A/B/C zero 成功；NI-DAQmx `-200846`；selector 与气味阀关闭回执不确定；操作者已断电 |
 
 ## 本轮记录
 
@@ -39,11 +40,12 @@
 - C.3b-2A 原始返回与解析：`c-3b-2a-alicat-read-only-poll-2026-09-10.md`
 - Firmware / Setpoint Source 原始返回：`c-3b-alicat-ve-lss-read-only-2026-09-10.md`
 - Alicat 安全初始状态规范化：`c-3b-alicat-safe-state-normalization-2026-09-10.md`
+- 首次真实 App 自动连接与安全停止：`c-3b-first-real-app-connect-2026-09-14.md`（Global Stop 失败，C.3b-3 阻断）
 - verification run identity：
 - 验证气口 / NI target / polarity：
 - flow setpoint / readback：
 - command 与 exact receipt 记录位置：
 - open / close / safe-close 时间：
-- 用户现场观察：
-- 异常与 global stop/recovery 记录：2A 发现 A/B/C setpoint=`1500/1500/500 sccm`、LSS=`S/S/S`；2C 在明确授权下逐台规范化为 setpoint=`0/0/0`、LSS=`U/U/U`，没有触发异常停止。未启动 App Global Stop
+- 用户现场观察：首次自动连接和 zero-flow idle 期间 UI 显示“设备已连接”；没有气口出气，没有异常阀门/selector 动作或设备声响。Global Stop 失败后操作者已断电，仍未观察到上述异常。
+- 异常与 global stop/recovery 记录：2A 发现 A/B/C setpoint=`1500/1500/500 sccm`、LSS=`S/S/S`；2C 在明确授权下逐台规范化为 setpoint=`0/0/0`、LSS=`U/U/U`。2026-09-14 首次真实 Global Stop 的 A/B/C zero 成功，但 NI-DAQmx `-200846` 导致 selector/阀门关闭回执不确定并进入 `RECOVERY_REQUIRED`；本轮立即停止并人工断电。
 - 结论与审批签名：
