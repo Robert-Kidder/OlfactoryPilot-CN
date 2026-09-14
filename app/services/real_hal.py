@@ -9,6 +9,13 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 
 from app.models import SelfCheckResult, normalize_digital_target
+from app.services.alicat_serial import (
+    AlicatResponseMismatch,
+    AlicatSerialSession,
+    AlicatSessionDesynchronized,
+    initial_resynchronization_windows,
+    quantize_setpoint_for_wire,
+)
 from app.services.hal import AnalogInputFrame, DigitalWriteAck, HalBase
 from app.services.ttl_trigger_service import TtlTriggerConfig
 
@@ -101,8 +108,9 @@ class RealHAL(HalBase):
         self.serial_port = serial_port
         self.baud_rate = int(baud_rate)
         self.serial_timeout_s = float(serial_timeout_s)
-        self._serial_lock = threading.Lock()
+        self._serial_lock = threading.RLock()
         self._serial = None
+        self._alicat_session: AlicatSerialSession | None = None
         self._ai_task = None
         self._ai_release_failed = False
         self._monotonic_ns_clock = monotonic_ns_clock or time.perf_counter_ns
@@ -117,6 +125,8 @@ class RealHAL(HalBase):
         self._flow_field_index = FLOW_FIELD_INDEX.get(alicat_flow_field, 3)
         self._setpoint_verify_tolerance = max(0.0, float(setpoint_verify_tolerance))
         self._setpoint_verify_delay_s = max(0.0, float(setpoint_verify_delay_s))
+        # Retained for config/backward compatibility only. Strict transaction
+        # failures and mismatched readbacks are never retried within a session.
         self._setpoint_verify_retries = max(1, int(setpoint_verify_retries))
         self._setpoint_scale = float(alicat_setpoint_scale)
         self._readback_scale = float(alicat_readback_scale)
@@ -164,6 +174,7 @@ class RealHAL(HalBase):
             selector_line=selector_line,
         )
         ttl_config = TtlTriggerConfig.from_mapping(config)
+        _validate_alicat_deadline_compatibility(config)
         return cls(
             ai0_channel=str(config.get("ai0_channel", "Dev1/ai0")),
             ttl_input_channel=str(config.get("ttl_input_channel", "Dev1/ai6")),
@@ -304,10 +315,8 @@ class RealHAL(HalBase):
         unit_id = self._flow_unit_id
         if not unit_id:
             return 0.0
-        response = self._query_serial(f"{unit_id}\r")
-        if not response:
-            return 0.0
-        value = self._parse_flow_value(response, unit_id)
+        frame = self._transact_poll(unit_id)
+        value = self._parse_flow_value(frame.text, unit_id)
         return float(value) * self._readback_scale
 
     def set_flow(self, channel: str | float, value: float | None = None, *, comp: bool = False) -> bool:
@@ -322,57 +331,42 @@ class RealHAL(HalBase):
             return False
         target = float(value)
         device_target = target * self._setpoint_scale
+        wire_target = quantize_setpoint_for_wire(device_target)
         try:
-            command = f"{unit_id}s{device_target:.3f}\r"
             LOG.info(
-                "Alicat setpoint command | channel=%s | unit=%s | target_sccm=%.3f | device_target=%.3f",
+                "Alicat setpoint command | channel=%s | unit=%s | target_sccm=%.3f | "
+                "device_target=%.6f | wire_target=%.3f",
                 channel,
                 unit_id,
                 target,
                 device_target,
+                wire_target,
             )
-            self._write_serial(command)
-            readback = None
-            response = None
-            for attempt in range(1, self._setpoint_verify_retries + 1):
-                if self._setpoint_verify_delay_s:
-                    time.sleep(self._setpoint_verify_delay_s)
-                readback, response = self._read_setpoint(unit_id)
-                if readback is None:
-                    LOG.warning(
-                        "Alicat setpoint no readback | channel=%s | unit=%s | target_sccm=%.3f | device_target=%.3f | attempt=%s | response=%r",
-                        channel,
-                        unit_id,
-                        target,
-                        device_target,
-                        attempt,
-                        response,
-                    )
-                    continue
-                if math.isclose(readback, device_target, abs_tol=self._setpoint_verify_tolerance):
-                    self._setpoint_readbacks_sccm[normalized_channel] = (
-                        float(readback) * self._readback_scale
-                    )
-                    LOG.info(
-                        "Alicat setpoint verified | channel=%s | unit=%s | target_sccm=%.3f | device_target=%.3f | readback=%.3f | attempt=%s",
-                        channel,
-                        unit_id,
-                        target,
-                        device_target,
-                        readback,
-                        attempt,
-                    )
-                    return True
-            LOG.warning(
-                "Alicat setpoint mismatch | channel=%s | unit=%s | target_sccm=%.3f | device_target=%.3f | readback=%s | response=%r",
+            session = self._ensure_alicat_session()
+            session.set_setpoint(
+                unit_id,
+                wire_target,
+                tolerance=self._setpoint_verify_tolerance,
+            )
+            if self._setpoint_verify_delay_s:
+                time.sleep(self._setpoint_verify_delay_s)
+            readback, response = self._read_setpoint(unit_id, expected=wire_target)
+            self._setpoint_readbacks_sccm[normalized_channel] = (
+                float(readback) * self._readback_scale
+            )
+            LOG.info(
+                "Alicat setpoint verified | channel=%s | unit=%s | target_sccm=%.3f | "
+                "device_target=%.6f | wire_target=%.3f | readback=%.3f | "
+                "attempt=1 | response=%r",
                 channel,
                 unit_id,
                 target,
                 device_target,
+                wire_target,
                 readback,
                 response,
             )
-            return False
+            return True
         except Exception:  # pragma: no cover - defensive
             LOG.exception("Failed to set flow on channel %s", channel)
             return False
@@ -818,6 +812,7 @@ class RealHAL(HalBase):
                 if self._serial is not None:
                     self._serial.close()
                 self._serial = None
+                self._alicat_session = None
         except Exception:  # pragma: no cover - defensive
             LOG.exception("Failed to close serial port")
 
@@ -826,7 +821,10 @@ class RealHAL(HalBase):
             return {"A": "a", "B": "b", "C": "c"}
         normalized: dict[str, str] = {}
         for key, value in mapping.items():
-            normalized[str(key).upper()] = str(value)
+            unit_id = str(value).strip()
+            if len(unit_id) != 1 or not unit_id.isascii() or not unit_id.isalpha():
+                raise ValueError(f"Alicat Unit ID 无效：{value!r}")
+            normalized[str(key).upper()] = unit_id
         return normalized
 
     def _resolve_unit_id(self, channel: str | float) -> str | None:
@@ -843,25 +841,30 @@ class RealHAL(HalBase):
         mapped = self._unit_ids.get(flow_unit.upper())
         return mapped or flow_unit
 
-    def _write_serial(self, command: str) -> None:
-        payload = command.encode("ascii", errors="ignore")
+    def _ensure_alicat_session(self) -> AlicatSerialSession:
         with self._serial_lock:
+            if self._alicat_session is not None:
+                if self._alicat_session.desynchronized:
+                    raise AlicatSessionDesynchronized(
+                        "Alicat serial session is desynchronized; explicit release is required"
+                    )
+                if not getattr(self._alicat_session.connection, "is_open", True):
+                    raise AlicatSessionDesynchronized(
+                        "Alicat serial transport closed unexpectedly; explicit release is required"
+                    )
+                return self._alicat_session
             connection = self._ensure_serial()
-            connection.reset_input_buffer()
-            connection.write(payload)
-            connection.flush()
+            self._alicat_session = AlicatSerialSession(
+                connection,
+                baud_rate=self.baud_rate,
+                frame_timeout_s=self.serial_timeout_s,
+                lock=self._serial_lock,
+                monotonic_ns=self._monotonic_ns_clock,
+            )
+            return self._alicat_session
 
-    def _query_serial(self, command: str) -> str | None:
-        payload = command.encode("ascii", errors="ignore")
-        with self._serial_lock:
-            connection = self._ensure_serial()
-            connection.reset_input_buffer()
-            connection.write(payload)
-            connection.flush()
-            response = connection.readline()
-        if not response:
-            return None
-        return response.decode("ascii", errors="ignore").strip()
+    def _transact_poll(self, unit_id: str):
+        return self._ensure_alicat_session().poll(unit_id)
 
     def _ensure_serial(self):
         if self._serial is not None and getattr(self._serial, "is_open", True):
@@ -878,20 +881,28 @@ class RealHAL(HalBase):
 
     def _parse_flow_value(self, response: str, unit_id: str) -> float:
         value = self._parse_frame_value(response, unit_id, self._flow_field_index)
-        return 0.0 if value is None else value
+        if value is None:
+            raise AlicatResponseMismatch("Alicat flow frame does not contain the configured field")
+        return value
 
-    def _read_setpoint(self, unit_id: str) -> tuple[float | None, str | None]:
-        response = self._query_serial(f"{unit_id}\r")
-        if not response:
-            return None, response
-        return self._parse_frame_value(response, unit_id, FLOW_FIELD_INDEX["setpoint"]), response
+    def _read_setpoint(self, unit_id: str, *, expected: float) -> tuple[float, str]:
+        frame = self._ensure_alicat_session().poll(
+            unit_id,
+            expected_setpoint=expected,
+            setpoint_tolerance=self._setpoint_verify_tolerance,
+        )
+        value = self._parse_frame_value(frame.text, unit_id, FLOW_FIELD_INDEX["setpoint"])
+        if value is None:
+            raise AlicatResponseMismatch("Alicat setpoint poll has no setpoint field")
+        return value, frame.text
 
     def _parse_frame_value(self, response: str, unit_id: str, index: int) -> float | None:
         tokens = response.split()
         if not tokens:
             return None
-        if tokens[0].lower() == unit_id.lower():
-            tokens = tokens[1:]
+        if tokens[0].lower() != unit_id.lower():
+            return None
+        tokens = tokens[1:]
         values: list[float] = []
         for token in tokens:
             try:
@@ -927,6 +938,47 @@ def _collect_valve_lines(
                 if 1 <= channel_id <= 20 and identity != selector_identity:
                     lines.add(str(line))
     return sorted(lines)
+
+
+def _validate_alicat_deadline_compatibility(config: dict) -> None:
+    """Reject serial timing that cannot fit existing safety-owner deadlines."""
+
+    frame_s = float(config.get("alicat_timeout_s", 0.2))
+    verify_delay_raw = float(config.get("alicat_setpoint_verify_delay_s", 0.05))
+    if not math.isfinite(frame_s) or frame_s <= 0:
+        raise ValueError("alicat_timeout_s 必须大于 0")
+    if not math.isfinite(verify_delay_raw) or verify_delay_raw < 0:
+        raise ValueError("alicat_setpoint_verify_delay_s 必须为有限非负数")
+    verify_delay_s = verify_delay_raw
+    single_setpoint_budget_s = (2.0 * frame_s) + verify_delay_s
+    final_zero_budget_s = 3.0 * single_setpoint_budget_s
+    shutdown_timeout_ms = float(config.get("actuation_shutdown_timeout_ms", 2000))
+    if not math.isfinite(shutdown_timeout_ms) or shutdown_timeout_ms <= 0:
+        raise ValueError("actuation_shutdown_timeout_ms 必须为有限正数")
+    shutdown_budget_s = shutdown_timeout_ms / 1000.0
+    if final_zero_budget_s >= shutdown_budget_s:
+        raise ValueError(
+            "Alicat frame deadline 与清零验证时序无法容纳在 Global Stop deadline 内"
+        )
+
+    _, initial_sync_budget_s = initial_resynchronization_windows(
+        baud_rate=int(config.get("baud_rate", 19200)),
+        frame_timeout_s=frame_s,
+    )
+    # Self-check and a fresh readiness poll each consume one frame deadline.
+    # This only guards the serial portion and deliberately leaves the remaining
+    # Connect budget to NI and UI.
+    startup_serial_budget_s = (
+        initial_sync_budget_s + frame_s + final_zero_budget_s + frame_s
+    )
+    connect_timeout_ms = float(config.get("hardware_connect_timeout_ms", 10000))
+    if not math.isfinite(connect_timeout_ms) or connect_timeout_ms <= 0:
+        raise ValueError("hardware_connect_timeout_ms 必须为有限正数")
+    connect_budget_s = connect_timeout_ms / 1000.0
+    if startup_serial_budget_s >= connect_budget_s:
+        raise ValueError(
+            "Alicat frame deadline 与启动清零时序无法容纳在 Connect budget 内"
+        )
 
 
 def _collect_selector_line(valve_mapping: dict) -> str | None:

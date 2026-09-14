@@ -55,6 +55,7 @@ tests/                 # 自动化测试
 - `HardwareWorker` 独占唯一 AI0/AI6 continuous task，并把带 AI epoch、sample sequence 与采样点 `monotonic_ns` 的 frozen batch 直接提交给 `ActuationWorker`；UI signal 不参与协议 deadline。
 - `ActuationWorker` 独占 `ProtocolExecutor`、`GatingService`、动作质量窗口和全部 DO session。协议、手动、预检与安全动作统一进入其 deadline/紧急队列，HAL 成功回执点明确为 `daqmx_write_ack`，不代表机械阀物理完成。
 - `FlowWorker` 是 Alicat 串口单写者。Controller 只提交 flow intent；`ActuationWorker` 先检查协议设备租约与 interlock，再把获准命令交给 `FlowWorker`。
+- Alicat ASCII transport 以 CR (`0x0D`) 为帧边界；同一共享 COM 在任意时刻只能有一条命令在途，TX、完整 CR 响应读取与 command-aware validation 必须位于同一锁域。Poll、VE、LSS 与 setpoint 分别校验响应形态和 Unit ID；setpoint 命令先消费并验证自身 data frame，之后才能发独立 readback poll。timeout、partial frame、framing failure、wrong ID/type 或 transport failure 会锁存整个 serial session 为 desynchronized，旧 session 后续请求必须零 TX；不得跳帧、猜归属或自动重试，只能 close/reopen 并通过 bounded initial resynchronization 建立新 session。串口失败不得发布为零流量。
 - `ActuationInterlockIngress` 是 producer-safe 的 immutable readiness store。AI/telemetry/serial producer 先更新 generation 和 unsafe latch，再发 UI 消息；只有动作 owner 在 readiness 恢复且阀门已确认关闭后才能清除 latch。
 - shutdown 的强制安全偏序为：停止新提交与失效 normal epoch → 请求 MFC A 清零并等待匹配成功 receipt → 才允许把 A 路三通选择阀切换到定义的安全路线。气味阀 1–20、B/C、ActuationWorker/DO、HardwareWorker/AI 与 FlowWorker/serial 的其余收敛顺序由 `SafeStopPlan` 明确定义；关键回执失败或状态不确定时进入 `RECOVERY_REQUIRED`。DO owner 未交还时禁止跨线程复用旧 task 做兜底写入。
 - RealHAL 按 device/port 建立持久 DO task。首次接管时先完成全部 channel 配置，再以 `Task.write(safe_packed_image, auto_start=True)` 让第一次物理 drive 就是按气味阀 active-high/active-low 与 selector polarity 计算的完整端口安全 image；该单点 On-Demand 写返回后必须显式 `Task.start()` 建立会话期 Running 状态，后续 deadline 与 Global Stop 路径才可在同一 task 上调用 `Task.write(auto_start=False)`。最终安全写确认后才能 close/release；意外 stop 只触发 fail-closed，不得隐式 restart/retry。每次 acquisition 的每个 port 仅记录一次 packed safe image 审计证据。最终资源分组及 `<20ms` 性能仍必须由真实 Windows/NI HIL 证据确认。
@@ -66,6 +67,7 @@ tests/                 # 自动化测试
 - transaction 顺序为 `DISCONNECTED → PREPARING_SAFE_OUTPUTS → SELF_CHECKING → ZEROING_FLOWS(B/C/A) → VERIFYING_READINESS → CONNECTED`。HardwareWorker 启动本身保持 idle，自检只能由 transaction 显式请求；安全 DO、自检、三路清零回读和新的零流量样本全部成功后才发布 `connected=True`。
 - Controller 保留完整内部阶段，但 View 通过单一 presentation 映射层只发布 `CONNECTING / CONNECTED / DISCONNECTED` 三种产品状态，分别显示“正在连接…”、“设备已连接”、“设备未连接”；普通界面不解释内部阶段或失败来源。
 - startup 任一步失败都停止自动尝试并清理已接管资源；运行中断线也先 fail-closed，再等待人工重新连接。Global Stop 成功后释放 owner、NI/serial 与运行身份，进入可人工重新连接的 `DISCONNECTED`，且重新连接只能进入新的安全 idle，绝不恢复上一次实验动作。
+- `alicat_timeout_s` 是可配置的单帧接收 deadline；当前 `0.2 s` 仅为兼容默认值，尚未由当前三台实机重新验证。Alicat 的 3.5-character idle 只描述设备收到 CR 后的总线空闲要求，不是完整响应最迟到达时间。新 serial session 的 bounded resynchronization 同时使用字符时间、配置的 frame deadline 与 delayed-response 风险建立有限 quiet/budget；以后调整 frame deadline 必须显式重验 Connect、Global Stop 与 FlowWorker 上层预算。下一次只读 HIL 应记录 Poll、VE、LSS 的真实响应 latency 后再决定生产默认值。
 - 无法确认阀门关闭、流量归零或 SafeStop 完成时进入 `RECOVERY_REQUIRED` 并保持 unsafe latch；普通连接 badge 仍为“设备未连接”，另用持续的用户安全提示要求立即断电，详细内部原因只进入日志/evidence。
 - 尚未开始 acquisition 时，关闭窗口或点击全局停止不得为了“安全”首次创建 task、打开串口或启动 worker。
 

@@ -822,16 +822,19 @@ def test_real_hal_set_flow_verifies_setpoint_readback(monkeypatch):
             self.is_open = True
             serial_instances.append(self)
 
-        def reset_input_buffer(self) -> None:
-            return None
+        @property
+        def in_waiting(self) -> int:
+            return 0
 
-        def write(self, payload: bytes) -> None:
+        def write(self, payload: bytes) -> int:
             self.commands.append(payload)
+            return len(payload)
 
         def flush(self) -> None:
             return None
 
-        def readline(self) -> bytes:
+        def read_until(self, expected: bytes = b"\n") -> bytes:
+            assert expected == b"\r"
             return b"a 14.7 25.0 0.0 0.0 0.123 Air\r"
 
         def close(self) -> None:
@@ -850,7 +853,11 @@ def test_real_hal_set_flow_verifies_setpoint_readback(monkeypatch):
     monkeypatch.setattr("app.services.real_hal._NIDAQMX_IMPORT_ERROR", None)
     monkeypatch.setattr("app.services.real_hal._SERIAL_IMPORT_ERROR", None)
 
-    hal = RealHAL(serial_port="COM6", setpoint_verify_delay_s=0)
+    hal = RealHAL(
+        serial_port="COM6",
+        serial_timeout_s=0.001,
+        setpoint_verify_delay_s=0,
+    )
 
     assert hal.set_flow("A", 123.0) is True
     assert serial_instances[0].commands[0] == b"as0.123\r"
@@ -870,16 +877,18 @@ def test_real_hal_set_flow_fails_on_setpoint_mismatch(monkeypatch):
     class DummySerial:
         is_open = True
 
-        def reset_input_buffer(self) -> None:
-            return None
+        @property
+        def in_waiting(self) -> int:
+            return 0
 
-        def write(self, payload: bytes) -> None:
-            return None
+        def write(self, payload: bytes) -> int:
+            return len(payload)
 
         def flush(self) -> None:
             return None
 
-        def readline(self) -> bytes:
+        def read_until(self, expected: bytes = b"\n") -> bytes:
+            assert expected == b"\r"
             return b"a 14.7 25.0 0.0 0.0 0.000 Air\r"
 
     monkeypatch.setattr("app.services.real_hal.nidaqmx", SimpleNamespace(Task=DummyTask))
@@ -895,7 +904,11 @@ def test_real_hal_set_flow_fails_on_setpoint_mismatch(monkeypatch):
     monkeypatch.setattr("app.services.real_hal._NIDAQMX_IMPORT_ERROR", None)
     monkeypatch.setattr("app.services.real_hal._SERIAL_IMPORT_ERROR", None)
 
-    hal = RealHAL(serial_port="COM6", setpoint_verify_delay_s=0)
+    hal = RealHAL(
+        serial_port="COM6",
+        serial_timeout_s=0.001,
+        setpoint_verify_delay_s=0,
+    )
 
     assert hal.set_flow("A", 123.0) is False
 

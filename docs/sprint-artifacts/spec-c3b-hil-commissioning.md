@@ -8,7 +8,8 @@ review_loop_iteration: 1
 offline_lifecycle_remediation: 'done'
 offline_connection_presentation: 'done'
 offline_do_lifecycle_remediation: 'done'
-physical_commissioning_status: 'blocked-pending-c3b-3-real-stop-retest'
+offline_serial_transaction_remediation: 'done'
+physical_commissioning_status: 'blocked-pending-alicat-readonly-preflight-retest'
 baseline_commit: '2cc3a8986eaa95aeb7a963ee05f3caea484deb1f'
 context:
   - '{project-root}/docs/project-context.md'
@@ -108,6 +109,7 @@ context:
 - 2026-09-11：人工重新确定产品启动语义为“窗口显示后自动连接一次”；移除原启动授权 open question，新增 passive startup、one-shot、统一 transaction、失败不自动重试、运行中断线不自动恢复和安全 DO 首次 image 约束。C.3b-3 真实连接仍未执行。
 - 2026-09-14：人工进一步统一产品连接表现为“正在连接…”、“设备已连接”、“设备未连接”三态；startup failure、Global Stop 成功及 runtime disconnect 安全收口成功均显示“设备未连接 / 重新连接”。这项决定取代 Review B8 的旧终止性 UI 结论，但不削弱 SafeStop、unsafe latch 或严重安全提示。C.3b-3 真实连接仍未执行。
 - 2026-09-14：首次真实 C.3b-3 的连接与零流量阶段通过，Global Stop 因 NI On-Demand DO task 生命周期错误失败并进入 `RECOVERY_REQUIRED`；真实失败已由独立 evidence commit 固化。C.3b-3C 只做离线修复，commissioning 继续 blocked，等待同规格真实重跑。
+- 2026-09-14：真实复测 preflight 在 power-cycle 后因 A/B/C 无参数 LSS 均 timeout 安全停止；随后只读诊断发送 `aVE\r` 却收到 LSS 形态的 `A U\r`，证明存在 delayed/stale response 错归属风险。Real App 未启动、NI task 未创建、无硬件写入。当前仅开展离线 CR-framed serial transaction 修复；C.3b-3 继续 blocked，必须先重新进行只读 Alicat preflight 并记录 Poll/VE/LSS latency。
 
 ## Review Triage Log
 

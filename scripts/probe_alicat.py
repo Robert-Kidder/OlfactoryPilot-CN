@@ -1,18 +1,17 @@
 from __future__ import annotations
 
 import argparse
+import sys
 import time
+from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 import serial
 
-
-def query(port: serial.Serial, command: str) -> str:
-    payload = command.encode("ascii")
-    port.reset_input_buffer()
-    port.write(payload)
-    port.flush()
-    response = port.readline()
-    return response.decode("ascii", errors="replace").strip()
+from app.services.alicat_serial import AlicatSerialSession, quantize_setpoint_for_wire
 
 
 def main() -> int:
@@ -27,20 +26,30 @@ def main() -> int:
 
     units = [item.strip() for item in args.ids.split(",") if item.strip()]
     with serial.Serial(args.port, args.baud, timeout=args.timeout) as port:
+        session = AlicatSerialSession(
+            port,
+            baud_rate=args.baud,
+            frame_timeout_s=args.timeout,
+        )
         print(f"已打开 {args.port} @ {args.baud}")
         for unit in units:
-            response = query(port, f"{unit}\r")
-            print(f"轮询 {unit!r}: {response!r}")
+            frame = session.poll(unit)
+            print(f"轮询 {unit!r}: {frame.raw!r}")
 
         if args.set:
             unit, value = args.set
             device_value = float(value) * float(args.scale)
-            command = f"{unit}s{device_value:.3f}\r"
+            wire_value = quantize_setpoint_for_wire(device_value)
+            command = f"{unit}s{wire_value:.3f}\r"
             print(f"设置 {unit!r}: {command!r}")
-            query(port, command)
+            session.set_setpoint(unit, wire_value, tolerance=0.00005)
             time.sleep(0.1)
-            response = query(port, f"{unit}\r")
-            print(f"设置后轮询 {unit!r}: {response!r}")
+            frame = session.poll(
+                unit,
+                expected_setpoint=wire_value,
+                setpoint_tolerance=0.00005,
+            )
+            print(f"设置后轮询 {unit!r}: {frame.raw!r}")
 
     return 0
 
