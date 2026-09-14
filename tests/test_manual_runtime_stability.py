@@ -46,17 +46,16 @@ def _runtime_controller(tmp_path: Path) -> tuple[MainController, MainWindow, Moc
     config["_local_config_path"] = str(tmp_path / "local-config.json")
     state = AppState.from_config(config)
     state.simulation_mode = True
-    state.telemetry.connected = True
+    state.telemetry.connected = False
     state.telemetry.safety_state = "SAFE"
     state.telemetry.timestamp = time.time()
-    state.hardware_ready = True
+    state.hardware_ready = False
     hal = MockHAL(base_flow_sccm=1000.0)
     hardware = HardwareWorker(
         telemetry_hz=10,
         hal=hal,
         simulation=True,
     )
-    hardware._connected = True
     controller = MainController(state, hardware, config=config)
     window = MainWindow(controller, state)
     controller.bind_view(window)

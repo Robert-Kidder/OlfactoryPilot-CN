@@ -76,6 +76,7 @@ class RealHAL(HalBase):
         alicat_readback_scale: float = 1000.0,
         valve_lines: Iterable[str] | None = None,
         odor_valve_lines: Iterable[str] | None = None,
+        digital_safe_levels: dict[str, bool] | None = None,
         monotonic_ns_clock: Callable[[], int] | None = None,
         wall_clock: Callable[[], float] | None = None,
     ) -> None:
@@ -117,6 +118,16 @@ class RealHAL(HalBase):
         self._odor_valve_lines = list(
             self._digital_lines if odor_valve_lines is None else odor_valve_lines
         )
+        configured_safe_levels = digital_safe_levels or {}
+        self._digital_safe_levels = {
+            normalize_digital_target(target): bool(
+                configured_safe_levels.get(
+                    target,
+                    configured_safe_levels.get(normalize_digital_target(target), False),
+                )
+            )
+            for target in self._digital_lines
+        }
         self._do_sessions: dict[tuple[str, str], _DOPortSession] = {}
         self._do_owner_thread_id: int | None = None
         self._do_prepare_failed = False
@@ -139,6 +150,11 @@ class RealHAL(HalBase):
         valve_lines = list(odor_valve_lines)
         if selector_line is not None:
             valve_lines.append(selector_line)
+        digital_safe_levels = _collect_digital_safe_levels(
+            config,
+            odor_valve_lines=odor_valve_lines,
+            selector_line=selector_line,
+        )
         ttl_config = TtlTriggerConfig.from_mapping(config)
         return cls(
             ai0_channel=str(config.get("ai0_channel", "Dev1/ai0")),
@@ -157,6 +173,21 @@ class RealHAL(HalBase):
             alicat_readback_scale=float(config.get("alicat_readback_scale", 1000.0)),
             valve_lines=valve_lines,
             odor_valve_lines=odor_valve_lines,
+            digital_safe_levels=digital_safe_levels,
+        )
+
+    @property
+    def power_on_safe_compatible(self) -> bool:
+        """Whether weak pull-down leaves every owned actuator in its safe state."""
+
+        return not any(self._digital_safe_levels.values())
+
+    @property
+    def power_on_safety_blockers(self) -> tuple[str, ...]:
+        return tuple(
+            target
+            for target in self._digital_lines
+            if self._digital_safe_levels[normalize_digital_target(target)]
         )
 
     def read_ai0(self, timestamp: float | None = None) -> float:
@@ -417,8 +448,10 @@ class RealHAL(HalBase):
             # A failed close is physically uncertain.  Keeping the previous
             # cached True bit could reassert that valve on the next packed-port
             # write, so fail the target's software intent toward the safe state.
-            if not state:
-                session.states[bit - session.first_line] = False
+            target = normalize_digital_target(f"{device}/{normalized}")
+            safe_level = self._digital_safe_levels[target]
+            if bool(state) == safe_level:
+                session.states[bit - session.first_line] = safe_level
             return DigitalWriteAck(
                 success=False,
                 started_ns=started_ns,
@@ -472,13 +505,19 @@ class RealHAL(HalBase):
                 last = max(bits)
                 suffix = f"line{first}" if first == last else f"line{first}:{last}"
                 task = nidaqmx.Task()
+                safe_states = [
+                    self._digital_safe_levels[
+                        normalize_digital_target(f"{device}/{port}/line{bit}")
+                    ]
+                    for bit in range(first, last + 1)
+                ]
                 session = _DOPortSession(
                     task=task,
                     device=device,
                     port=port,
                     first_line=first,
                     last_line=last,
-                    states=[False] * (last - first + 1),
+                    states=safe_states,
                 )
                 # Track the task immediately so add_do_chan/start failures also
                 # participate in rollback.
@@ -487,8 +526,21 @@ class RealHAL(HalBase):
                     f"{device}/{port}/{suffix}",
                     line_grouping=LineGrouping.CHAN_FOR_ALL_LINES,
                 )
-                if hasattr(task, "start"):
-                    task.start()
+            # NI-DAQmx documents that auto_start=True implicitly starts a task.
+            # For software-timed DO, make that first physical drive the complete
+            # safe packed image; never start a task before its safe value exists.
+            for session in created:
+                packed_state = sum(
+                    1 << index
+                    for index, enabled in enumerate(session.states)
+                    if enabled
+                )
+                write_value: bool | int = (
+                    bool(session.states[0])
+                    if len(session.states) == 1
+                    else packed_state
+                )
+                session.task.write(write_value, auto_start=True, timeout=1.0)
         except Exception:
             LOG.exception("预建 NI-DAQmx DO task 失败")
             failed: list[_DOPortSession] = []
@@ -530,13 +582,20 @@ class RealHAL(HalBase):
         self._do_prepare_failed = False
         return True
 
+    @property
+    def do_resources_in_use(self) -> bool:
+        """Expose retained tasks without transferring their thread ownership."""
+
+        return bool(self._do_sessions)
+
     def close_all(self) -> bool:
         if self._odor_valve_lines and not self._do_sessions and not self.prepare_do_output():
             return False
         success = True
         for target in self._odor_valve_lines:
             device, line = _split_target(target)
-            if not self.write_digital(device=device, line=line, state=False):
+            safe_level = self._digital_safe_levels[normalize_digital_target(target)]
+            if not self.write_digital(device=device, line=line, state=safe_level):
                 success = False
         return success
 
@@ -791,6 +850,47 @@ def _collect_selector_line(valve_mapping: dict) -> str | None:
         selector.get("target") if isinstance(selector, dict) else None
     ) or valve_mapping.get("master_valve")
     return None if not target else str(target)
+
+
+def _collect_digital_safe_levels(
+    config: dict,
+    *,
+    odor_valve_lines: Iterable[str],
+    selector_line: str | None,
+) -> dict[str, bool]:
+    """Build the complete first-drive image from odor and selector polarity."""
+
+    odor_targets = [normalize_digital_target(target) for target in odor_valve_lines]
+    safe_levels: dict[str, bool] = {}
+    profile = config.get("hardware_profile") or {}
+    channels = profile.get("channels") or [] if isinstance(profile, dict) else []
+    profile_polarities: dict[str, bool] = {}
+    if isinstance(channels, list):
+        for channel in channels:
+            if not isinstance(channel, dict) or not channel.get("target"):
+                continue
+            target = normalize_digital_target(str(channel["target"]))
+            active_high = channel.get("active_high", True)
+            if type(active_high) is not bool:
+                raise ValueError("hardware_profile channel active_high 必须是 JSON boolean")
+            profile_polarities[target] = not active_high
+    # HardwareProfile overrides polarity for every target it owns. Remaining
+    # legacy safety-union aliases retain the project's established active-high
+    # contract, so their closed/safe level is explicitly LOW.
+    safe_levels.update(
+        {target: profile_polarities.get(target, False) for target in odor_targets}
+    )
+    if selector_line is not None:
+        selector = (profile.get("selector") if isinstance(profile, dict) else None) or (
+            config.get("valve_mapping") or {}
+        ).get("selector") or {}
+        if "safe_level" not in selector:
+            raise ValueError("hardware_profile selector 缺少 safe_level")
+        safe_level = selector["safe_level"]
+        if type(safe_level) is not bool:
+            raise ValueError("selector safe_level 必须是 JSON boolean")
+        safe_levels[normalize_digital_target(selector_line)] = safe_level
+    return safe_levels
 
 
 def _split_target(target: str) -> tuple[str | None, str]:

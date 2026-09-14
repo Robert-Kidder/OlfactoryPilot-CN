@@ -293,6 +293,15 @@ class MainController(QObject):
         self._last_safety_state: SafetyState | None = None
         self._has_seen_connection = False
         self._connect_in_progress = False
+        self._connection_phase = "DISCONNECTED"
+        self._hardware_acquired = False
+        self._startup_auto_connect_scheduled = False
+        self._startup_auto_connect_consumed = False
+        self._startup_auto_connect_cancelled = False
+        self._connection_request_count = 0
+        self._flow_was_running_before_self_check = False
+        self._runtime_disconnect_cleanup_started = False
+        self._startup_zero_completed_at = 0.0
         self._pretest_sequence_in_progress = False
         self._pending_pretest_flow: tuple[str, list[int], FlowApplyResult] | None = None
         self._pretest_flow_ready_deadline = 0.0
@@ -362,7 +371,9 @@ class MainController(QObject):
         self.view: MainWindow | None = None
         self.worker.telemetry_ready.connect(self.handle_telemetry)
         self.worker.status_message.connect(self.handle_status)
-        self.worker.self_check_completed.connect(self.handle_self_check)
+        self.worker.connection_self_check_completed.connect(
+            self._handle_connection_self_check
+        )
         if hasattr(self.worker, "breath_samples"):
             self.worker.breath_samples.connect(self.handle_breath_samples)
         if hasattr(self.worker, "ttl_pulse"):
@@ -394,6 +405,9 @@ class MainController(QObject):
         )
         self.actuation_worker.protocol_safe_stop_handoff_requested.connect(
             self._handle_protocol_safe_stop_handoff_requested
+        )
+        self.actuation_worker.do_output_prepared.connect(
+            self._handle_do_output_prepared
         )
         self.actuation_worker.snapshot_ready.connect(self._handle_protocol_snapshot)
         self.actuation_worker.document_result_ready.connect(self._handle_document_result)
@@ -482,6 +496,9 @@ class MainController(QObject):
         self._hardware_verification_timer.timeout.connect(
             self._handle_hardware_verification_tick
         )
+        self._connection_timeout_timer = QTimer(self)
+        self._connection_timeout_timer.setSingleShot(True)
+        self._connection_timeout_timer.timeout.connect(self._handle_connection_timeout)
 
     def _initialize_cleaning_config(self) -> None:
         available = self.state.get_active_valve_map()
@@ -555,6 +572,11 @@ class MainController(QObject):
             )
 
     def start_worker(self) -> bool:
+        """Compatibility entry: start the authoritative connection transaction."""
+
+        return self.request_hardware_connection(source="internal")
+
+    def _start_actuation_owner(self) -> bool:
         configuration_block = self._configuration_runtime_block_reason()
         if configuration_block:
             self._set_configuration_block_status(configuration_block)
@@ -564,49 +586,68 @@ class MainController(QObject):
                 "检测到未经人工确认的关闭失败；请点击连接以明确重试。"
             )
             return False
-        restart_epoch = int(self.actuation_worker.protocol_state.execution_epoch)
-        start_flow = not self.flow_worker.isRunning()
         start_actuation = not self.actuation_worker.isRunning()
-        if start_flow:
-            if not self.flow_worker.prepare_restart(execution_epoch=restart_epoch):
-                self._latch_restart_failure("流量 owner 无法安全重绑定 execution epoch。")
-                return False
-        if start_actuation and not self.actuation_worker.prepare_restart():
-            if start_flow:
-                self.flow_worker.shutdown(timeout_ms=1)
+        if start_actuation and not self.actuation_worker.prepare_restart(
+            connection_request_id=self._connection_request_count
+        ):
             self._latch_restart_failure(
                 "动作 owner 未完成 DO session 交接，已阻止硬件重启。"
             )
             return False
-        if self.flow_worker.lease_snapshot.kind is DeviceLeaseKind.IDLE:
-            self._manual_lease_token = None
-            self._manual_supply_identity = None
-        if start_flow:
-            LOG.info("Starting serial flow worker thread")
-            self.flow_worker.start()
         if start_actuation:
-            LOG.info("Starting actuation worker thread")
+            LOG.info("Starting actuation owner for safe DO acquisition")
             self.actuation_worker.start(QThread.Priority.HighPriority)
-        if not self.worker.isRunning():
-            LOG.info("Starting hardware worker thread")
-            self.worker.start(QThread.Priority.HighPriority)
+        elif self.actuation_worker.do_output_ready:
+            QTimer.singleShot(
+                0,
+                lambda: self._handle_do_output_prepared(
+                    True,
+                    "existing safe output owner",
+                    self._connection_request_count,
+                ),
+            )
         return True
 
     def _pause_flow_owner_for_self_check(self) -> bool:
         """Give hardware self-check exclusive, bounded access to the serial port."""
+        self._flow_was_running_before_self_check = self.flow_worker.isRunning()
+        if not self._flow_was_running_before_self_check:
+            return not bool(
+                getattr(self.flow_service.hal, "serial_resources_in_use", False)
+            )
         timeout_ms = int(self.config.get("actuation_shutdown_timeout_ms", 2000))
         return self.flow_worker.shutdown(timeout_ms)
 
     def _resume_flow_owner_after_self_check(self) -> bool:
+        if not self._flow_was_running_before_self_check:
+            return True
         restart_epoch = int(self.actuation_worker.protocol_state.execution_epoch)
         if not self.flow_worker.prepare_restart(execution_epoch=restart_epoch):
             return False
         if not self.flow_worker.isRunning():
             self.flow_worker.start()
+        self._flow_was_running_before_self_check = False
         return True
 
     def shutdown(self) -> None:
         LOG.info("Shutting down worker thread")
+        self._connection_timeout_timer.stop()
+        self.cancel_startup_auto_connect()
+        if not self._hardware_lifecycle_active():
+            self._connect_in_progress = False
+            self._connection_phase = "DISCONNECTED"
+            self.state.telemetry.connected = False
+            self.state.hardware_ready = False
+            return
+        if self._orphaned_do_resources():
+            self._unsafe_shutdown_latched = True
+            self._connection_phase = "RECOVERY_REQUIRED"
+            self._block_for_unsafe_shutdown(
+                "NI 输出资源未能由原 owner 释放，请立即现场停止或断电。"
+            )
+            if self.view:
+                self.view.render_connection_phase("RECOVERY_REQUIRED")
+            return
         if self._hardware_verification_run is not None:
             if self._hardware_verification_run.physical:
                 self.actuation_worker.post_physical_verification_finish(
@@ -625,6 +666,11 @@ class MainController(QObject):
             force=True,
         )
         self._handle_shutdown_event(event, success_message="已安全关闭")
+        self._connect_in_progress = False
+        self._hardware_acquired = event.get("result") != "success"
+        self._connection_phase = (
+            "DISCONNECTED" if event.get("result") == "success" else "RECOVERY_REQUIRED"
+        )
         if finalize_session:
             self._finish_session_after_global_stop(event)
             self.wait_for_session_finalization(
@@ -646,6 +692,24 @@ class MainController(QObject):
                     self.config
                 ).close_timeout_ms
             )
+
+    def _hardware_lifecycle_active(self) -> bool:
+        return bool(
+            self._hardware_acquired
+            or self._connect_in_progress
+            or self.state.telemetry.connected
+            or self.state.hardware_ready
+            or self.worker.isRunning()
+            or self.flow_worker.isRunning()
+            or self.actuation_worker.isRunning()
+            or getattr(self.flow_service.hal, "do_resources_in_use", False)
+        )
+
+    def _orphaned_do_resources(self) -> bool:
+        return bool(
+            getattr(self.flow_service.hal, "do_resources_in_use", False)
+            and not self.actuation_worker.isRunning()
+        )
 
     def teardown(self, *, timeout_ms: int = 2000) -> None:
         """Idempotently join every timer/thread owned by this Controller."""
@@ -840,6 +904,17 @@ class MainController(QObject):
             )
             return
         previous_safety_state = self.state.telemetry.safety_state
+        was_connected = bool(self.state.telemetry.connected)
+        # HardwareWorker can have one pre-commit disconnected payload queued
+        # when the controller publishes CONNECTED. Its live owner state is the
+        # authority: a real disconnect first calls reject_connection().
+        if (
+            was_connected
+            and payload.get("connected") is False
+            and bool(getattr(self.worker, "is_connected", False))
+        ):
+            LOG.debug("Ignoring queued pre-commit disconnected telemetry")
+            return
         application_safety = payload.get("application_safety_state")
         application_reason = payload.get("application_safety_reason")
         if application_safety is not None:
@@ -864,6 +939,21 @@ class MainController(QObject):
             application_reason = current_interlock.safety_reason
         hardware_safety = None if application_safety is not None else payload.get("safety_state")
         self.state.update_telemetry(payload)
+        if (
+            was_connected
+            and not self.state.telemetry.connected
+            and self._hardware_acquired
+            and not self._runtime_disconnect_cleanup_started
+        ):
+            self._runtime_disconnect_cleanup_started = True
+            self._fail_connection("设备运行中通信中断", acquired=True)
+            if self._connection_phase == "FAILED":
+                self._connection_phase = "RUNTIME_DISCONNECTED"
+                self.state.update_status("设备通信中断，请检查设备后重新连接")
+                if self.view:
+                    self.view.render_connection_phase("RUNTIME_DISCONNECTED")
+                    self.view.update_status(self.state.status_message)
+            return
         sample_timestamp = payload.get("airflow_sample_timestamp")
         if (
             isinstance(sample_timestamp, int | float)
@@ -874,6 +964,14 @@ class MainController(QObject):
                 self._latest_airflow_sample_timestamp,
                 float(sample_timestamp),
             )
+            if self._connection_phase == "VERIFYING_READINESS":
+                airflow = float(self.state.telemetry.airflow)
+                if (
+                    math.isfinite(airflow)
+                    and float(sample_timestamp) >= self._startup_zero_completed_at
+                    and abs(airflow) <= float(self.state.low_flow_threshold)
+                ):
+                    self._complete_connection()
         if self.state.telemetry.connected:
             self._has_seen_connection = True
 
@@ -1306,53 +1404,58 @@ class MainController(QObject):
             if self.view:
                 self.view.update_status(self.state.status_message)
 
+    @Slot(list, bool, int)
+    def _handle_connection_self_check(
+        self,
+        results: list,
+        hardware_ready: bool,
+        connection_request_id: int,
+    ) -> None:
+        if connection_request_id != self._connection_request_count:
+            LOG.warning(
+                "Ignoring self-check from connection request %s; active=%s",
+                connection_request_id,
+                self._connection_request_count,
+            )
+            return
+        self.handle_self_check(results, hardware_ready)
+
     @Slot(list, bool)
     def handle_self_check(self, results: list, hardware_ready: bool) -> None:
+        if not self._connect_in_progress or self._connection_phase != "SELF_CHECKING":
+            LOG.warning("Ignoring self-check result outside connection transaction")
+            return
         if hardware_ready and self._unsafe_shutdown_latched:
             LOG.warning("Ignoring self-check ready while unsafe shutdown latch is set")
             hardware_ready = False
-        self.state.update_self_check(results, hardware_ready)
-        self.state.telemetry.connected = hardware_ready
-        if hardware_ready:
-            self._has_seen_connection = True
-        self._connect_in_progress = False
-        if hardware_ready:
-            status = "硬件自检通过，已连接 SAFE"
-        else:
+        # Self-check is an intermediate gate.  Keep public readiness false
+        # until verified B/C/A zero receipts complete the transaction.
+        self.state.update_self_check(results, False)
+        self.state.telemetry.connected = False
+        if not hardware_ready:
             failing = next((r for r in results if getattr(r, "status", "") != "PASS"), None)
             reason = getattr(failing, "reason", "自检失败")
             suggestion = getattr(failing, "suggestion", "检查连接后重试")
-            status = f"硬件自检失败：{reason}；建议：{suggestion}"
-        self.state.update_status(status)
+            if self.view:
+                self.view.render_self_check(self.state.self_check_results, False)
+            self._fail_connection(f"{reason}；{suggestion}", acquired=self._hardware_acquired)
+            return
         if self.view:
-            self.view.update_status(status)
-            self.view.render_self_check(self.state.self_check_results, hardware_ready)
-        if hardware_ready:
-            self.actuation_interlock.update(
-                connected=True,
-                hardware_ready=True,
-                safety_state=self.state.telemetry.safety_state,
-                ttl_input_ready=bool(getattr(self.worker, "ttl_input_ready", False)),
-            )
-            self._publish_interlock_from_state()
-            self.actuation_worker.post_readiness_update(
-                readiness=self._execution_readiness(),
-                timestamp=time.time(),
-            )
-            self._drain_actuation_if_not_running()
-            self._reset_startup_flows_to_zero_async()
-        else:
-            self.actuation_interlock.update(
-                connected=False,
-                hardware_ready=False,
-                ttl_input_ready=False,
-            )
-            self._publish_interlock_from_state()
-            self.actuation_worker.post_readiness_update(
-                readiness=self._execution_readiness(),
-                timestamp=time.time(),
-            )
-            self._drain_actuation_if_not_running()
+            self.view.render_self_check(self.state.self_check_results, True)
+        self.actuation_interlock.update(
+            connected=False,
+            hardware_ready=True,
+            flow_setpoints_ready=False,
+            ttl_input_ready=bool(getattr(self.worker, "ttl_input_ready", False)),
+        )
+        self._connection_phase = "ZEROING_FLOWS"
+        restart_epoch = int(self.actuation_worker.protocol_state.execution_epoch)
+        if not self.flow_worker.prepare_restart(execution_epoch=restart_epoch):
+            self._fail_connection("串口 owner 无法准备", acquired=True)
+            return
+        if not self.flow_worker.isRunning():
+            self.flow_worker.start()
+        self._reset_startup_flows_to_zero_async()
         self._refresh_toolbar_state()
         self._render_cleaning_snapshot()
         self._render_manual_snapshot()
@@ -1365,31 +1468,165 @@ class MainController(QObject):
             return
         if self._unsafe_shutdown_latched:
             self._unsafe_shutdown_latched = False
-        self.state.update_status("正在重新自检...")
+        self.request_hardware_connection(source="retry")
+
+    def connect_hardware(self) -> None:
+        """UI retry/reconnect alias for the one authoritative transaction."""
+
+        self.request_hardware_connection(source="retry")
+
+    def schedule_startup_auto_connect(self) -> bool:
+        """Queue exactly one startup request after the main window is visible."""
+
+        if self._startup_auto_connect_scheduled or self._startup_auto_connect_consumed:
+            return False
+        self._startup_auto_connect_scheduled = True
+        self._startup_auto_connect_cancelled = False
+        self.state.update_status("正在连接设备…")
+        if self.view:
+            self.view.update_status(self.state.status_message)
+            self.view.render_connection_phase("CONNECTING")
+        QTimer.singleShot(0, self._consume_startup_auto_connect)
+        return True
+
+    def cancel_startup_auto_connect(self) -> None:
+        self._startup_auto_connect_cancelled = True
+
+    @Slot()
+    def _consume_startup_auto_connect(self) -> None:
+        if self._startup_auto_connect_consumed:
+            return
+        self._startup_auto_connect_scheduled = False
+        self._startup_auto_connect_consumed = True
+        view = self.view
+        if (
+            self._startup_auto_connect_cancelled
+            or view is None
+            or not isValid(view)
+            or getattr(view, "_closing", False)
+            or not view.isVisible()
+        ):
+            LOG.info("Startup auto-connect consumed without hardware acquisition")
+            return
+        self.request_hardware_connection(source="startup")
+
+    def request_hardware_connection(self, *, source: str) -> bool:
+        """Single safe transaction used by startup, retry and reconnect."""
+
+        if self._telemetry_terminal_stopped:
+            self._connection_phase = "DISCONNECTED"
+            self.state.update_status("已执行全局停止，请关闭并重新启动应用。")
+            if self.view:
+                self.view.render_connection_phase("DISCONNECTED")
+                self.view.update_status(self.state.status_message)
+            return False
+        configuration_block = self._configuration_runtime_block_reason()
+        if configuration_block:
+            self._connection_phase = "FAILED"
+            self._set_configuration_block_status(configuration_block)
+            if self.view:
+                self.view.render_connection_phase("FAILED")
+            return False
+        if self._connect_in_progress or self.state.telemetry.connected:
+            return False
+        hal = self.flow_service.hal
+        if (
+            not self.simulation_mode
+            and getattr(hal, "power_on_safe_compatible", True) is not True
+        ):
+            blockers = ", ".join(getattr(hal, "power_on_safety_blockers", ()))
+            self._connection_phase = "FAILED"
+            self.state.update_status("硬件上电极性与安全状态不兼容，已阻止连接")
+            LOG.error("Power-on pull-down safety blocker | targets=%s", blockers)
+            if self.view:
+                self.view.render_connection_phase("FAILED")
+                self.view.update_status(self.state.status_message)
+            return False
+
+        if self._unsafe_shutdown_latched:
+            if source != "retry":
+                self._block_for_unsafe_shutdown(
+                    "检测到上次关闭未完成；请检查设备后点击重试连接。"
+                )
+                self._connection_phase = "FAILED"
+                if self.view:
+                    self.view.render_connection_phase("FAILED")
+                return False
+            self._unsafe_shutdown_latched = False
+        self._connection_request_count += 1
+        self._connect_in_progress = True
+        self._connection_phase = "PREPARING_SAFE_OUTPUTS"
+        self._connection_timeout_timer.start(
+            max(1000, int(self.config.get("hardware_connect_timeout_ms", 10000)))
+        )
+        self._runtime_disconnect_cleanup_started = False
+        self.state.telemetry.connected = False
+        self.state.hardware_ready = False
+        if hasattr(self.worker, "reject_connection"):
+            self.worker.reject_connection()
+        self.state.update_status("正在连接设备…")
+        if self.view:
+            self.view.update_status(self.state.status_message)
+            self.view.render_connection_phase("CONNECTING")
+        if not self._start_actuation_owner():
+            self._fail_connection("安全数字输出准备未能启动", acquired=False)
+            return False
+        self._refresh_toolbar_state()
+        return True
+
+    @Slot(bool, str, int)
+    def _handle_do_output_prepared(
+        self,
+        success: bool,
+        message: str,
+        connection_request_id: int,
+    ) -> None:
+        if connection_request_id != self._connection_request_count:
+            LOG.warning(
+                "Ignoring DO preparation from connection request %s; active=%s",
+                connection_request_id,
+                self._connection_request_count,
+            )
+            return
+        if not self._connect_in_progress or self._connection_phase != "PREPARING_SAFE_OUTPUTS":
+            return
+        if not success:
+            resources_retained = bool(
+                getattr(self.flow_service.hal, "do_resources_in_use", False)
+            )
+            self._fail_connection(
+                message or "安全数字输出准备失败",
+                acquired=False,
+                recovery_required=resources_retained,
+            )
+            return
+        self._hardware_acquired = True
+        self._connection_phase = "SELF_CHECKING"
+        self.state.update_status("正在检查设备…")
         if self.view:
             self.view.update_status(self.state.status_message)
         if not self.worker.isRunning():
-            if not self.start_worker():
-                return
-        self.worker.request_self_check()
+            self.worker.start(QThread.Priority.HighPriority)
+        self.worker.request_self_check(self._connection_request_count)
 
-    def connect_hardware(self) -> None:
-        configuration_block = self._configuration_runtime_block_reason()
-        if configuration_block:
-            self._set_configuration_block_status(configuration_block)
-            return
+    @Slot()
+    def _handle_connection_timeout(self) -> None:
         if self._connect_in_progress:
-            return
-
-        if self._unsafe_shutdown_latched:
-            # Clicking Connect is the explicit operator confirmation/retry.
-            self._unsafe_shutdown_latched = False
-        self._connect_in_progress = True
-        self.state.update_status("正在连接硬件并执行自检...")
-        if self.view:
-            self.view.update_status(self.state.status_message)
-        self._start_or_request_self_check()
-        self._refresh_toolbar_state()
+            recovery_required = False
+            if self._connection_phase == "PREPARING_SAFE_OUTPUTS":
+                timeout_ms = int(
+                    self.config.get("actuation_shutdown_timeout_ms", 2000)
+                )
+                handed_off = self.actuation_worker.shutdown(timeout_ms)
+                recovery_required = bool(
+                    not handed_off
+                    or getattr(self.flow_service.hal, "do_resources_in_use", False)
+                )
+            self._fail_connection(
+                f"连接阶段 {self._connection_phase} 超时",
+                acquired=self._hardware_acquired,
+                recovery_required=recovery_required,
+            )
 
     def _validate_cleaning_candidate(
         self,
@@ -3335,19 +3572,8 @@ class MainController(QObject):
         self._refresh_toolbar_state()
 
     def _start_or_request_self_check(self) -> None:
-        configuration_block = self._configuration_runtime_block_reason()
-        if configuration_block:
-            self._set_configuration_block_status(configuration_block)
-            self._connect_in_progress = False
-            return
-        self._telemetry_terminal_stopped = False
-        was_running = self.worker.isRunning()
-        if not self.start_worker():
-            self._connect_in_progress = False
-            self._refresh_toolbar_state()
-            return
-        if was_running:
-            self.worker.request_self_check()
+        self._connect_in_progress = False
+        self.request_hardware_connection(source="retry")
 
     @Slot(object)
     def handle_manual_release_requested(self, intent: ManualExperimentIntent) -> bool:
@@ -4880,6 +5106,27 @@ class MainController(QObject):
         )
 
     def stop_hardware(self) -> None:
+        if not self._hardware_lifecycle_active():
+            self.cancel_startup_auto_connect()
+            self._connect_in_progress = False
+            self._connection_phase = "DISCONNECTED"
+            self.state.telemetry.connected = False
+            self.state.hardware_ready = False
+            self.state.update_status("设备未连接，无需执行硬件停止")
+            if self.view:
+                self.view.render_connection_phase("DISCONNECTED")
+                self.view.update_status(self.state.status_message)
+            self._refresh_toolbar_state()
+            return
+        if self._orphaned_do_resources():
+            self._unsafe_shutdown_latched = True
+            self._connection_phase = "RECOVERY_REQUIRED"
+            self._block_for_unsafe_shutdown(
+                "NI 输出资源未能由原 owner 释放，请立即现场停止或断电。"
+            )
+            if self.view:
+                self.view.render_connection_phase("RECOVERY_REQUIRED")
+            return
         if self._hardware_verification_run is not None:
             if self._hardware_verification_run.physical:
                 self.actuation_worker.post_physical_verification_finish(
@@ -4911,8 +5158,15 @@ class MainController(QObject):
         if hasattr(self, "valve_service"):
             self.valve_service.reset_cached_state()
         self._connect_in_progress = False
+        self._hardware_acquired = event.get("result") != "success"
         self.state.telemetry.connected = False
         self.state.hardware_ready = False
+        self.state.flow_setpoints_ready = False
+        self._connection_phase = (
+            "DISCONNECTED" if event.get("result") == "success" else "RECOVERY_REQUIRED"
+        )
+        if self.view:
+            self.view.render_connection_phase(self._connection_phase)
         self._render_manual_snapshot()
         self._refresh_toolbar_state()
 
@@ -5217,12 +5471,6 @@ class MainController(QObject):
         kind = context.get("kind")
         if getattr(wrapped, "stale", False):
             message = result.message or "旧 execution epoch 的流量命令已取消。"
-            if kind == "startup_zero" and result.success:
-                # A confirmed zero-flow write remains a valid conservative
-                # startup outcome even if protocol readiness advanced while
-                # the serial device was completing the bounded write.
-                self._startup_zero_completed.emit(result)
-                return
             self.state.update_status(message)
             if self.view:
                 self.view.update_status(message)
@@ -5243,6 +5491,16 @@ class MainController(QObject):
             self.actuation_interlock.read()[1].flow_setpoints_ready
         )
         if kind == "startup_zero":
+            if (
+                context.get("connection_request_id")
+                != self._connection_request_count
+                or not self._connect_in_progress
+                or self._connection_phase != "ZEROING_FLOWS"
+            ):
+                LOG.warning(
+                    "Ignoring startup-zero result outside its connection transaction"
+                )
+                return
             self._startup_zero_completed.emit(result)
             return
         if kind == "apply":
@@ -5678,7 +5936,7 @@ class MainController(QObject):
             reset_blockers.append(f"安全状态 {safety_state}")
 
         reset_enabled = not reset_blockers
-        stop_enabled = connected
+        stop_enabled = self._hardware_lifecycle_active()
         connect_enabled = not self._connect_in_progress and not configuration_block
 
         connect_tooltip = "运行自检并初始化硬件" if connect_enabled else "正在连接/自检中..."
@@ -5750,17 +6008,34 @@ class MainController(QObject):
             if hasattr(self.view, "pretest_view"):
                 self.view.pretest_view.set_flow_message("正在清零 A/B/C...")
 
-        thread = threading.Thread(target=self._run_startup_zero, daemon=True)
+        connection_request_id = self._connection_request_count
+        thread = threading.Thread(
+            target=self._run_startup_zero,
+            args=(connection_request_id,),
+            daemon=True,
+        )
         thread.start()
 
-    def _run_startup_zero(self) -> None:
-        self._pending_flow_context["safety:startup-zero"] = {"kind": "startup_zero"}
+    def _run_startup_zero(self, connection_request_id: int) -> None:
+        source = f"safety:startup-zero:{int(connection_request_id)}"
+        self._pending_flow_context[source] = {
+            "kind": "startup_zero",
+            "connection_request_id": int(connection_request_id),
+        }
+        self.actuation_worker.authorize_startup_zero(source)
         self._submit_flow_intent(
-            mode="zero", a=0.0, b=0.0, c=0.0, source="safety:startup-zero"
+            mode="zero",
+            a=0.0,
+            b=0.0,
+            c=0.0,
+            source=source,
         )
 
     @Slot(object)
     def _handle_startup_zero_completed(self, result_obj: object) -> None:
+        if not self._connect_in_progress or self._connection_phase != "ZEROING_FLOWS":
+            LOG.warning("Ignoring late startup-zero completion")
+            return
         result = result_obj if isinstance(result_obj, FlowApplyResult) else None
         pretest = self.view.pretest_view if self.view and hasattr(self.view, "pretest_view") else None
         self.state.flow_setpoints_ready = False
@@ -5771,7 +6046,15 @@ class MainController(QObject):
             self.state.applied_b = 0.0
             self.state.applied_c = 0.0
             self.state.applied_a_comp = 0.0
-            self.state.update_status("硬件自检通过，默认无气流：A/B/C 已清零")
+            if not all(abs(value) <= 1e-9 for value in (result.a, result.b, result.c)):
+                self._startup_zero_confirmed = False
+                self._fail_connection("A/B/C 清零回读不一致", acquired=True)
+                return
+            self._connection_phase = "VERIFYING_READINESS"
+            self._startup_zero_completed_at = time.time()
+            self.state.update_status("正在确认零流量状态…")
+            if self.view:
+                self.view.render_connection_phase("VERIFYING_READINESS")
             if pretest:
                 pretest.set_applied_values(a=0.0, b=0.0, c=0.0, a_comp=0.0)
                 pretest.set_flow_message("默认无气流：A/B/C 已清零")
@@ -5779,12 +6062,84 @@ class MainController(QObject):
         else:
             self._startup_zero_confirmed = False
             message = result.message if result else "未知错误"
-            self.state.update_status(f"硬件自检通过，但流量清零失败：{message}")
+            self._fail_connection(f"流量清零失败：{message}", acquired=True)
             if pretest:
                 pretest.set_flow_message(message)
                 pretest.show_warning(self.state.status_message)
         if self.view:
             self.view.update_status(self.state.status_message)
+
+    def _complete_connection(self) -> None:
+        self._connection_timeout_timer.stop()
+        self._connection_phase = "CONNECTED"
+        self._connect_in_progress = False
+        self._hardware_acquired = True
+        self._has_seen_connection = True
+        self._runtime_disconnect_cleanup_started = False
+        self.state.hardware_ready = True
+        self.state.telemetry.connected = True
+        self.state.flow_setpoints_ready = True
+        if hasattr(self.worker, "commit_connection"):
+            self.worker.commit_connection()
+        self.actuation_interlock.update(
+            connected=True,
+            hardware_ready=True,
+            flow_setpoints_ready=True,
+            ttl_input_ready=bool(getattr(self.worker, "ttl_input_ready", False)),
+        )
+        self.state.update_status("设备已连接")
+        if self.view:
+            self.view.render_connection_phase("CONNECTED")
+            self.view.update_status(self.state.status_message)
+        self._refresh_toolbar_state()
+
+    def _fail_connection(
+        self,
+        reason: str,
+        *,
+        acquired: bool,
+        recovery_required: bool = False,
+    ) -> None:
+        self._connection_timeout_timer.stop()
+        if hasattr(self.worker, "reject_connection"):
+            self.worker.reject_connection()
+        self._connect_in_progress = False
+        self.state.telemetry.connected = False
+        self.state.hardware_ready = False
+        self._hardware_acquired = False
+        self._connection_phase = "DISCONNECTED"
+        self.state.flow_setpoints_ready = False
+        self._startup_zero_confirmed = False
+        self.actuation_interlock.update(
+            connected=False,
+            hardware_ready=False,
+            flow_setpoints_ready=False,
+            ttl_input_ready=False,
+        )
+        cleanup_event = None
+        if acquired:
+            cleanup_event = self.shutdown_service.shutdown(
+                source="connect_failure",
+                reason=reason,
+                force=True,
+            )
+            self._hardware_acquired = cleanup_event.get("result") != "success"
+        cleanup_ok = (
+            not recovery_required
+            and (cleanup_event is None or cleanup_event.get("result") == "success")
+        )
+        self._connection_phase = "FAILED" if cleanup_ok else "RECOVERY_REQUIRED"
+        if cleanup_ok:
+            status = "连接失败，请检查设备后重试"
+        else:
+            status = "连接失败且未能确认安全状态，请立即现场停止或断电"
+            self._unsafe_shutdown_latched = True
+        LOG.error("Hardware connection failed | reason=%s | cleanup=%s", reason, cleanup_event)
+        self.state.update_status(status)
+        if self.view:
+            self.view.render_connection_phase(self._connection_phase)
+            self.view.update_status(status)
+        self._refresh_toolbar_state()
 
     @Slot(str, float, float, float)
     def handle_flow_sequence_request(self, mode: str, a: float, b: float, c: float) -> FlowApplyResult:

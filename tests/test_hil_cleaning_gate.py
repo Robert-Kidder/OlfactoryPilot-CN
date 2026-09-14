@@ -5,9 +5,23 @@ import argparse
 import pytest
 
 from scripts.hil_cleaning_gate import (
+    request_startup_connection,
     validate_cleaning_config,
     validate_source_candidate,
 )
+
+
+def test_hil_gate_uses_authoritative_connection_transaction() -> None:
+    calls = []
+
+    class Controller:
+        def request_hardware_connection(self, *, source):
+            calls.append(source)
+            return True
+
+    request_startup_connection(Controller())
+
+    assert calls == ["hil-cleaning-gate"]
 
 
 def _config(*, flow: float = 1500, approved: float = 1500) -> dict:

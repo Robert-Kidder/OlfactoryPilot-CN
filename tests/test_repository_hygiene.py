@@ -438,6 +438,9 @@ def test_clean_clone_keeps_all_work_in_owned_session_and_always_cleans(
     if not fail_match:
         assert any("-m PyInstaller --noconfirm pyinstaller.spec" in command for command in commands)
         assert any("python -c" in command for command in commands)
+        smoke_source = RUN_CLEAN_CLONE.read_text(encoding="utf-8")
+        assert "window.controller.schedule_startup_auto_connect()" in smoke_source
+        assert "observed != [(1, True, True)]" in smoke_source
     assert ".devtmp\\clean-clone\\run-" in commands[1]
     assert ".devtmp\\clean-clone\\run-" in commands[2]
     assert not (sandbox / ".devtmp").exists()
@@ -536,6 +539,9 @@ def test_local_config_template_keeps_connection_authorities_aligned() -> None:
     assert real_hal.serial_port == profile.connections.serial_port
     assert tuple(merged["ni_devices"]) == profile.connections.ni_device_ids
     assert real_hal._unit_ids == profile.connections.alicat_unit_ids
+    assert real_hal.serial_resources_in_use is False
+    assert real_hal.do_resources_in_use is False
+    assert real_hal._ai_task is None
 
 
 def test_representative_local_and_generated_paths_are_git_ignored() -> None:

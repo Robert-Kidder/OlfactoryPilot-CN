@@ -134,11 +134,14 @@ def configure_product_theme() -> None:
 
 def build_application(
     config_path: Path,
-    start_worker: bool = True,
+    start_worker: bool = False,
     simulation: bool = False,
     hal: HalInterface | None = None,
     local_config_path: Path | None = None,
 ) -> tuple[QApplication, MainWindow]:
+    # Kept as a test-construction compatibility parameter.  Product
+    # construction is always passive; connection is scheduled only after show.
+    del start_worker
     config_path = Path(config_path)
     is_default_config = config_path.resolve() == Path(DEFAULT_CONFIG).resolve()
     bundled = bool(getattr(sys, "_MEIPASS", None) and is_default_config)
@@ -225,9 +228,6 @@ def build_application(
     window = MainWindow(controller, state)
     controller.bind_view(window)
 
-    if start_worker:
-        controller.start_worker()
-
     qt_app.aboutToQuit.connect(controller.shutdown_and_teardown)
     return qt_app, window
 
@@ -245,11 +245,6 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         type=Path,
         default=None,
         help="本机覆盖配置路径，默认使用 config/local_config.json（若存在）",
-    )
-    parser.add_argument(
-        "--no-worker",
-        action="store_true",
-        help="跳过硬件线程（用于 CI/测试）",
     )
     parser.add_argument(
         "--simulation",
@@ -299,12 +294,12 @@ def main(argv: list[str] | None = None) -> int:
         args = parse_args(sys.argv[1:] if argv is None else argv)
         qt_app, window = build_application(
             args.config,
-            start_worker=not args.no_worker,
             simulation=args.simulation,
             local_config_path=args.local_config,
         )
         controller = getattr(window, "controller", None)
         window.show()
+        controller.schedule_startup_auto_connect()
         result = qt_app.exec()
         return result
     except Exception as exc:

@@ -57,7 +57,15 @@ tests/                 # 自动化测试
 - `FlowWorker` 是 Alicat 串口单写者。Controller 只提交 flow intent；`ActuationWorker` 先检查协议设备租约与 interlock，再把获准命令交给 `FlowWorker`。
 - `ActuationInterlockIngress` 是 producer-safe 的 immutable readiness store。AI/telemetry/serial producer 先更新 generation 和 unsafe latch，再发 UI 消息；只有动作 owner 在 readiness 恢复且阀门已确认关闭后才能清除 latch。
 - shutdown 的强制安全偏序为：停止新提交与失效 normal epoch → 请求 MFC A 清零并等待匹配成功 receipt → 才允许把 A 路三通选择阀切换到定义的安全路线。气味阀 1–20、B/C、ActuationWorker/DO、HardwareWorker/AI 与 FlowWorker/serial 的其余收敛顺序由 `SafeStopPlan` 明确定义；关键回执失败或状态不确定时进入 `RECOVERY_REQUIRED`。DO owner 未交还时禁止跨线程复用旧 task 做兜底写入。
-- RealHAL 按 device/port 建立持久 DO task，deadline 路径只更新端口状态向量并调用 on-demand `Task.write(auto_start=False)`；最终资源分组及 `<20ms` 性能仍必须由真实 Windows/NI HIL 证据确认。
+- RealHAL 按 device/port 建立持久 DO task。首次接管时先完成全部 channel 配置，再以 `Task.write(safe_packed_image, auto_start=True)` 让隐式启动的第一次物理 drive 就是按气味阀 active-high/active-low 与 selector polarity 计算的完整端口安全 image；后续 deadline 路径只更新端口状态向量并调用 `Task.write(auto_start=False)`。最终资源分组及 `<20ms` 性能仍必须由真实 Windows/NI HIL 证据确认。
+
+### 启动与连接生命周期
+
+- App 配置解析、`RealHAL.from_config()`/构造、Controller/View 构建和 `window.show()` 全部是 passive 阶段，不打开串口、不创建 DAQ task、不执行自检或输出。
+- 主窗口显示且 Qt event loop 能处理 queued event 后，每个进程生命周期只消费一次 startup auto-connect。它与失败后的“重试连接”、运行中断线后的“重新连接”共用唯一连接 transaction；没有设置、配置或 CLI 可以关闭此产品行为。
+- transaction 顺序为 `DISCONNECTED → PREPARING_SAFE_OUTPUTS → SELF_CHECKING → ZEROING_FLOWS(B/C/A) → VERIFYING_READINESS → CONNECTED`。HardwareWorker 启动本身保持 idle，自检只能由 transaction 显式请求；安全 DO、自检、三路清零回读和新的零流量样本全部成功后才发布 `connected=True`。
+- startup 任一步失败都停止自动尝试并清理已接管资源；无法确认安全收敛时进入 `RECOVERY_REQUIRED`。运行中断线先 fail-closed，再等待人工重新连接，绝不自动恢复上一次实验动作。
+- 尚未开始 acquisition 时，关闭窗口或点击全局停止不得为了“安全”首次创建 task、打开串口或启动 worker。
 
 ### 执行域隔离
 

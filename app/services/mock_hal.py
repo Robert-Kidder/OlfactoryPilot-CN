@@ -139,6 +139,10 @@ class MockHAL(HalBase):
         self._do_owner_thread_id = None
         return True
 
+    @property
+    def do_resources_in_use(self) -> bool:
+        return self._do_owner_thread_id is not None
+
     def release_serial_resources(self) -> None:
         return None
 

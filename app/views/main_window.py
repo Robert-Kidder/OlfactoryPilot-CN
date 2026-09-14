@@ -60,6 +60,7 @@ class MainWindow(FluentWindow):
         self._presentation_flush_scheduled = False
         self._rendered_presentation_generation = -1
         self._closing = False
+        self._connection_phase = "DISCONNECTED"
         self._last_rendered_connected = bool(state.telemetry.connected)
         self.setWindowTitle(state.window_title)
         self.setMinimumSize(1180, 720)
@@ -90,12 +91,13 @@ class MainWindow(FluentWindow):
         # Remove the overlay while both Qt wrappers are still valid so a later
         # window cannot inherit a deleted bar from this parent.
         self._closing = True
+        self.controller.cancel_startup_auto_connect()
         self._pending_presentation = None
         self.manual_experiment_view.clear_notice()
         super().closeEvent(event)
 
     def _build_actions(self) -> None:
-        self._connect_button = PushButton(FIF.CONNECT, "连接设备", self)
+        self._connect_button = PushButton(FIF.CONNECT, "重试连接", self)
         self._reset_button = PushButton(FIF.SYNC, "重置设备", self)
         self._stop_button = PushButton(FIF.POWER_BUTTON, "全局停止", self)
         self._help_button = PushButton(FIF.HELP, "帮助", self)
@@ -113,6 +115,7 @@ class MainWindow(FluentWindow):
         self._help_button.clicked.connect(self.controller.open_help_manual)
         self._reset_button.hide()
         self._help_button.hide()
+        self._connect_button.hide()
 
     def _build_manual_interface(self) -> None:
         interface = QWidget(self)
@@ -294,8 +297,6 @@ class MainWindow(FluentWindow):
         effective_hardware_ready = (
             True if hardware_ready is None else bool(hardware_ready)
         )
-        if self._connect_button.isVisible() == connected:
-            self._connect_button.setVisible(not connected)
         summary = self._connection_summary(
             telemetry,
             hardware_ready=effective_hardware_ready,
@@ -303,23 +304,26 @@ class MainWindow(FluentWindow):
         telemetry_text = self._format_telemetry(telemetry)
         if self._telemetry_label.text() != telemetry_text:
             self._telemetry_label.setText(telemetry_text)
-        if self._connection_badge.text() != summary:
-            self._connection_badge.setText(summary)
         connection_action = self._connection_action(
             telemetry,
             hardware_ready=effective_hardware_ready,
         )
-        if self._connection_action_label.text() != connection_action:
-            self._connection_action_label.setText(connection_action)
-        if self._connection_action_label.isVisible() != bool(connection_action):
-            self._connection_action_label.setVisible(bool(connection_action))
-        level = (
-            InfoLevel.SUCCESS
-            if connected and effective_hardware_ready and telemetry.safety_state == "SAFE"
-            else InfoLevel.ERROR
-        )
-        if self._connection_badge.level != level:
-            self._connection_badge.setLevel(level)
+        if self._connection_phase == "DISCONNECTED":
+            if self._connection_badge.text() != summary:
+                self._connection_badge.setText(summary)
+            if self._connection_action_label.text() != connection_action:
+                self._connection_action_label.setText(connection_action)
+            if self._connection_action_label.isVisible() != bool(connection_action):
+                self._connection_action_label.setVisible(bool(connection_action))
+            level = (
+                InfoLevel.SUCCESS
+                if connected
+                and effective_hardware_ready
+                and telemetry.safety_state == "SAFE"
+                else InfoLevel.ERROR
+            )
+            if self._connection_badge.level != level:
+                self._connection_badge.setLevel(level)
         current_state = telemetry.safety_state if connected else "DATA_STALE"
         self.manual_experiment_view.set_header_safety_state(current_state)
         if current_state == "LOW_FLOW" and expected_manual_flow_transition:
@@ -358,6 +362,49 @@ class MainWindow(FluentWindow):
             )
         else:
             self.manual_experiment_view.clear_safety_notice()
+
+    def render_connection_phase(self, phase: str) -> None:
+        self._connection_phase = str(phase)
+        connecting = self._connection_phase in {
+            "CONNECTING",
+            "PREPARING_SAFE_OUTPUTS",
+            "SELF_CHECKING",
+            "ZEROING_FLOWS",
+            "VERIFYING_READINESS",
+        }
+        retry = self._connection_phase in {
+            "FAILED",
+            "RECOVERY_REQUIRED",
+            "RUNTIME_DISCONNECTED",
+        }
+        if connecting:
+            self._connection_badge.setText("正在连接设备…")
+            self._connection_badge.setLevel(InfoLevel.WARNING)
+            self._connection_action_label.setText("")
+            self._connection_action_label.hide()
+        elif self._connection_phase == "CONNECTED":
+            self._connection_badge.setText("设备已连接")
+            self._connection_badge.setLevel(InfoLevel.SUCCESS)
+            self._connection_action_label.setText("")
+            self._connection_action_label.hide()
+        elif self._connection_phase == "RUNTIME_DISCONNECTED":
+            self._connection_badge.setText("设备通信中断")
+            self._connection_badge.setLevel(InfoLevel.ERROR)
+            self._connection_action_label.setText("请检查设备后重试")
+            self._connection_action_label.show()
+        elif retry:
+            self._connection_badge.setText("连接失败")
+            self._connection_badge.setLevel(InfoLevel.ERROR)
+            self._connection_action_label.setText("请检查设备后重试")
+            self._connection_action_label.show()
+        else:
+            self._connection_badge.setText("设备未连接")
+            self._connection_action_label.setText("")
+            self._connection_action_label.hide()
+        self._connect_button.setText(
+            "重新连接" if self._connection_phase == "RUNTIME_DISCONNECTED" else "重试连接"
+        )
+        self._connect_button.setVisible(retry)
 
     def queue_presentation(
         self,

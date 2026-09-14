@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import heapq
+import logging
 import math
 import threading
 import time
@@ -10,6 +11,8 @@ from dataclasses import dataclass, replace
 from typing import Any
 
 from PySide6.QtCore import QObject, QThread, Signal
+
+LOG = logging.getLogger(__name__)
 
 from app.models import (
     ActuationAction,
@@ -447,6 +450,7 @@ class ActuationWorker(QThread):
     physical_verification_snapshot_ready = Signal(object)
     physical_verification_result_ready = Signal(object)
     protocol_safe_stop_handoff_requested = Signal(object)
+    do_output_prepared = Signal(bool, str, int)
 
     def __init__(
         self,
@@ -548,6 +552,9 @@ class ActuationWorker(QThread):
         self._background_safe_stop_selector_id: str | None = None
         self._background_safe_stop_close_pending: set[str] = set()
         self._do_handed_off = True
+        self._do_prepared = False
+        self._do_prepare_request_id = 0
+        self._startup_zero_authorization: str | None = None
         self._pending_safe_transition: tuple[str, dict[str, Any]] | None = None
         self._safe_transition_close_pending: set[str] = set()
         self._safe_transition_handoff_identity: SafeStopIdentity | None = None
@@ -1356,6 +1363,12 @@ class ActuationWorker(QThread):
             "flow_intent",
             {"mode": mode, "a": a, "b": b, "c": c, "source": source},
         )
+
+    def authorize_startup_zero(self, source: str) -> None:
+        """Arm one exact connection-owned zero intent for readiness bypass."""
+
+        with self._condition:
+            self._startup_zero_authorization = str(source)
 
     def post_flow_result(self, result: FlowCommandResult) -> None:
         self._post_message(
@@ -2338,21 +2351,72 @@ class ActuationWorker(QThread):
         self.ttl_disarm_requested.emit()
 
     def run(self) -> None:
+        request_id = self._do_prepare_request_id
         with self._condition:
             if not self._accepting:
                 self._do_handed_off = True
                 self._condition.notify_all()
                 return
         hal = self._writer_hal()
-        if hal is not None and not hal.prepare_do_output():
+        prepare_error: Exception | None = None
+        prepared = True
+        if hal is not None:
+            try:
+                prepared = hal.prepare_do_output() is True
+            except Exception as exc:
+                prepare_error = exc
+                prepared = False
+                LOG.exception("DO session preparation raised")
+        if not prepared:
+            # Preparation may have created a task before a later DAQmx call
+            # failed. Roll that partial acquisition back on this same owner
+            # thread. A retained task is physically uncertain and must become
+            # recovery-required, never a silent ownership handoff.
+            if bool(getattr(hal, "do_resources_in_use", False)):
+                try:
+                    hal.release_do_output()
+                except Exception:
+                    LOG.exception("DO session partial-acquisition rollback failed")
+            resources_retained = bool(getattr(hal, "do_resources_in_use", False))
+            self._do_prepared = False
             with self._condition:
                 self._accepting = False
                 self._block("DO session 准备失败，动作 owner 已阻断。")
-                self._do_handed_off = True
+                self._do_handed_off = not resources_retained
                 self._condition.notify_all()
             self.status_message.emit("DO session 准备失败，动作线程未启动；请检查 NI 资源占用。")
+            message = "DO session 准备失败"
+            if prepare_error is not None:
+                message += f"：{prepare_error}"
+            if resources_retained:
+                message += "，部分 NI 资源未能释放"
+            self.do_output_prepared.emit(False, message, request_id)
+            return
+        with self._condition:
+            cancelled_during_prepare = not self._accepting
+        if cancelled_during_prepare:
+            released = True
+            if hal is not None:
+                try:
+                    released = hal.release_do_output() is True
+                except Exception:
+                    LOG.exception("Cancelled DO preparation rollback failed")
+                    released = False
+            self._do_prepared = False
+            with self._condition:
+                self._do_handed_off = released
+                self._condition.notify_all()
+            self.do_output_prepared.emit(
+                False,
+                "DO session 准备超时后已取消"
+                if released
+                else "DO session 准备超时且资源未能释放",
+                request_id,
+            )
             return
         self._do_handed_off = False
+        self._do_prepared = True
+        self.do_output_prepared.emit(True, "safe output image ready", request_id)
         self._running = True
         try:
             while self._running:
@@ -2376,9 +2440,14 @@ class ActuationWorker(QThread):
             released = True
             if hal is not None:
                 released = hal.release_do_output() is True
+            self._do_prepared = False
             with self._condition:
                 self._do_handed_off = released
                 self._condition.notify_all()
+
+    @property
+    def do_output_ready(self) -> bool:
+        return bool(self.isRunning() and self._do_prepared)
 
     def emergency_close_all(self, timeout_ms: int = 500) -> bool:
         """Legacy emergency API: fence and close odor outputs only.
@@ -2872,10 +2941,12 @@ class ActuationWorker(QThread):
             return joined and self._do_handed_off
         return self._do_handed_off
 
-    def prepare_restart(self) -> bool:
+    def prepare_restart(self, *, connection_request_id: int = 0) -> bool:
         if self.isRunning() or not self._do_handed_off:
             return False
         with self._condition:
+            self._do_prepared = False
+            self._do_prepare_request_id = int(connection_request_id)
             # A restart is a fresh admission epoch; stopped-run intents must
             # never cross this boundary.
             queued_messages = list(self._messages)
@@ -6675,16 +6746,25 @@ class ActuationWorker(QThread):
         )
         _, snapshot, _ = self.interlock.read()
         reason = ""
+        with self._condition:
+            startup_zero = bool(
+                source == self._startup_zero_authorization
+                and source.startswith("safety:startup-zero:")
+                and mode == "zero"
+                and all(abs(value) <= 1e-9 for value in (a, b, c))
+            )
+            if startup_zero:
+                self._startup_zero_authorization = None
         if snapshot.device_lease != "idle":
             reason = f"{snapshot.device_lease} 设备租约已占用，已拒绝流量变更。"
         else:
             # An idle MFC command is precisely how LOW_FLOW / setpoint-not-ready
             # is recovered, so those two states must not reject themselves.
-            if not snapshot.connected:
+            if not snapshot.connected and not startup_zero:
                 reason = "硬件连接已断开，流量未更改。"
-            elif not snapshot.hardware_ready:
+            elif not snapshot.hardware_ready and not startup_zero:
                 reason = "硬件自检状态已失效，流量未更改。"
-            elif snapshot.safety_state not in {"SAFE", "LOW_FLOW"}:
+            elif snapshot.safety_state not in {"SAFE", "LOW_FLOW"} and not startup_zero:
                 reason = f"安全状态为 {snapshot.safety_state}，流量未更改。"
         submitted = None if reason or self._flow_submitter is None else self._flow_submitter(command)
         if reason or self._flow_submitter is None or submitted is False:
@@ -6716,7 +6796,7 @@ class ActuationWorker(QThread):
             self.interlock.clear_unsafe_latch()
         if (
             wrapped.result.success
-            and wrapped.command.source == "safety:startup-zero"
+            and wrapped.command.source.startswith("safety:startup-zero:")
             and not self._manual_active()
         ):
             # Startup A/B/C=0 is owner-consumed physical evidence. Publish it

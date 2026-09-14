@@ -123,6 +123,10 @@ class HalInterface(Protocol):
     def release_do_output(self) -> bool:
         """由当前 DO owner 确定性释放 session，并确认 ownership handoff。"""
 
+    @property
+    def do_resources_in_use(self) -> bool:
+        """Return whether a DO task may still own or reserve hardware."""
+
     def release_serial_resources(self) -> None:
         """由 serial owner 最后释放 MFC 串口。"""
 

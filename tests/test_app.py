@@ -259,7 +259,7 @@ def test_main_rejects_second_instance_before_building_hardware(
         lambda exc: calls.append(f"startup-error:{exc}"),
     )
 
-    result = main_module.main(["--no-worker", "--simulation"])
+    result = main_module.main(["--simulation"])
 
     assert result == 2
     assert calls == ["acquire", "reported"]
@@ -274,7 +274,11 @@ def test_main_holds_single_instance_ownership_until_event_loop_exits(
         release=lambda: calls.append("release"),
     )
     fake_app = SimpleNamespace(exec=lambda: calls.append("exec") or 0)
-    fake_window = SimpleNamespace(show=lambda: calls.append("show"))
+    controller = SimpleNamespace(
+        schedule_startup_auto_connect=lambda: calls.append("schedule"),
+        lifecycle_stopped=lambda: True,
+    )
+    fake_window = SimpleNamespace(show=lambda: calls.append("show"), controller=controller)
     monkeypatch.setattr(
         main_module,
         "SingleInstanceGuard",
@@ -287,10 +291,10 @@ def test_main_holds_single_instance_ownership_until_event_loop_exits(
         lambda *_args, **_kwargs: (fake_app, fake_window),
     )
 
-    result = main_module.main(["--no-worker", "--simulation"])
+    result = main_module.main(["--simulation"])
 
     assert result == 0
-    assert calls == ["acquire", "show", "exec", "release"]
+    assert calls == ["acquire", "show", "schedule", "exec", "release"]
 
 
 def test_main_releases_single_instance_ownership_when_build_fails(
@@ -315,7 +319,7 @@ def test_main_releases_single_instance_ownership_when_build_fails(
         lambda exc: calls.append(f"reported:{exc}"),
     )
 
-    result = main_module.main(["--no-worker", "--simulation"])
+    result = main_module.main(["--simulation"])
 
     assert result == 1
     assert calls == [
@@ -333,7 +337,10 @@ def test_main_retains_mutex_when_teardown_leaves_owner_alive(
         acquire=lambda: calls.append("acquire") or True,
         release=lambda: calls.append("release"),
     )
-    controller = SimpleNamespace(lifecycle_stopped=lambda: False)
+    controller = SimpleNamespace(
+        lifecycle_stopped=lambda: False,
+        schedule_startup_auto_connect=lambda: calls.append("schedule"),
+    )
     fake_app = SimpleNamespace(exec=lambda: calls.append("exec") or 0)
     fake_window = SimpleNamespace(
         show=lambda: calls.append("show"),
@@ -346,10 +353,10 @@ def test_main_retains_mutex_when_teardown_leaves_owner_alive(
         lambda *_args, **_kwargs: (fake_app, fake_window),
     )
 
-    result = main_module.main(["--no-worker", "--simulation"])
+    result = main_module.main(["--simulation"])
 
     assert result == 0
-    assert calls == ["acquire", "show", "exec"]
+    assert calls == ["acquire", "show", "schedule", "exec"]
 
 
 @pytest.mark.parametrize("failure_phase", ["show", "exec", "lifecycle_check"])
@@ -380,7 +387,10 @@ def test_main_exception_paths_retain_mutex_while_owner_liveness_is_unknown(
             raise RuntimeError("synthetic exec failure")
         return 0
 
-    controller = SimpleNamespace(lifecycle_stopped=lifecycle_stopped)
+    controller = SimpleNamespace(
+        lifecycle_stopped=lifecycle_stopped,
+        schedule_startup_auto_connect=lambda: calls.append("schedule"),
+    )
     fake_window = SimpleNamespace(show=show, controller=controller)
     fake_app = SimpleNamespace(exec=execute)
     monkeypatch.setattr(main_module, "SingleInstanceGuard", lambda: guard)
@@ -396,7 +406,7 @@ def test_main_exception_paths_retain_mutex_while_owner_liveness_is_unknown(
     )
     monkeypatch.setattr(main_module, "_LINGERING_INSTANCE_GUARDS", [])
 
-    result = main_module.main(["--no-worker", "--simulation"])
+    result = main_module.main(["--simulation"])
 
     assert result == (0 if failure_phase == "lifecycle_check" else 1)
     assert "release" not in calls
@@ -988,6 +998,8 @@ def test_self_check_updates_state_and_view(qt_app):
     controller = MainController(state, worker, safety_manager=SafetyManager(low_flow_threshold=0.2))
     window = MainWindow(controller, state)
     controller.bind_view(window)
+    controller._connect_in_progress = True
+    controller._connection_phase = "SELF_CHECKING"
 
     results = [
         SelfCheckResult(
@@ -1010,7 +1022,7 @@ def test_self_check_updates_state_and_view(qt_app):
     controller.handle_self_check(results, hardware_ready=False)
 
     assert state.hardware_ready is False
-    assert "硬件自检失败" in state.status_message
+    assert "连接失败" in state.status_message
     assert "USB-6001" in window._self_check_label.text()
     assert "FAIL" in window._self_check_label.text()
     assert "最近自检" in window._self_check_label.text()
@@ -1061,7 +1073,7 @@ def test_worker_coordinates_serial_owner_before_external_self_check(qt_app):
 
     assert hal.released is False
     assert coordination == ["stop", "restart"]
-    assert worker.is_connected is True
+    assert worker.is_connected is False
 
 
 def test_worker_does_not_reopen_com_while_serial_owner_is_active(qt_app):
@@ -1111,14 +1123,15 @@ def test_recheck_triggers_worker(qt_app, track_controller_workers):
         started["flag"] = True
 
     worker.request_self_check = fake_request  # type: ignore[assignment]
-    worker.start = fake_start  # type: ignore[assignment]
     controller = MainController(state, worker, safety_manager=SafetyManager(low_flow_threshold=0.2))
     track_controller_workers(controller)
+    controller.actuation_worker.start = fake_start  # type: ignore[assignment]
 
     controller.request_self_check()
-    assert called["flag"] is True
-    assert started["flag"] is True or worker.isRunning()
-    assert "自检" in state.status_message
+    assert called["flag"] is False
+    assert started["flag"] is True
+    assert controller._connection_phase == "PREPARING_SAFE_OUTPUTS"
+    assert "连接" in state.status_message
 
 
 def test_ensure_hardware_ready_blocks_when_not_ready(qt_app):
@@ -1575,6 +1588,7 @@ def test_connect_failure_surfaces_reason_and_allows_retry(qt_app):
     controller.bind_view(window)
 
     controller._connect_in_progress = True
+    controller._connection_phase = "SELF_CHECKING"
     failing = [
         SelfCheckResult(
             name="USB-6001",
@@ -1587,9 +1601,10 @@ def test_connect_failure_surfaces_reason_and_allows_retry(qt_app):
     ]
     controller.handle_self_check(failing, hardware_ready=False)
 
-    assert "未检测到 NI 设备" in state.status_message
+    assert state.status_message == "连接失败，请检查设备后重试"
     assert controller._connect_in_progress is False
     assert window._connect_button.isEnabled() is True
+    assert window._connect_button.text() == "重试连接"
     assert window._connect_button.toolTip() == ""
     assert window._self_check_label.wordWrap() is True
     assert "\n" in window._self_check_label.text()
@@ -1609,7 +1624,7 @@ def test_connect_requests_self_check_and_sets_connected_status(qt_app, track_con
     called = {"flag": False}
     started = {"flag": False}
 
-    def fake_request():
+    def fake_request(_connection_request_id=0):
         called["flag"] = True
 
     def fake_start(_priority=None):
@@ -1624,21 +1639,25 @@ def test_connect_requests_self_check_and_sets_connected_status(qt_app, track_con
         allow_test_actuation_bridge=True,
     )
     track_controller_workers(controller)
+    controller.actuation_worker.start = lambda _priority=None: None  # type: ignore[assignment]
     window = MainWindow(controller, state)
     controller.bind_view(window)
 
     controller.connect_hardware()
 
     assert called["flag"] is False
-    assert started["flag"] is True
     assert "连接" in state.status_message
 
-    worker._connected = True
-    worker._hardware_ready = True
+    controller._handle_do_output_prepared(
+        True, "safe", controller._connection_request_count
+    )
+    assert started["flag"] is True
+    assert called["flag"] is True
+
     controller.handle_self_check([], True)
 
-    assert state.hardware_ready is True
-    assert state.telemetry.connected is True
+    assert state.hardware_ready is False
+    assert state.telemetry.connected is False
     wait_until(qt_app, lambda: len(worker.hal.flow_commands) >= 3)
     wait_until(qt_app, lambda: "默认无气流" in window.pretest_view._flow_message_label.text())
     assert worker.hal.flow_commands[-3:] == [
@@ -1652,12 +1671,16 @@ def test_connect_requests_self_check_and_sets_connected_status(qt_app, track_con
     controller.handle_telemetry(
         {
             "airflow": 0.0,
-            "connected": True,
+            "connected": False,
             "timestamp": time.time(),
+            "airflow_sample_timestamp": time.time(),
             "application_safety_state": "SAFE",
             "application_safety_reason": "未布防：当前为合法 idle 零流量",
         }
     )
+    assert state.hardware_ready is True
+    assert state.telemetry.connected is True
+    assert state.flow_setpoints_ready is True
     assert state.telemetry.safety_state == "SAFE"
     assert window._reset_button.isEnabled()
 
@@ -1747,7 +1770,7 @@ def test_connect_requests_recheck_when_worker_already_running(qt_app, track_cont
     worker = HardwareWorker(telemetry_hz=1)
     called = {"flag": False}
 
-    def fake_request():
+    def fake_request(_connection_request_id=0):
         called["flag"] = True
 
     worker.isRunning = lambda: True  # type: ignore[assignment]
@@ -1759,6 +1782,10 @@ def test_connect_requests_recheck_when_worker_already_running(qt_app, track_cont
 
     controller.connect_hardware()
 
+    assert called["flag"] is False
+    controller._handle_do_output_prepared(
+        True, "safe", controller._connection_request_count
+    )
     assert called["flag"] is True
 
 
@@ -1786,8 +1813,9 @@ def test_self_check_zero_flow_runs_without_blocking_ui(qt_app, track_controller_
     window = MainWindow(controller, state)
     controller.bind_view(window)
 
-    worker._connected = True
-    worker._hardware_ready = True
+    controller._connect_in_progress = True
+    controller._connection_phase = "SELF_CHECKING"
+    controller._hardware_acquired = True
     started_at = time.time()
     controller.handle_self_check([], True)
     elapsed = time.time() - started_at
@@ -1835,7 +1863,7 @@ def test_reset_requires_ready_and_reinitializes_hardware(qt_app, track_controlle
     called = {"flag": False}
     started = {"flag": False}
 
-    def fake_request():
+    def fake_request(_connection_request_id=0):
         called["flag"] = True
 
     worker.request_self_check = fake_request  # type: ignore[assignment]
@@ -1844,11 +1872,12 @@ def test_reset_requires_ready_and_reinitializes_hardware(qt_app, track_controlle
     controller.reset_hardware()
 
     assert called["flag"] is False
-    assert started["flag"] is True
+    assert started["flag"] is False
     assert controller._connect_in_progress is True
+    assert controller._connection_phase == "PREPARING_SAFE_OUTPUTS"
     assert state.hardware_ready is False
     assert state.telemetry.connected is False
-    assert "重新初始化" in state.status_message
+    assert "连接" in state.status_message
     assert state.last_shutdown_event is not None
     assert state.last_shutdown_event["reason"] == "reset_request"
 
@@ -1908,7 +1937,7 @@ def test_reset_blocked_when_not_ready(qt_app):
     worker = HardwareWorker(telemetry_hz=1)
     called = {"flag": False}
 
-    def fake_request():
+    def fake_request(_connection_request_id=0):
         called["flag"] = True
 
     worker.request_self_check = fake_request  # type: ignore[assignment]
@@ -2293,6 +2322,8 @@ def test_self_check_failure_atomically_clears_actuation_interlock(qt_app):
     worker = HardwareWorker(telemetry_hz=1)
     controller = MainController(state, worker, safety_manager=SafetyManager(0.2))
     controller.actuation_interlock.update(connected=True, hardware_ready=True)
+    controller._connect_in_progress = True
+    controller._connection_phase = "SELF_CHECKING"
 
     controller.handle_self_check([], hardware_ready=False)
 
@@ -2318,7 +2349,7 @@ def test_persisted_unsafe_shutdown_requires_explicit_connect_retry(qt_app):
 
     controller.connect_hardware()
 
-    assert starts == {"hardware": 1, "flow": 1, "actuation": 1}
+    assert starts == {"hardware": 0, "flow": 0, "actuation": 1}
     assert controller._unsafe_shutdown_latched is False
 
 
@@ -2335,11 +2366,7 @@ def test_latency_critical_workers_start_at_high_priority(qt_app):
 
     assert controller.start_worker() is True
 
-    assert starts == {
-        "flow": None,
-        "actuation": QThread.Priority.HighPriority,
-        "hardware": QThread.Priority.HighPriority,
-    }
+    assert starts == {"actuation": QThread.Priority.HighPriority}
 
 
 def test_actuation_handoff_failure_blocks_all_worker_restart(qt_app):
@@ -2350,14 +2377,16 @@ def test_actuation_handoff_failure_blocks_all_worker_restart(qt_app):
     worker.start = lambda _priority=None: starts.__setitem__("hardware", starts["hardware"] + 1)  # type: ignore[assignment]
     controller.flow_worker.start = lambda: starts.__setitem__("flow", starts["flow"] + 1)  # type: ignore[assignment]
     controller.actuation_worker.start = lambda _priority=None: starts.__setitem__("actuation", starts["actuation"] + 1)  # type: ignore[assignment]
-    controller.actuation_worker.prepare_restart = lambda: False  # type: ignore[assignment]
+    controller.actuation_worker.prepare_restart = (  # type: ignore[assignment]
+        lambda **_kwargs: False
+    )
 
     assert controller.start_worker() is False
 
     assert starts == {"hardware": 0, "flow": 0, "actuation": 0}
     assert controller._unsafe_shutdown_latched is True
     assert controller.actuation_interlock.read()[1].hardware_ready is False
-    assert controller.flow_worker.execution_context[2] is False
+    assert controller.flow_worker.execution_context[2] is True
 
 
 def test_unsafe_reset_does_not_clear_state_or_auto_reconnect(qt_app):

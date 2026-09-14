@@ -23,6 +23,7 @@ class HardwareWorker(QThread):
     telemetry_ready = Signal(dict)
     status_message = Signal(str)
     self_check_completed = Signal(list, bool)
+    connection_self_check_completed = Signal(list, bool, int)
     breath_samples = Signal(object)
     ttl_pulse = Signal(object)
     ttl_input_error = Signal(str)
@@ -66,6 +67,7 @@ class HardwareWorker(QThread):
         self._ai_error_backoff_s = 1.0
         self.simulation_mode = simulation
         self._self_check_requested = False
+        self._self_check_request_id = 0
         self._connected = False
         self._actuation_sink = None
         self._interlock_ingress = None
@@ -93,7 +95,6 @@ class HardwareWorker(QThread):
         self._ai_release_success = False
         mode_label = "（模拟模式）" if self.simulation_mode else "（占位）"
         self.status_message.emit(f"硬件线程已启动{mode_label}")
-        self._run_self_check()
         next_telemetry = time.time()
         next_ai = time.time()
         while self._running:
@@ -101,7 +102,9 @@ class HardwareWorker(QThread):
             now = time.time()
             if self._self_check_requested:
                 self._self_check_requested = False
-                self._run_self_check()
+                request_id = self._self_check_request_id
+                self._self_check_request_id = 0
+                self._run_self_check(connection_request_id=request_id)
 
             if now >= next_ai:
                 self._emit_ai_frame(now)
@@ -132,9 +135,21 @@ class HardwareWorker(QThread):
         stopped = bool(self.wait(2000))
         return bool(stopped and self._ai_release_attempted and self._ai_release_success)
 
-    def request_self_check(self) -> None:
+    def request_self_check(self, connection_request_id: int = 0) -> None:
         """Allow controller/UI to trigger another self-check without blocking UI."""
+        self._self_check_request_id = int(connection_request_id)
         self._self_check_requested = True
+
+    def commit_connection(self) -> None:
+        """Publish connected only after the controller finishes safe initialization."""
+
+        self._connected = True
+        self._ai_error_latched = False
+
+    def reject_connection(self) -> None:
+        """Keep telemetry disconnected after a failed or incomplete transaction."""
+
+        self._connected = False
 
     def set_actuation_sink(self, sink, *, interlock_ingress=None) -> None:
         self._actuation_sink = sink
@@ -216,6 +231,8 @@ class HardwareWorker(QThread):
         sample = (float("nan") if error is not None else airflow, sampled_at)
         with self._flow_sample_lock:
             self._flow_sample = sample
+        if error is not None and self._connected:
+            self.mark_disconnected()
         # Every serial sample is safety-significant: LOW_FLOW and errors must
         # not wait for the next UI/telemetry tick before waking the owner.
         self._publish_interlock(sample[0], sample[1])
@@ -348,7 +365,7 @@ class HardwareWorker(QThread):
         """Release only HardwareWorker-owned AI resources; DO belongs elsewhere."""
         return self.stop()
 
-    def _run_self_check(self) -> None:
+    def _run_self_check(self, *, connection_request_id: int = 0) -> None:
         results: list[SelfCheckResult] = []
         ready = False
         try:
@@ -387,12 +404,14 @@ class HardwareWorker(QThread):
                 )
             ]
             ready = False
-        self._connected = ready
+        # A passing probe is only one phase of the connection transaction.
+        # The controller publishes connected after safe DO acquisition and
+        # verified B/C/A zero receipts also succeed.
         if self._interlock_ingress is not None:
             self._interlock_ingress.update(
-                connected=bool(ready),
-                hardware_ready=bool(ready and not self._ai_error_latched),
-                ttl_input_ready=bool(ready and self.ttl_input_ready),
+                connected=False,
+                hardware_ready=False,
+                ttl_input_ready=False,
             )
             current = self._interlock_ingress.read()[1]
             if self._actuation_sink is not None:
@@ -407,6 +426,11 @@ class HardwareWorker(QThread):
                     timestamp=time.time(),
                 )
         self.self_check_completed.emit(results, ready)
+        self.connection_self_check_completed.emit(
+            results,
+            ready,
+            int(connection_request_id),
+        )
         if self.simulation_mode and ready:
             status = "模拟模式：自检通过"
         else:
@@ -572,6 +596,8 @@ class HardwareWorker(QThread):
         except Exception as exc:  # pragma: no cover - hardware boundary
             first_failure = not self._ai_error_latched
             self._ai_error_latched = True
+            if self._connected:
+                self.mark_disconnected()
             self._ai_retry_not_before = attempt_started + self._ai_error_backoff_s
             if not self._release_ai_owned_resources(final=False):
                 LOG.error("释放失效的共享 AI task 失败，保持安全阻断")

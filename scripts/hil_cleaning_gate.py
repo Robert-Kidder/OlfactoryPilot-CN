@@ -166,6 +166,13 @@ def pump_until(
     return bool(predicate())
 
 
+def request_startup_connection(controller) -> None:
+    """Use the product connection transaction from the non-interactive gate."""
+
+    if not controller.request_hardware_connection(source="hil-cleaning-gate"):
+        raise RuntimeError("startup connection request rejected")
+
+
 def _snapshot_payload(controller) -> dict[str, Any]:
     snapshot = controller._cleaning_runtime
     return {
@@ -438,6 +445,7 @@ def main(argv: list[str] | None = None) -> int:
             local_config_path=args.local_config,
         )
         controller = window.controller
+        request_startup_connection(controller)
         controller._cleaning_output_root = maintenance_root
         ready = pump_until(
             app,

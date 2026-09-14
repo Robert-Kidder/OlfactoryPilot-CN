@@ -71,4 +71,6 @@ def test_worker_uses_hal_for_signal_generation(qt_app):
 
     worker._run_self_check()
     hal.self_check.assert_called_once()
+    assert worker.is_connected is False
+    worker.commit_connection()
     assert worker.is_connected is True

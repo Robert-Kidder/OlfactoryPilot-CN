@@ -9,6 +9,9 @@
 - 正式产品使用 QFluentWidgets `FluentWindow`，只构造已验收页面，不提供新旧界面切换、后台 legacy UI 或未定能力的占位入口。
 - 顶部正常态可以只显示“设备已连接”。`SAFE`、`LOW_FLOW`、`DATA_STALE`、armed、lease、owner、receipt、epoch、generation 等内部状态码不得直接作为普通产品界面文案；需要展示时必须转换成自然中文和用户行动，也不要用“系统正常”“安全正常”“当前就绪”“手动模式”等无操作价值的近义文案替代后继续常驻。
 - 页面只回答：设备是否可用、当前正在执行什么、当前能做什么、是否需要用户行动。连接动作只保留一个明确入口。
+- 主窗口显示后固定自动尝试连接一次，Header 短暂显示“正在连接设备…”，成功后原位显示“设备已连接”，不弹连接成功 InfoBar。正常启动不显示主“连接设备”按钮，也不提供 auto-connect 设置。
+- 自动连接失败后进入稳定“连接失败  [重试连接]”状态并停止自动尝试；运行中断线先安全收口，再显示“设备通信中断  [重新连接]”。普通用户文案不暴露 DAQmx、COM 异常码、receipt/epoch/owner 等诊断细节，详细原因只写日志。
+- Header 的状态区和动作槽保持固定宽度；连接中、成功、失败与断线切换不得引起几何跳动。窗口在 queued auto-connect 前关闭时不产生后台连接。
 
 ## 3. 视觉规范
 
@@ -24,6 +27,7 @@
 ### Simulation 界面规则
 
 - simulation 与 real 共用同一套正式窗口、页面和中文交互。不得增加模拟专用页面、“模拟验证”按钮、Mock 用户文案、测试专用设置或普通用户无需理解的内部说明。
+- simulation 与 real 共用“窗口显示→自动连接一次→正在连接→已连接”的生命周期和同一 Controller transaction；simulation 仅把底层 HAL 替换为 MockHAL。
 - simulation 启动只允许一个非侵入式全局标记，让开发人员知道当前没有控制真实硬件；该标记不得改变页面结构、产品流程或普通用户文案。
 - 模拟 telemetry、动作回执和正向验证只能驱动模拟展示与 `MOCK_VERIFIED`，不得显示为“现场已确认”“生产可用”或 `PHYSICAL_VERIFIED`。
 - backend 的 `MOCK_VERIFIED` / `PHYSICAL_VERIFIED` 安全证据隔离不得因共用 UI 而改变。

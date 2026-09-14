@@ -56,6 +56,8 @@ OlfactoryPilot-CN 是用于嗅觉刺激实验的 Windows 桌面控制软件，�
 - Manual/Maintenance 的 lease、pending command、valve、possibly-open 和 readiness 不得触发 Protocol invalidation；真正 active Protocol 的 readiness 丢失仍按现有 fail-closed 路径处理。
 - 单口验证使用独立 Verification ownership 和结构化 phase/deadline/result presentation，只接受已保存且 revision/fingerprint 与运行时一致的 profile。真实验证在 Verification lease 下按“气味阀1–20全关→A-only flow 与 fresh SAFE/readback→selector odor→目标阀 open”启动，并按“目标阀 close→A=0→selector compensation→其余目标安全”收口；任一 stale、late、duplicate、conflicting 或失败回执都必须 fail-closed。模拟正向确认只生成 `MOCK_VERIFIED`；真实动作完成、安全收口和用户确认三者的完整可信合同才能生成 `PHYSICAL_VERIFIED`。
 - 配置编辑与验证是两种权限：mapping 及普通保存仅允许设备断开且 owner 全部 handoff；验证则要求设备已连接、ready、safe idle、无未保存 draft 和竞争 owner。验证 evidence 只更新匹配 revision/fingerprint 的单口状态，不触发 connected mapping hot reload。成功保存后只由 Controller 从 Store commit 发布一次新 revision，同步 state registry、Settings 和 Manual；View 不自行读取配置文件。
+- 正式启动固定为“先完整显示窗口，再 queued 自动连接一次”。构造/show 前不接管硬件；自动连接与人工重试共用安全 transaction，失败不定时或循环重试。运行中断线必须先 fail-closed，人工重新连接成功也不恢复断线前动作。普通用户没有 auto-connect 设置，CLI/config/env 也不得提供关闭开关。
+- 连接阶段依次完成安全 DO 首次 image、自检、B/C/A 清零回读和 fresh 零流量 readiness，最后才发布 connected。HardwareWorker 启动不自动自检；未 acquisition 的退出与全局停止不得首次触碰 NI/serial。
 
 ## 目标用户
 

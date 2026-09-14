@@ -48,13 +48,13 @@ python -m app.main
 
 ```powershell
 python -m app.main --simulation
-python -m app.main --no-worker
 python -m app.main --local-config config/local_config.json
 ```
 
 - `--simulation` 使用 Mock HAL，不连接真实硬件。
-- `--no-worker` 跳过硬件工作线程，适合快速检查界面构造。
 - `--local-config` 指定本机覆盖配置。
+
+主窗口显示后会自动尝试连接设备一次；失败后不会自动循环重试，只能由用户点击“重试连接”。该行为没有用户设置或 CLI 开关。
 
 ## 开发与测试
 

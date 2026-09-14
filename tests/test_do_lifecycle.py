@@ -95,11 +95,15 @@ def test_real_hal_prebuilds_one_task_per_device_port_and_reuses_it(monkeypatch) 
     assert len(tasks) == 4
     port0_task = next(task for task in tasks if task.do_target == "Dev1/port0/line0:7")
     assert port0_task.writes == [
+        (0, True, 1.0),
         (1, False, 0.1),
         (129, False, 0.1),
     ]
     single_line_task = next(task for task in tasks if task.do_target == "Dev2/port1/line0")
-    assert single_line_task.writes == [(False, False, 0.1)]
+    assert single_line_task.writes == [
+        (False, True, 1.0),
+        (False, False, 0.1),
+    ]
 
     hal.flush_logs()
     assert all(task.closed is False for task in tasks)
@@ -170,6 +174,7 @@ def test_real_hal_preserves_failed_rollback_task_and_blocks_rebuild(monkeypatch)
     assert hal.prepare_do_output() is False
     assert len(tasks) == 1
     assert hal._do_sessions
+    assert hal.do_resources_in_use is True
     assert hal._do_owner_thread_id is not None
     assert hal._do_prepare_failed is True
 
@@ -182,6 +187,7 @@ def test_real_hal_preserves_failed_rollback_task_and_blocks_rebuild(monkeypatch)
     assert hal.release_do_output() is True
     assert hal._do_sessions == {}
     assert hal._do_owner_thread_id is None
+    assert hal.do_resources_in_use is False
 
 
 def test_real_hal_preserves_owner_when_task_close_fails(monkeypatch) -> None:
@@ -197,6 +203,9 @@ def test_real_hal_preserves_owner_when_task_close_fails(monkeypatch) -> None:
             self.fail_close = True
 
         def start(self):
+            return None
+
+        def write(self, value, **kwargs):
             return None
 
         def close(self):
@@ -329,7 +338,61 @@ def test_failed_packed_close_cannot_be_reasserted_by_later_port_write(monkeypatc
         device="Dev1", line="P0.1", state=False, timeout_ms=100
     ).success
 
-    assert tasks[0].writes == [1, 0, 0]
+    assert tasks[0].writes == [0, 1, 0, 0]
+
+
+def test_failed_active_low_close_keeps_safe_level_in_next_packed_write(monkeypatch) -> None:
+    import app.services.real_hal as real_hal_module
+
+    tasks = []
+
+    class FakeChannels:
+        def add_do_chan(self, target, *, line_grouping=None):
+            return None
+
+    class FakeTask:
+        def __init__(self):
+            self.do_channels = FakeChannels()
+            self.writes = []
+            self.fail_next = False
+            tasks.append(self)
+
+        def write(self, value, **_kwargs):
+            self.writes.append(value)
+            if self.fail_next:
+                self.fail_next = False
+                raise RuntimeError("uncertain active-low close")
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(real_hal_module, "nidaqmx", SimpleNamespace(Task=FakeTask))
+    monkeypatch.setattr(
+        real_hal_module,
+        "LineGrouping",
+        SimpleNamespace(CHAN_FOR_ALL_LINES="ALL"),
+    )
+    monkeypatch.setattr(real_hal_module, "_NIDAQMX_IMPORT_ERROR", None)
+    hal = real_hal_module.RealHAL(
+        serial_port="COM1",
+        valve_lines=["Dev1/P0.0", "Dev1/P0.1"],
+        digital_safe_levels={"Dev1/P0.0": True, "Dev1/P0.1": False},
+    )
+    assert hal.prepare_do_output() is True
+    assert hal.write_digital_ack(
+        device="Dev1", line="P0.0", state=False, timeout_ms=100
+    ).success
+
+    tasks[0].fail_next = True
+    failed_close = hal.write_digital_ack(
+        device="Dev1", line="P0.0", state=True, timeout_ms=100
+    )
+    assert failed_close.success is False
+    assert hal.write_digital_ack(
+        device="Dev1", line="P0.1", state=False, timeout_ms=100
+    ).success
+
+    assert tasks[0].writes == [1, 0, 1, 1]
 
 
 def test_collect_valve_lines_prepares_cross_variant_safety_union() -> None:
@@ -386,3 +449,101 @@ def test_real_hal_rejects_noncontiguous_packed_port_mapping(monkeypatch) -> None
     )
 
     assert hal.prepare_do_output() is False
+
+
+def test_first_do_drive_is_complete_safe_image_with_polarity(monkeypatch) -> None:
+    import app.services.real_hal as real_hal_module
+
+    events = []
+
+    class FakeChannels:
+        def __init__(self, task):
+            self.task = task
+
+        def add_do_chan(self, target, *, line_grouping=None):
+            self.task.target = target
+            events.append(("add", target))
+
+    class FakeTask:
+        def __init__(self):
+            self.target = ""
+            self.do_channels = FakeChannels(self)
+
+        def write(self, value, *, auto_start=None, timeout=None):
+            events.append(("write", self.target, value, auto_start))
+
+        def start(self):
+            events.append(("start", self.target))
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(real_hal_module, "nidaqmx", SimpleNamespace(Task=FakeTask))
+    monkeypatch.setattr(
+        real_hal_module,
+        "LineGrouping",
+        SimpleNamespace(CHAN_FOR_ALL_LINES="ALL"),
+    )
+    monkeypatch.setattr(real_hal_module, "_NIDAQMX_IMPORT_ERROR", None)
+    hal = real_hal_module.RealHAL(
+        serial_port="COM1",
+        valve_lines=["Dev1/P0.0", "Dev1/P0.1", "Dev1/P0.2"],
+        digital_safe_levels={
+            "Dev1/P0.0": False,
+            "Dev1/P0.1": True,
+            "Dev1/P0.2": False,
+        },
+    )
+
+    assert hal.prepare_do_output() is True
+    assert events == [
+        ("add", "Dev1/port0/line0:2"),
+        ("write", "Dev1/port0/line0:2", 2, True),
+    ]
+
+
+def test_profile_safe_image_and_pull_down_compatibility() -> None:
+    import app.services.real_hal as real_hal_module
+
+    config = {
+        "serial_port": "COM1",
+        "valve_mapping": {
+            "variants": {"20-channel": {"1": "Dev1/P0.0", "2": "Dev1/P0.1"}},
+            "selector": {"target": "Dev1/P0.2", "safe_level": False},
+        },
+        "hardware_profile": {
+            "channels": [
+                {"target": "Dev1/P0.0", "active_high": True},
+                {"target": "Dev1/P0.1", "active_high": False},
+            ],
+            "selector": {"target": "Dev1/P0.2", "safe_level": False},
+        },
+    }
+
+    levels = real_hal_module._collect_digital_safe_levels(
+        config,
+        odor_valve_lines=["Dev1/P0.0", "Dev1/P0.1"],
+        selector_line="Dev1/P0.2",
+    )
+
+    assert levels == {
+        "dev1/port0/line0": False,
+        "dev1/port0/line1": True,
+        "dev1/port0/line2": False,
+    }
+
+    config["hardware_profile"]["selector"]["safe_level"] = True
+    selector_high_levels = real_hal_module._collect_digital_safe_levels(
+        config,
+        odor_valve_lines=["Dev1/P0.0", "Dev1/P0.1"],
+        selector_line="Dev1/P0.2",
+    )
+    assert selector_high_levels["dev1/port0/line2"] is True
+
+    config["hardware_profile"]["channels"] = config["hardware_profile"]["channels"][:1]
+    legacy_levels = real_hal_module._collect_digital_safe_levels(
+        config,
+        odor_valve_lines=["Dev1/P0.0", "Dev1/P0.1"],
+        selector_line="Dev1/P0.2",
+    )
+    assert legacy_levels["dev1/port0/line1"] is False

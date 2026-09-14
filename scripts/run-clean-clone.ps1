@@ -172,14 +172,27 @@ from app.main import DEFAULT_CONFIG, build_application
 
 app, window = build_application(
     DEFAULT_CONFIG,
-    start_worker=True,
     simulation=True,
 )
+observed = []
 window.show()
-QTimer.singleShot(750, app.quit)
-result = app.exec()
-if not window.controller.lifecycle_stopped():
+if not window.controller.schedule_startup_auto_connect():
     raise SystemExit(2)
+
+def finish():
+    observed.append((
+        window.controller._connection_request_count,
+        window.controller.state.telemetry.connected,
+        window.controller.state.hardware_ready,
+    ))
+    app.quit()
+
+QTimer.singleShot(1500, finish)
+result = app.exec()
+if observed != [(1, True, True)]:
+    raise SystemExit(3)
+if not window.controller.lifecycle_stopped():
+    raise SystemExit(4)
 raise SystemExit(result)
 "@
         }
