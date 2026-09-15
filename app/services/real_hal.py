@@ -620,12 +620,7 @@ class RealHAL(HalBase):
             LOG.exception("预建 NI-DAQmx DO task 失败")
             failed: list[_DOPortSession] = []
             for session in created:
-                try:
-                    session.task.close()
-                    session.running = False
-                    session.released = True
-                except Exception:
-                    LOG.exception("回滚 DO task 失败")
+                if not self._close_do_session(session, reason="prepare_rollback"):
                     failed.append(session)
             if failed:
                 self._do_sessions = {(item.device, item.port): item for item in failed}
@@ -644,12 +639,7 @@ class RealHAL(HalBase):
         sessions = list(self._do_sessions.values())
         failed: list[_DOPortSession] = []
         for session in sessions:
-            try:
-                session.task.close()
-                session.running = False
-                session.released = True
-            except Exception:
-                LOG.exception("释放 NI-DAQmx DO task 失败")
+            if not self._close_do_session(session, reason="owner_handoff"):
                 failed.append(session)
         self._do_sessions = {(item.device, item.port): item for item in failed}
         if failed:
@@ -659,6 +649,41 @@ class RealHAL(HalBase):
             return False
         self._do_owner_thread_id = None
         self._do_prepare_failed = False
+        return True
+
+    def _close_do_session(self, session: _DOPortSession, *, reason: str) -> bool:
+        """Close one DO task and emit one low-frequency ownership audit record."""
+
+        close_started_ns = int(self._monotonic_ns_clock())
+        try:
+            session.task.close()
+        except Exception as exc:
+            LOG.exception(
+                "DO session release | session=%s | device=%s | port=%s | "
+                "reason=%s | close_started_ns=%s | close_actual_ns=none | "
+                "result=failed | error=%s",
+                session.session_id,
+                session.device,
+                session.port,
+                reason,
+                close_started_ns,
+                exc,
+            )
+            return False
+        close_actual_ns = int(self._monotonic_ns_clock())
+        session.running = False
+        session.released = True
+        LOG.info(
+            "DO session release | session=%s | device=%s | port=%s | "
+            "reason=%s | close_started_ns=%s | close_actual_ns=%s | "
+            "result=success",
+            session.session_id,
+            session.device,
+            session.port,
+            reason,
+            close_started_ns,
+            close_actual_ns,
+        )
         return True
 
     @property

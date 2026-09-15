@@ -60,7 +60,7 @@ OlfactoryPilot-CN 是用于嗅觉刺激实验的 Windows 桌面控制软件，�
 - Alicat 串口必须使用共享的 CR-framed one-command/one-response transaction；同一 COM 的 TX、完整 RX 和按命令类型校验不可拆锁。setpoint 写必须消费自身响应后才能 poll 验证。任何 timeout、partial、framing/identity/type/transport failure 都锁存当前 session 为 desynchronized，后续命令零 TX；仅允许 close/reopen 后做 bounded resynchronization，不得 reset-buffer 猜归属、跳过 stale frame或自动重发。串口失败不得伪装成 `0 flow`。`alicat_timeout_s=0.2` 是待下一次只读实机 latency 复核的 provisional 兼容默认值，不是已证明的最大响应时间。
 - 内部连接阶段只用于安全编排、日志和测试；普通 Header 统一映射为“正在连接…”、“设备已连接”、“设备未连接”三种状态。未连接且没有连接事务时显示“重新连接”，只有无法确认安全收口时才额外显示面向用户的持续断电提示。
 - 连接阶段依次完成安全 DO 首次 image、自检、B/C/A 清零回读和 fresh 零流量 readiness，最后才发布 connected。HardwareWorker 启动不自动自检；未 acquisition 的退出与全局停止不得首次触碰 NI/serial。
-- USB-6001 software-timed On-Demand DO 会话必须采用“polarity-aware safe packed write → 显式 start → 会话内 `auto_start=False` 写 → 最终安全写确认 → release”的单 owner 生命周期。session 对象存在不等于 task 正在 Running；意外停止不得自动重启或重发。
+- USB-6001 software-timed On-Demand DO 会话必须采用“polarity-aware safe packed write → 显式 start → 会话内 `auto_start=False` 写 → 最终安全写确认 → release”的单 owner 生命周期。session 对象存在不等于 task 正在 Running；意外停止不得自动重启或重发。每个 port 的 release 必须留下 session/device/port、开始与成功 monotonic 时间及结果的低频审计日志，不增加任何额外 NI 动作。
 
 ## 目标用户
 

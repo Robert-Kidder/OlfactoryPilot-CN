@@ -375,6 +375,64 @@ def test_real_hal_safe_image_audit_is_emitted_once_per_port(
     )
 
 
+def test_real_hal_release_audit_proves_safe_write_precedes_each_task_close(
+    monkeypatch,
+    caplog,
+) -> None:
+    import app.services.real_hal as real_hal_module
+
+    _, tasks, events = _install_stateful_on_demand_fake(monkeypatch, real_hal_module)
+    clock = iter((101, 102, 201, 202, 301, 302, 401, 402, 501, 502, 601, 602))
+    hal = real_hal_module.RealHAL(
+        serial_port="COM1",
+        valve_lines=["Dev1/P0.0", "Dev2/P1.0"],
+        digital_safe_levels={"Dev1/P0.0": False, "Dev2/P1.0": False},
+        monotonic_ns_clock=lambda: next(clock),
+    )
+
+    with caplog.at_level("INFO", logger="app.services.real_hal"):
+        assert hal.prepare_do_output() is True
+        dev1_safe_ack = hal.write_digital_ack(
+            device="Dev1", line="P0.0", state=False, timeout_ms=100
+        )
+        dev2_safe_ack = hal.write_digital_ack(
+            device="Dev2", line="P1.0", state=False, timeout_ms=100
+        )
+        assert dev1_safe_ack.success
+        assert dev2_safe_ack.success
+        assert hal.release_do_output() is True
+
+    release_lines = [
+        line for line in caplog.messages if line.startswith("DO session release |")
+    ]
+    assert len(release_lines) == 2
+    assert any(
+        "session=do-1-Dev1-port0" in line
+        and "device=Dev1" in line
+        and "port=port0" in line
+        and "reason=owner_handoff" in line
+        and "close_started_ns=501" in line
+        and "close_actual_ns=502" in line
+        and "result=success" in line
+        for line in release_lines
+    )
+    assert any(
+        "session=do-1-Dev2-port1" in line
+        and "device=Dev2" in line
+        and "port=port1" in line
+        and "close_started_ns=601" in line
+        and "close_actual_ns=602" in line
+        and "result=success" in line
+        for line in release_lines
+    )
+    assert dev1_safe_ack.actual_ns == 302
+    assert dev2_safe_ack.actual_ns == 402
+    assert dev1_safe_ack.actual_ns < 501
+    assert dev2_safe_ack.actual_ns < 601
+    assert [event[1] for event in events].count("close") == 2
+    assert all(task.closed for task in tasks)
+
+
 def test_real_hal_prebuilds_one_task_per_device_port_and_reuses_it(monkeypatch) -> None:
     import app.services.real_hal as real_hal_module
 
@@ -395,6 +453,14 @@ def test_real_hal_prebuilds_one_task_per_device_port_and_reuses_it(monkeypatch) 
             2_100,
             3_000,
             3_100,
+            5_000,
+            5_100,
+            6_000,
+            6_100,
+            7_000,
+            7_100,
+            8_000,
+            8_100,
         )
     )
 

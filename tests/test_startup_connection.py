@@ -1,8 +1,10 @@
+import json
 import os
 import threading
 import time
 
 import pytest
+from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication
 
 from app.main import DEFAULT_CONFIG, build_application
@@ -25,6 +27,9 @@ class CountingHAL(MockHAL):
         self.prepare_count = 0
         self.self_check_count = 0
         self.read_flow_count = 0
+        self.do_release_count = 0
+        self.serial_release_count = 0
+        self.serial_resources_in_use = False
         self.fail_self_checks = fail_self_checks
         self.connection_events = []
 
@@ -38,6 +43,7 @@ class CountingHAL(MockHAL):
         self.connection_events.append("self_check")
         if self.self_check_count <= self.fail_self_checks:
             return [], False
+        self.serial_resources_in_use = True
         return super().self_check()
 
     def read_flow(self) -> float:
@@ -48,6 +54,15 @@ class CountingHAL(MockHAL):
         effective_channel = "A" if value is None else str(channel).upper()
         self.connection_events.append(f"zero:{effective_channel}")
         return super().set_flow(channel, value, comp=comp)
+
+    def release_do_output(self) -> bool:
+        self.do_release_count += 1
+        return super().release_do_output()
+
+    def release_serial_resources(self) -> None:
+        self.serial_release_count += 1
+        self.serial_resources_in_use = False
+        return super().release_serial_resources()
 
 
 class RetainedDoFailureHAL(CountingHAL):
@@ -380,6 +395,107 @@ def test_unsafe_shutdown_retry_success_clears_safety_alert_only_after_connected(
     assert window.manual_experiment_view.current_notice_title == ""
     assert "立即关闭设备电源" not in window.manual_experiment_view.detail_label.text()
     close_window(window, qt_app)
+
+
+def test_successful_global_stop_replaces_unsafe_record_and_next_startup_connects_once(
+    qt_app,
+    tmp_path,
+):
+    record_path = tmp_path / "last-shutdown.json"
+    record_path.write_text(
+        json.dumps({"result": "unsafe", "error": "historic close timeout"}),
+        encoding="utf-8",
+    )
+    local_config = tmp_path / "local-config.json"
+    local_config.write_text(
+        json.dumps(
+            {
+                "hal_mode": "mock",
+                "shutdown_record_path": str(record_path),
+                "shutdown_retry_limit": 0,
+                "shutdown_retry_interval_s": 0,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    first_hal = CountingHAL()
+    _, first_window = build_application(
+        DEFAULT_CONFIG,
+        simulation=True,
+        hal=first_hal,
+        local_config_path=local_config,
+    )
+    first_controller = first_window.controller
+    first_window.show()
+    first_controller.schedule_startup_auto_connect()
+    wait_until(qt_app, lambda: first_controller._connection_phase == "FAILED")
+
+    assert first_controller._unsafe_shutdown_latched is True
+    assert first_controller._connection_request_count == 0
+    assert first_hal.prepare_count == 0
+
+    first_window._connect_button.click()
+    wait_until(qt_app, lambda: first_controller._connection_phase == "CONNECTED")
+    first_controller.stop_hardware()
+
+    persisted = json.loads(record_path.read_text(encoding="utf-8"))
+    assert persisted["result"] == "success"
+    assert persisted["source"] == "stop"
+    assert first_controller._unsafe_shutdown_latched is False
+    assert first_hal.do_resources_in_use is False
+    assert first_hal.serial_resources_in_use is False
+    first_window.close()
+    first_controller.shutdown_and_teardown()
+
+    second_hal = CountingHAL()
+    _, second_window = build_application(
+        DEFAULT_CONFIG,
+        simulation=True,
+        hal=second_hal,
+        local_config_path=local_config,
+    )
+    second_controller = second_window.controller
+    second_window.show()
+    second_controller.schedule_startup_auto_connect()
+    wait_until(qt_app, lambda: second_controller._connection_phase == "CONNECTED")
+
+    assert second_controller._unsafe_shutdown_latched is False
+    assert second_controller._connection_request_count == 1
+    assert second_hal.prepare_count == 1
+
+    second_controller.stop_hardware()
+    second_window.close()
+    second_controller.shutdown_and_teardown()
+
+
+def test_normal_window_close_after_global_stop_exits_without_reacquisition(qt_app):
+    hal = CountingHAL()
+    _, window = build_application(DEFAULT_CONFIG, simulation=True, hal=hal)
+    controller = window.controller
+    window.show()
+    controller.schedule_startup_auto_connect()
+    wait_until(qt_app, lambda: controller._connection_phase == "CONNECTED")
+
+    controller.stop_hardware()
+    assert controller._connection_phase == "DISCONNECTED"
+    assert hal.do_resources_in_use is False
+    assert hal.serial_resources_in_use is False
+    assert hal.do_release_count >= 1
+    assert hal.serial_release_count >= 1
+    prepare_count = hal.prepare_count
+    connection_count = controller._connection_request_count
+
+    QTimer.singleShot(0, window.close)
+    exit_code = qt_app.exec()
+
+    assert exit_code == 0
+    assert controller.lifecycle_stopped() is True
+    assert controller._connection_phase == "DISCONNECTED"
+    assert controller._connection_request_count == connection_count
+    assert hal.prepare_count == prepare_count
+    assert hal.do_resources_in_use is False
+    assert hal.serial_resources_in_use is False
 
 
 def test_do_prepare_exception_fails_transaction_without_self_check(qt_app):

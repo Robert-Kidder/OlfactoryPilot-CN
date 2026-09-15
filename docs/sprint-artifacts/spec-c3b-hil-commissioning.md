@@ -100,6 +100,7 @@ context:
 - 2026-09-14：离线整改、三层复审和完整离线验证均已完成，记录为 `offline_lifecycle_remediation=done`；活动 spec 仍保持 `in-review`，`physical_commissioning_status` 为 `pending-c3b-3-real-connect`，不得据此宣称真实 App Connect 或后续气口验证已完成。
 - 当前 `config/local_config.json` 的 21 个受管输出均计算为 safe LOW；在“USB-6001 上电 DIO 为 input 且弱 pull-down”的已知前提下，未发现当前 profile 的 polarity blocker。这是代码/配置判断，不是现场证据。
 - 2026-09-14 首次真实 C.3b-3 已执行：startup auto-connect、自检、B→C→A 清零和零流量 idle 通过；Global Stop 首个 selector safe write 触发 NI-DAQmx `-200846`，selector/odor 安全回执不确定，系统正确进入 `RECOVERY_REQUIRED`，操作者随后断电。根因是首次 `auto_start=True` 单点 On-Demand safe write 返回后，DO task 未保持会话期 Running，而后续 `auto_start=False` 写错误地只以“session 对象存在”作为可写依据。历史 evidence 保持 FAIL；离线修复不能替代真实复测。
+- 2026-09-15 C.3b-3D 离线审计确认：上一轮成功 Global Stop 已用 `result=success` 覆盖同一路径的历史 unsafe shutdown record，并在当前进程清除 latch；下一进程读取该成功记录后应只执行一次 startup auto-connect。为最终严格复测补充每个 DO port session 的 close/release 开始与成功 monotonic 审计，不改变 safe write、task 生命周期或 Global Stop 偏序。最终复测的操作余量固定为 connected 后至少等待 15 秒、Global Stop 成功后至少等待 15 秒，再由用户点击窗口 X；禁止 Ctrl+C/terminate/kill，必须自然 `exit code=0`。
 
 ## Spec Change Log
 
