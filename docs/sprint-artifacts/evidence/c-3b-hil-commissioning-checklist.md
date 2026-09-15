@@ -1,6 +1,6 @@
 # C.3b HIL Commissioning Checklist（进行中）
 
-> **状态：C.3b-1、C.3b-2A、VE/LSS 只读查询、C.3b-2C 与新的 Alicat CR-framed transaction 实机只读验证已完成。第一次真实 Global Stop 因 NI-DAQmx `-200846` 失败；2026-09-15 人工“重新连接”后的 Global Stop 核心复测已成功，未再出现 `-200846`，selector 与气味阀关闭回执均成功。但本次不是 startup auto-connect acquisition，且两个 10 秒观察窗不足，因此完整 C.3b-3 仍阻断，等待一次严格同规格重跑。** 证据见 [首次真实连接/停止失败](c-3b-first-real-app-connect-2026-09-14.md)、[LSS 响应错位诊断](c-3b-lss-readonly-diagnostic-2026-09-14.md)、[Alicat transaction/latency](c-3b-alicat-transaction-latency-2026-09-15.md) 和 [真实连接/Global Stop 复测](c-3b-first-real-app-connect-retest-2026-09-15.md)。本文件不代表真实气口验证完成。
+> **状态：C.3b-3 最终严格零流量 startup auto-connect / Global Stop 生命周期复测 PASS。** 第一次真实 Global Stop 因 NI-DAQmx `-200846` 失败；2026-09-15 人工“重新连接”后的核心复测虽成功，但完整 C.3b-3 仍被 startup 路径与观察时长阻断；同日独立最终严格复测满足 startup 自动连接、两段 ≥15 秒观察、Global Stop、4/4 task release、用户正常 X 关闭及最终 Alicat 回查，解除此项 blocker。历史 [首次 FAIL](c-3b-first-real-app-connect-2026-09-14.md) 与 [中间核心 PASS／完整 BLOCKED](c-3b-first-real-app-connect-retest-2026-09-15.md) 保持原样；新证据见 [最终严格复测 PASS](c-3b-final-real-connect-global-stop-2026-09-15.md)。本文件仍不代表非零供气、真实气口验证或 timing evidence 完成。
 
 ## 现场门禁
 
@@ -26,10 +26,10 @@
 | Alicat B | 规范化通过 | firmware `10v14.0-R24`；LSS `S → U`，最终 setpoint=`0` |
 | Alicat C | 规范化通过 | firmware `10v14.0-R24`；LSS `S → U`，最终 setpoint=`0` |
 | 现场安全准备 | 通过 | 无受试者/气味样品，出口畅通，操作者可立即停止/断电 |
-| 真实 App Connect | **连接 transaction 通过；完整 startup 复测未完成** | 2026-09-15 startup 被历史 unsafe-shutdown latch 阻断；人工“重新连接”后 self-check、B/C/A zero 与 connected 通过 |
+| 真实 App Connect | **最终严格复测通过** | 2026-09-15 新独立 run 由 startup auto-connect 完成首次 acquisition；4/4 safe images、自检、B/C/A zero 与 ≥15 秒 connected zero-flow idle 均通过；无人工 reconnect |
 | A/B/C 安全初值 | **通过** | 2C 最终 setpoint=`0/0/0 sccm`、mass flow=`0/0/0 sccm` |
 | Setpoint Source | **实机复测通过** | 2026-09-15 新 production transaction 共 57 条只读采样及本轮前后检查均确认 LSS=`U/U/U`、setpoint/flow=`0/0/0` |
-| 真实 Global Stop | **首次失败；核心复测通过** | 2026-09-14 因 `-200846` 失败；2026-09-15 人工重新连接后 selector safe、20/20 valve close、A/B/C zero 和 shutdown success，未复现 `-200846`；完整 C.3b-3 仍待严格重跑 |
+| 真实 Global Stop | **首次失败；最终严格复测通过** | 历史 `-200846` FAIL 保留；新 run 人工点击一次，selector safe、20/20 valve close、A/B/C zero、4/4 DO task release、≥15 秒无自动重连、正常 X 关闭 code 0 与最终 Poll/LSS 均通过；C.3b-3 lifecycle blocker 已解除 |
 
 ## 本轮记录
 
@@ -44,11 +44,12 @@
 - Power-cycle 后 LSS 只读诊断：`c-3b-lss-readonly-diagnostic-2026-09-14.md`（A/B/C LSS timeout；随后 `aVE` 收到 `A U`，响应归属不可信，Real App 未启动）
 - Alicat CR-framed transaction/latency：`c-3b-alicat-transaction-latency-2026-09-15.md`（57/57 transaction 成功，LSS=`U/U/U`，无 timeout/mismatch/desync）
 - 真实连接与 Global Stop 复测：`c-3b-first-real-app-connect-retest-2026-09-15.md`（人工重新连接后的 Global Stop 核心 PASS；完整 C.3b-3 因 startup 路径及观察时长不足仍阻断）
+- 最终严格真实连接与 Global Stop：`c-3b-final-real-connect-global-stop-2026-09-15.md`（startup auto-connect、4/4 safe image、B/C/A zero、43.082 秒零流量观察、人工 Global Stop、selector/20 路阀门回执、4/4 release、21.516 秒无自动重连、用户 X 关闭 code 0、最终 A/B/C 0 与 U；C.3b-3 PASS）
 - verification run identity：
 - 验证气口 / NI target / polarity：
 - flow setpoint / readback：
 - command 与 exact receipt 记录位置：
 - open / close / safe-close 时间：
-- 用户现场观察：首次自动连接和 zero-flow idle 期间 UI 显示“设备已连接”；没有气口出气，没有异常阀门/selector 动作或设备声响。2026-09-15 人工重新连接及 Global Stop 核心复测期间同样未观察到气流、阀门/selector 动作或异常声响。
-- 异常与 global stop/recovery 记录：2A 发现 A/B/C setpoint=`1500/1500/500 sccm`、LSS=`S/S/S`；2C 规范化为 setpoint=`0/0/0`、LSS=`U/U/U`。2026-09-14 首次真实 Global Stop 因 NI-DAQmx `-200846` 进入 `RECOVERY_REQUIRED` 并人工断电。串口 framing 修复后，2026-09-15 read-only latency HIL 解除 response-attribution blocker；同日人工重新连接后的 Global Stop 未再出现 `-200846`，selector/20 路 valve/A-B-C zero 回执及 shutdown record 均成功，但完整 C.3b-3 因 startup 路径和观察时长不足仍待重跑。
+- 用户现场观察：首次自动连接和 zero-flow idle 期间 UI 显示“设备已连接”；没有气口出气，没有异常阀门/selector 动作或设备声响。2026-09-15 中间核心复测及最终严格复测同样无气流、阀门/selector 异常动作或异常声响；最终严格复测的 Global Stop 与窗口 X 由用户人工执行，Stop 后 UI 为“设备未连接 + 重新连接”，用户未点击重新连接。
+- 异常与 global stop/recovery 记录：2A 发现 A/B/C setpoint=`1500/1500/500 sccm`、LSS=`S/S/S`；2C 规范化为 setpoint=`0/0/0`、LSS=`U/U/U`。2026-09-14 首次真实 Global Stop 因 NI-DAQmx `-200846` 进入 `RECOVERY_REQUIRED` 并人工断电。串口 framing 修复后，2026-09-15 read-only latency HIL 解除 response-attribution blocker；同日中间核心复测因 startup 路径/观察窗不足继续 BLOCKED。新的最终严格复测无 `-200846`、无 serial desync、无 `RECOVERY_REQUIRED`；Global Stop、release、自然退出与最终回查均 PASS。进程退出时有一条 Python GC `ResourceWarning`，已在最终 evidence 中记录，不是 DAQmx/serial failure。
 - 结论与审批签名：
