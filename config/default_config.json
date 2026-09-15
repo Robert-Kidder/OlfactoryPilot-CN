@@ -185,6 +185,28 @@
   "alicat_setpoint_verify_retries": 3,
   "alicat_setpoint_scale": 0.001,
   "alicat_readback_scale": 1000.0,
+  "real_supply_policy": {
+    "enabled": false,
+    "device_capacities_sccm": {
+      "A": 5000.0,
+      "B": null,
+      "C": null
+    },
+    "commissioning_approved_maxima_sccm": {
+      "A": 500.0,
+      "B": 0.0,
+      "C": 0.0
+    },
+    "expected_gas": "Air",
+    "requested_setpoint_tolerance_sccm": 1e-9,
+    "accepted_readback_tolerance_sccm": 1.0,
+    "active_mass_flow_tolerance_sccm": 25.0,
+    "zero_mass_flow_tolerance_sccm": 5.0,
+    "required_consecutive_samples": 6,
+    "observation_window_s": 1.0,
+    "maximum_settling_deadline_s": 5.0,
+    "maximum_nonzero_hold_duration_s": 15.0
+  },
   "manual_path": "docs/ManuelUtilisation_ProgOlfacto.pdf",
   "shutdown_retry_limit": 2,
   "shutdown_retry_interval_s": 0.2,

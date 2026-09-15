@@ -46,6 +46,9 @@ class FakeHAL:
         self.serial_open = True
         return True
 
+    def last_setpoint_readback_sccm(self, channel):
+        return self.flows[str(channel)]
+
     def read_flow(self):
         return self.flows["A"]
 

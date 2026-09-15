@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+import math
 import threading
 import time
 from collections import deque
@@ -10,13 +12,17 @@ from PySide6.QtCore import QObject, QThread, Signal
 
 from app.models import (
     AZeroReceipt,
+    CommissioningMonitorStatus,
     DeviceLeaseKind,
     DeviceLeaseToken,
     ExclusiveDeviceLease,
+    FlowSettlingMonitor,
     MaintenanceLeaseReleaseEvidence,
+    RealSupplyPolicy,
     SafeStopIdentity,
 )
 from app.services.flow_service import FlowApplyResult, FlowService
+from app.services.hal import FlowReadbackSnapshot
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,10 +47,23 @@ class FlowCommandResult:
     stale: bool = False
 
 
+@dataclass(frozen=True, slots=True)
+class _RealSupplyAuthorization:
+    operation_id: str
+    generation: int
+    targets_sccm: tuple[float, float, float]
+    policy: RealSupplyPolicy
+
+
+LOG = logging.getLogger(__name__)
+
+
 class FlowWorker(QThread):
     """Single serial owner for ordered MFC commands."""
 
     result_ready = Signal(object)
+    flow_snapshot_ready = Signal(object)
+    commissioning_result_ready = Signal(object)
 
     def __init__(
         self,
@@ -74,6 +93,10 @@ class FlowWorker(QThread):
             str,
             tuple[threading.Event, list[FlowCommandResult]],
         ] = {}
+        self._real_supply_authorization: _RealSupplyAuthorization | None = None
+        self._consumed_real_supply_identity: tuple[str, int] | None = None
+        self._commissioning_monitor: FlowSettlingMonitor | None = None
+        self._commissioning_audit_next_ns = 0
 
     def set_airflow_sink(
         self,
@@ -114,6 +137,7 @@ class FlowWorker(QThread):
                     return False
                 self._safe_stop_identity = identity
                 self._safe_stop_lease_token = self._lease.snapshot
+                self._cancel_real_supply_locked()
                 while self._queue:
                     cancelled.append(self._queue.popleft())
                 self._execution_epoch = max(
@@ -137,6 +161,61 @@ class FlowWorker(QThread):
             self._condition.notify_all()
         self._emit_cancelled(cancelled, "安全停止已失效旧流量命令。")
         return True
+
+    def authorize_real_supply(
+        self,
+        *,
+        operation_id: str,
+        generation: int,
+        targets_sccm: tuple[float, float, float],
+        policy: RealSupplyPolicy,
+    ) -> bool:
+        """Bind one frozen policy to the exact manual lease identity."""
+
+        with self._condition:
+            try:
+                policy.validate_controller_targets(targets_sccm)
+            except (TypeError, ValueError):
+                return False
+            if (
+                not policy.enabled
+                or self._real_supply_authorization is not None
+                or self._commissioning_monitor is not None
+                or not self._lease.matches(
+                    kind=DeviceLeaseKind.MANUAL,
+                    operation_id=operation_id,
+                    generation=generation,
+                    token=self._lease.snapshot.token,
+                )
+            ):
+                return False
+            self._real_supply_authorization = _RealSupplyAuthorization(
+                operation_id=str(operation_id),
+                generation=int(generation),
+                targets_sccm=tuple(float(value) for value in targets_sccm),
+                policy=policy,
+            )
+            self._consumed_real_supply_identity = None
+            return True
+
+    def cancel_real_supply_authorization(self, operation_id: str) -> None:
+        with self._condition:
+            if (
+                self._real_supply_authorization is not None
+                and self._real_supply_authorization.operation_id == operation_id
+            ):
+                self._consumed_real_supply_identity = (
+                    self._real_supply_authorization.operation_id,
+                    self._real_supply_authorization.generation,
+                )
+                self._real_supply_authorization = None
+            if (
+                self._commissioning_monitor is not None
+                and self._commissioning_monitor.operation_id == operation_id
+            ):
+                self._commissioning_monitor = None
+                self._commissioning_audit_next_ns = 0
+            self._condition.notify_all()
 
     def acquire_protocol_lease(self, execution_epoch: int) -> bool:
         """Atomically prevent queued/in-flight manual flow work crossing protocol start."""
@@ -261,6 +340,8 @@ class FlowWorker(QThread):
             if token.kind == DeviceLeaseKind.MAINTENANCE:
                 return False
             released = self._lease.release(token)
+            if released:
+                self._cancel_real_supply_locked()
             if released and token == self._protocol_lease_token:
                 self._protocol_lease_token = None
             return released
@@ -314,6 +395,7 @@ class FlowWorker(QThread):
             else:
                 try:
                     result = self._apply(command)
+                    result = self._apply_real_supply_receipt_gate(command, result)
                 finally:
                     with self._condition:
                         self._active_command = None
@@ -357,6 +439,12 @@ class FlowWorker(QThread):
         )
         if wrapped is None:
             return None
+        confirmed_a = wrapped.result.a_setpoint_readback_sccm
+        zero_confirmed = bool(
+            confirmed_a is not None
+            and math.isfinite(float(confirmed_a))
+            and abs(float(confirmed_a)) <= 1e-9
+        )
         return AZeroReceipt(
             command_id=wrapped.command.command_id,
             identity=SafeStopIdentity(
@@ -364,10 +452,14 @@ class FlowWorker(QThread):
                 int(wrapped.command.generation or 0),
                 wrapped.command.execution_epoch,
             ),
-            success=bool(wrapped.result.success),
-            confirmed_a=float(wrapped.result.a),
+            success=bool(wrapped.result.success and zero_confirmed),
+            confirmed_a=(float("nan") if confirmed_a is None else float(confirmed_a)),
             stale=bool(wrapped.stale),
-            message=str(wrapped.result.message or ""),
+            message=(
+                str(wrapped.result.message or "")
+                if zero_confirmed
+                else "A=0 receipt 缺少或超出零 tolerance 的实际 setpoint readback。"
+            ),
             source=wrapped.command.source,
             mode=wrapped.command.mode,
             lease_token=wrapped.command.lease_token,
@@ -388,12 +480,15 @@ class FlowWorker(QThread):
         return bool(
             wrapped.result.success
             and not wrapped.stale
+            and wrapped.result.zero_confirmed
             and all(
-                abs(value) <= 1e-9
+                value is not None
+                and math.isfinite(float(value))
+                and abs(float(value)) <= 1e-9
                 for value in (
-                    wrapped.result.a,
-                    wrapped.result.b,
-                    wrapped.result.c,
+                    wrapped.result.a_setpoint_readback_sccm,
+                    wrapped.result.b_setpoint_readback_sccm,
+                    wrapped.result.c_setpoint_readback_sccm,
                 )
             )
         )
@@ -460,6 +555,7 @@ class FlowWorker(QThread):
                 return None
             self._safe_stop_identity = identity
             self._safe_stop_lease_token = lease
+            self._cancel_real_supply_locked()
             while self._queue:
                 cancelled.append(self._queue.popleft())
             self._execution_epoch = max(
@@ -508,17 +604,26 @@ class FlowWorker(QThread):
             self._running = True
         try:
             while self._running:
-                if self.process_ready(max_items=1):
-                    continue
                 now = time.monotonic()
-                if self._airflow_sink is not None and now >= self._next_airflow_poll:
+                with self._condition:
+                    polling_required = bool(
+                        self._airflow_sink is not None
+                        or self._commissioning_monitor is not None
+                    )
+                    poll_due = polling_required and now >= self._next_airflow_poll
+                if poll_due:
                     self._poll_airflow()
                     self._next_airflow_poll = now + self._airflow_poll_interval_s
+                    continue
+                if self.process_ready(max_items=1):
                     continue
                 with self._condition:
                     if self._running and not self._queue:
                         timeout = None
-                        if self._airflow_sink is not None:
+                        if (
+                            self._airflow_sink is not None
+                            or self._commissioning_monitor is not None
+                        ):
                             timeout = max(0.0, self._next_airflow_poll - time.monotonic())
                         self._condition.wait(timeout)
         finally:
@@ -533,6 +638,7 @@ class FlowWorker(QThread):
             self._running = False
             while self._queue:
                 cancelled.append(self._queue.popleft())
+            self._cancel_real_supply_locked()
             self._condition.notify_all()
         self._emit_cancelled(cancelled, "流量 worker 关闭，命令已取消。")
         if self.isRunning():
@@ -573,6 +679,18 @@ class FlowWorker(QThread):
             self._safe_stop_identity = None
             self._safe_stop_lease_token = None
         return True
+
+    def _cancel_real_supply_locked(self) -> None:
+        """Retire authorization/monitor state while holding ``_condition``."""
+        authorization = self._real_supply_authorization
+        if authorization is not None:
+            self._consumed_real_supply_identity = (
+                authorization.operation_id,
+                authorization.generation,
+            )
+        self._real_supply_authorization = None
+        self._commissioning_monitor = None
+        self._commissioning_audit_next_ns = 0
 
     def _command_rejection_reason_locked(self, command: FlowCommand) -> str:
         if command.source == "safety:safe-stop":
@@ -623,7 +741,38 @@ class FlowWorker(QThread):
         if command.source == "verification" and not verification_match:
             return "verification 流量命令租约身份不匹配。"
         if manual_match:
-            return "" if command.source == "manual:experiment" else "manual 租约拒绝非手动命令。"
+            if command.source != "manual:experiment":
+                return "manual 租约拒绝非手动命令。"
+            authorization = self._real_supply_authorization
+            if authorization is None:
+                if self._consumed_real_supply_identity == (
+                    command.operation_id,
+                    command.generation,
+                ):
+                    return "Real supply authorization 已消费，重复命令已拒绝。"
+                return ""
+            if (
+                command.operation_id != authorization.operation_id
+                or command.generation != authorization.generation
+            ):
+                return "Real supply authorization identity 不匹配。"
+            if command.mode == "manual_post_close_a_zero":
+                return (
+                    ""
+                    if authorization.policy.targets_match(
+                        (0.0, authorization.targets_sccm[1], authorization.targets_sccm[2]),
+                        (command.a, command.b, command.c),
+                    )
+                    else "Real supply 前置 A=0 targets 与冻结授权不一致。"
+                )
+            if command.mode != "manual_restore_supply":
+                return "Real supply 只允许既有 supply-only transaction。"
+            if not authorization.policy.targets_match(
+                authorization.targets_sccm,
+                (command.a, command.b, command.c),
+            ):
+                return "Real supply controller targets 与冻结授权不一致。"
+            return ""
         if verification_match:
             if command.source != "verification":
                 return "verification 租约拒绝非验证命令。"
@@ -685,14 +834,227 @@ class FlowWorker(QThread):
             mode=command.mode,
         )
 
+    def _apply_real_supply_receipt_gate(
+        self,
+        command: FlowCommand,
+        result: FlowApplyResult,
+    ) -> FlowApplyResult:
+        identity = (command.operation_id, command.generation)
+        with self._condition:
+            authorization = self._real_supply_authorization
+            if authorization is None:
+                if (
+                    command.mode in {"manual_post_close_a_zero", "manual_restore_supply"}
+                    and self._consumed_real_supply_identity == identity
+                ):
+                    return self._real_supply_gate_failure(
+                        result,
+                        "Real supply authorization 已消费或取消，命令回执已拒绝。",
+                        "real_supply_authorization_consumed",
+                    )
+                return result
+            if identity != (authorization.operation_id, authorization.generation):
+                return result
+
+            readbacks = (
+                result.a_setpoint_readback_sccm,
+                result.b_setpoint_readback_sccm,
+                result.c_setpoint_readback_sccm,
+            )
+            if command.mode == "manual_post_close_a_zero":
+                if not result.success:
+                    return result
+                expected = (
+                    0.0,
+                    authorization.targets_sccm[1],
+                    authorization.targets_sccm[2],
+                )
+                if not self._accepted_readbacks_match(
+                    authorization.policy,
+                    expected,
+                    readbacks,
+                ):
+                    return self._real_supply_gate_failure(
+                        result,
+                        "selector compensation 前 A/B/C accepted/readback 超出 commissioning tolerance。",
+                        "pre_close_readback_mismatch",
+                    )
+                return result
+            if command.mode != "manual_restore_supply":
+                return result
+
+            # Claim this one-shot identity before examining the receipt.  The
+            # condition lock makes claim, consumption, and monitor install
+            # indivisible with cancellation and SafeStop.
+            self._real_supply_authorization = None
+            self._consumed_real_supply_identity = (
+                authorization.operation_id,
+                authorization.generation,
+            )
+            if not result.success:
+                return result
+            if not self._accepted_readbacks_match(
+                authorization.policy,
+                authorization.targets_sccm,
+                readbacks,
+            ):
+                return self._real_supply_gate_failure(
+                    result,
+                    "accepted/readback 超出冻结的 1.0 sccm tolerance，必须执行 SafeStop。",
+                    "accepted_readback_mismatch",
+                )
+            first_tx_ns = result.first_nonzero_tx_monotonic_ns
+            if first_tx_ns is None:
+                return self._real_supply_gate_failure(
+                    result,
+                    "缺少首个非零 TX 单调时戳，不能启动 settling/hold 门禁。",
+                    "missing_nonzero_tx_timestamp",
+                )
+            self._commissioning_monitor = FlowSettlingMonitor(
+                policy=authorization.policy,
+                operation_id=authorization.operation_id,
+                targets_sccm=authorization.targets_sccm,
+                first_nonzero_tx_monotonic_ns=int(first_tx_ns),
+            )
+            self._commissioning_audit_next_ns = 0
+            self._next_airflow_poll = 0.0
+            self._condition.notify_all()
+            return result
+
+    @staticmethod
+    def _accepted_readbacks_match(
+        policy: RealSupplyPolicy,
+        expected: tuple[float, float, float],
+        readbacks: tuple[float | None, float | None, float | None],
+    ) -> bool:
+        return bool(
+            all(value is not None and math.isfinite(float(value)) for value in readbacks)
+            and policy.accepted_readbacks_match(
+                expected,
+                tuple(float(value) for value in readbacks),  # type: ignore[arg-type]
+            )
+        )
+
+    @staticmethod
+    def _real_supply_gate_failure(
+        result: FlowApplyResult,
+        message: str,
+        error: str,
+    ) -> FlowApplyResult:
+        return FlowApplyResult(
+            False,
+            message,
+            result.a,
+            result.b,
+            result.c,
+            result.a_comp,
+            error,
+            a_setpoint_readback_sccm=result.a_setpoint_readback_sccm,
+            b_setpoint_readback_sccm=result.b_setpoint_readback_sccm,
+            c_setpoint_readback_sccm=result.c_setpoint_readback_sccm,
+            first_nonzero_tx_monotonic_ns=result.first_nonzero_tx_monotonic_ns,
+            recovery_required=True,
+        )
+
     def _poll_airflow(self) -> None:
-        sink = self._airflow_sink
-        if sink is None:
+        with self._condition:
+            sink = self._airflow_sink
+            monitor_required = self._commissioning_monitor is not None
+        if sink is None and not monitor_required:
             return
         timestamp = time.time()
         try:
-            value = float(self.service.hal.read_flow())
+            snapshot_reader = getattr(self.service.hal, "read_flow_snapshot", None)
+            if callable(snapshot_reader):
+                snapshot = snapshot_reader()
+                if not isinstance(snapshot, FlowReadbackSnapshot):
+                    raise TypeError("HAL returned an invalid flow snapshot")
+                value = float(snapshot.by_channel["A"].mass_flow_sccm)
+                timestamp = float(snapshot.wall_timestamp)
+                evaluated_ns = time.perf_counter_ns()
+                self._evaluate_commissioning(snapshot, now_ns=evaluated_ns)
+                self.flow_snapshot_ready.emit(snapshot)
+            else:
+                if monitor_required:
+                    raise TypeError("HAL does not provide three-channel flow snapshots")
+                value = float(self.service.hal.read_flow())
         except Exception as exc:  # serial errors must invalidate readiness immediately
-            sink(float("nan"), timestamp, f"{type(exc).__name__}: {exc}")
+            if sink is not None:
+                sink(float("nan"), timestamp, f"{type(exc).__name__}: {exc}")
+            with self._condition:
+                monitor = self._commissioning_monitor
+                result = (
+                    None
+                    if monitor is None
+                    else monitor.fail(
+                        f"三路 Poll 失败或 serial desync：{type(exc).__name__}: {exc}",
+                        now_ns=time.perf_counter_ns(),
+                    )
+                )
+                if result is not None and self._commissioning_monitor is monitor:
+                    self._commissioning_monitor = None
+                    self._commissioning_audit_next_ns = 0
+            if result is not None:
+                self.commissioning_result_ready.emit(result)
             return
-        sink(value, timestamp, None)
+        if sink is not None:
+            sink(value, timestamp, None)
+
+    def _evaluate_commissioning(
+        self,
+        snapshot: FlowReadbackSnapshot,
+        *,
+        now_ns: int | None = None,
+    ) -> None:
+        evaluated_ns = time.perf_counter_ns() if now_ns is None else int(now_ns)
+        with self._condition:
+            monitor = self._commissioning_monitor
+            if monitor is None:
+                return
+            self._audit_commissioning_sample_locked(monitor, snapshot, evaluated_ns)
+            result = monitor.evaluate(snapshot, now_ns=evaluated_ns)
+            if (
+                result is not None
+                and result.status is CommissioningMonitorStatus.FAILED
+                and self._commissioning_monitor is monitor
+            ):
+                self._commissioning_monitor = None
+                self._commissioning_audit_next_ns = 0
+        if result is None:
+            return
+        LOG.info(
+            "real_supply_commissioning | operation=%s | status=%s | reason=%s | samples=%s",
+            result.operation_id,
+            result.status.value,
+            result.reason,
+            result.consecutive_samples,
+        )
+        self.commissioning_result_ready.emit(result)
+
+    def _audit_commissioning_sample_locked(
+        self,
+        monitor: FlowSettlingMonitor,
+        snapshot: FlowReadbackSnapshot,
+        evaluated_ns: int,
+    ) -> None:
+        if evaluated_ns < self._commissioning_audit_next_ns:
+            return
+        self._commissioning_audit_next_ns = evaluated_ns + 1_000_000_000
+        LOG.info(
+            "real_supply_commissioning_sample | %s",
+            {
+                "operation_id": monitor.operation_id,
+                "snapshot_monotonic_ns": snapshot.monotonic_ns,
+                "evaluated_monotonic_ns": evaluated_ns,
+                "channels": {
+                    reading.channel: {
+                        "raw_frame": str(reading.raw_frame)[:256],
+                        "setpoint_sccm": reading.setpoint_sccm,
+                        "mass_flow_sccm": reading.mass_flow_sccm,
+                        "gas": reading.gas,
+                        "monotonic_ns": reading.monotonic_ns,
+                    }
+                    for reading in snapshot.readings
+                },
+            },
+        )

@@ -30,11 +30,30 @@ class _FlowService:
 
     def apply_zero(self) -> FlowApplyResult:
         self.calls.append("zero")
-        return FlowApplyResult(True, "ok", 0, 0, 0, 0)
+        return FlowApplyResult(
+            True,
+            "ok",
+            0,
+            0,
+            0,
+            0,
+            a_setpoint_readback_sccm=0.0,
+            b_setpoint_readback_sccm=0.0,
+            c_setpoint_readback_sccm=0.0,
+            zero_confirmed=True,
+        )
 
     def apply_a_zero(self) -> FlowApplyResult:
         self.calls.append("safe_stop_a_zero")
-        return FlowApplyResult(True, "ok", 0, 0, 0, 0)
+        return FlowApplyResult(
+            True,
+            "ok",
+            0,
+            0,
+            0,
+            0,
+            a_setpoint_readback_sccm=0.0,
+        )
 
 
 def test_flow_worker_preserves_command_identity() -> None:
@@ -230,6 +249,39 @@ def test_safe_stop_a_zero_receipt_is_correlated_and_fences_business_queue() -> N
     assert worker.submit(
         FlowCommand("new", 8, 2, "rest", 1, 2, 3, "manual")
     ) is False
+
+
+@pytest.mark.parametrize("readback", [None, 0.001, float("nan")])
+def test_safe_stop_a_zero_requires_actual_zero_readback(readback) -> None:
+    class Service(_FlowService):
+        def apply_a_zero(self) -> FlowApplyResult:
+            self.calls.append("safe_stop_a_zero")
+            return FlowApplyResult(
+                True,
+                "command accepted",
+                0,
+                0,
+                0,
+                0,
+                a_setpoint_readback_sccm=readback,
+            )
+
+    worker = FlowWorker(Service())
+    receipt = worker.zero_a_for_safe_stop(SafeStopIdentity("safe-readback", 1, 1), 100)
+
+    assert receipt is not None
+    assert receipt.success is False
+    assert "readback" in receipt.message
+
+
+def test_safe_stop_a_zero_reports_verified_readback_not_requested_target() -> None:
+    worker = FlowWorker(_FlowService())
+
+    receipt = worker.zero_a_for_safe_stop(SafeStopIdentity("safe-readback", 1, 1), 100)
+
+    assert receipt is not None
+    assert receipt.success is True
+    assert receipt.confirmed_a == 0.0
 
 
 def test_blocking_safe_stop_a_zero_returning_after_deadline_is_rejected(
@@ -466,3 +518,16 @@ def test_correlated_safe_stop_releases_active_device_lease(lease_kind) -> None:
     )
     assert worker.release_lease_for_safe_stop(identity, evidence)
     assert worker._lease.snapshot.kind == DeviceLeaseKind.IDLE
+
+
+def test_safe_stop_final_zero_rejects_missing_actual_channel_readback() -> None:
+    class MissingCReadbackService(_FlowService):
+        def apply_zero(self) -> FlowApplyResult:
+            return replace(super().apply_zero(), c_setpoint_readback_sccm=None)
+
+    worker = FlowWorker(MissingCReadbackService())
+    identity = SafeStopIdentity("zero-missing-c", 1, execution_epoch=1)
+
+    a_receipt = worker.zero_a_for_safe_stop(identity, 100)
+    assert a_receipt is not None and a_receipt.success
+    assert worker.zero_all_for_safe_stop(identity, 100) is False

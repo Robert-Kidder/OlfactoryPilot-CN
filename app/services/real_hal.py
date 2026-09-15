@@ -16,7 +16,13 @@ from app.services.alicat_serial import (
     initial_resynchronization_windows,
     quantize_setpoint_for_wire,
 )
-from app.services.hal import AnalogInputFrame, DigitalWriteAck, HalBase
+from app.services.hal import (
+    AnalogInputFrame,
+    DigitalWriteAck,
+    FlowChannelReadback,
+    FlowReadbackSnapshot,
+    HalBase,
+)
 from app.services.ttl_trigger_service import TtlTriggerConfig
 
 try:  # Local hardware drivers; keep import errors explicit for clear startup failures.
@@ -131,6 +137,7 @@ class RealHAL(HalBase):
         self._setpoint_scale = float(alicat_setpoint_scale)
         self._readback_scale = float(alicat_readback_scale)
         self._setpoint_readbacks_sccm: dict[str, float] = {}
+        self._setpoint_tx_monotonic_ns: dict[str, int] = {}
         self._digital_lines = list(valve_lines or [])
         self._odor_valve_lines = list(
             self._digital_lines if odor_valve_lines is None else odor_valve_lines
@@ -156,6 +163,14 @@ class RealHAL(HalBase):
         """Whether the serial owner currently holds an open COM connection."""
         with self._serial_lock:
             return bool(self._serial is not None and getattr(self._serial, "is_open", True))
+
+    @property
+    def serial_desynchronized(self) -> bool:
+        with self._serial_lock:
+            return bool(
+                self._alicat_session is not None
+                and self._alicat_session.desynchronized
+            )
 
     @classmethod
     def from_config(cls, config: dict) -> RealHAL:
@@ -319,6 +334,25 @@ class RealHAL(HalBase):
         value = self._parse_flow_value(frame.text, unit_id)
         return float(value) * self._readback_scale
 
+    def read_flow_snapshot(self) -> FlowReadbackSnapshot:
+        """Poll A/B/C serially through this HAL's one Alicat session."""
+
+        readings: list[FlowChannelReadback] = []
+        for channel in ("A", "B", "C"):
+            unit_id = self._resolve_unit_id(channel)
+            if not unit_id:
+                raise AlicatResponseMismatch(f"Alicat {channel} unit ID is not configured")
+            frame = self._transact_poll(unit_id)
+            readings.append(self._channel_readback(channel, unit_id, frame))
+        captured_ns = max(reading.monotonic_ns for reading in readings)
+        captured_at = max(reading.wall_timestamp for reading in readings)
+        return FlowReadbackSnapshot(
+            readings=tuple(readings),
+            wall_timestamp=captured_at,
+            monotonic_ns=captured_ns,
+            fresh=True,
+        )
+
     def set_flow(self, channel: str | float, value: float | None = None, *, comp: bool = False) -> bool:
         if value is None:
             value = float(channel)
@@ -343,11 +377,12 @@ class RealHAL(HalBase):
                 wire_target,
             )
             session = self._ensure_alicat_session()
-            session.set_setpoint(
+            command_frame = session.set_setpoint(
                 unit_id,
                 wire_target,
                 tolerance=self._setpoint_verify_tolerance,
             )
+            self._setpoint_tx_monotonic_ns[normalized_channel] = int(command_frame.tx_ns)
             if self._setpoint_verify_delay_s:
                 time.sleep(self._setpoint_verify_delay_s)
             readback, response = self._read_setpoint(unit_id, expected=wire_target)
@@ -373,6 +408,9 @@ class RealHAL(HalBase):
 
     def last_setpoint_readback_sccm(self, channel: str) -> float | None:
         return self._setpoint_readbacks_sccm.get(str(channel).upper())
+
+    def last_setpoint_tx_monotonic_ns(self, channel: str) -> int | None:
+        return self._setpoint_tx_monotonic_ns.get(str(channel).upper())
 
     def write_digital(self, *, device: str | None, line: str, state: bool) -> bool:
         if self._digital_lines:
@@ -838,6 +876,7 @@ class RealHAL(HalBase):
                     self._serial.close()
                 self._serial = None
                 self._alicat_session = None
+                self._setpoint_tx_monotonic_ns.clear()
         except Exception:  # pragma: no cover - defensive
             LOG.exception("Failed to close serial port")
 
@@ -937,6 +976,27 @@ class RealHAL(HalBase):
         if len(values) <= index:
             return None
         return float(values[index])
+
+    def _channel_readback(self, channel: str, unit_id: str, frame) -> FlowChannelReadback:
+        tokens = frame.text.split()
+        if len(tokens) < 7 or tokens[0].casefold() != unit_id.casefold():
+            raise AlicatResponseMismatch("Alicat Poll frame is incomplete")
+        try:
+            mass_flow = float(tokens[1 + FLOW_FIELD_INDEX["mass_flow"]])
+            setpoint = float(tokens[1 + FLOW_FIELD_INDEX["setpoint"]])
+        except (IndexError, ValueError) as exc:
+            raise AlicatResponseMismatch("Alicat Poll flow fields are invalid") from exc
+        return FlowChannelReadback(
+            channel=channel,
+            unit_id=unit_id,
+            setpoint_sccm=setpoint * self._readback_scale,
+            mass_flow_sccm=mass_flow * self._readback_scale,
+            gas=tokens[6],
+            wall_timestamp=float(self._wall_clock()),
+            monotonic_ns=int(frame.rx_ns),
+            raw_frame=frame.text,
+            fresh=True,
+        )
 
 
 def _collect_valve_lines(

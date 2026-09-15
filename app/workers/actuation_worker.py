@@ -26,6 +26,8 @@ from app.models import (
     CleaningResult,
     CleaningSnapshot,
     CleaningStatus,
+    CommissioningMonitorResult,
+    CommissioningMonitorStatus,
     DeviceLeaseKind,
     DeviceLeaseToken,
     HardwareVerificationPhase,
@@ -471,6 +473,7 @@ class ActuationWorker(QThread):
         verification_flow_ready_timeout_ms: int = 5000,
         safe_stop_receipt_timeout_ms: int = 2000,
         manual_receipt_timeout_ms: int = 2000,
+        commissioning_accepted_readback_tolerance_sccm: float = 1.0,
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
@@ -508,6 +511,14 @@ class ActuationWorker(QThread):
         self._manual_receipt_timeout_ns = (
             max(1, int(manual_receipt_timeout_ms)) * 1_000_000
         )
+        commissioning_tolerance = float(
+            commissioning_accepted_readback_tolerance_sccm
+        )
+        if not math.isfinite(commissioning_tolerance) or commissioning_tolerance < 0:
+            raise ValueError(
+                "commissioning accepted/readback tolerance must be finite and non-negative"
+            )
+        self._commissioning_accepted_readback_tolerance_sccm = commissioning_tolerance
         self._condition = threading.Condition(threading.RLock())
         self._normal_heap: list[tuple[int, int, int, ActuationCommand]] = []
         self._messages: deque[_QueuedOwnerMessage] = deque()
@@ -608,6 +619,8 @@ class ActuationWorker(QThread):
         self._manual_flow_deadline_ns: int | None = None
         self._manual_waiting_for_safe_flow = False
         self._manual_waiting_for_safe_flow_role = ""
+        self._manual_waiting_for_commissioning = False
+        self._manual_commissioning_stable = False
         self._manual_start_pending = False
 
     def set_session_recorder(self, recorder) -> bool:
@@ -708,6 +721,21 @@ class ActuationWorker(QThread):
             )
             self._condition.notify_all()
             return True
+
+    def post_commissioning_result(self, result: CommissioningMonitorResult) -> bool:
+        if not isinstance(result, CommissioningMonitorResult):
+            return False
+        with self._condition:
+            if not self._accepting:
+                return False
+            self._messages.append(
+                self._queued_owner_message(
+                    "manual_commissioning_result",
+                    {"result": result},
+                )
+            )
+            self._condition.notify_all()
+        return True
 
     @property
     def cleaning_owner_handoff_ready(self) -> bool:
@@ -2073,13 +2101,16 @@ class ActuationWorker(QThread):
                 and wrapped.command == expected_command
                 and not late
                 and wrapped.result.success
+                and wrapped.result.zero_confirmed
                 and not wrapped.stale
                 and all(
-                    math.isfinite(float(value)) and abs(float(value)) <= 1e-9
+                    value is not None
+                    and math.isfinite(float(value))
+                    and abs(float(value)) <= 1e-9
                     for value in (
-                        wrapped.result.a,
-                        wrapped.result.b,
-                        wrapped.result.c,
+                        wrapped.result.a_setpoint_readback_sccm,
+                        wrapped.result.b_setpoint_readback_sccm,
+                        wrapped.result.c_setpoint_readback_sccm,
                     )
                 )
             )
@@ -2123,6 +2154,12 @@ class ActuationWorker(QThread):
                 f"RECOVERY_REQUIRED：{plan.recovery_reason}"
             )
             return
+        confirmed_a = wrapped.result.a_setpoint_readback_sccm
+        zero_confirmed = bool(
+            confirmed_a is not None
+            and math.isfinite(float(confirmed_a))
+            and abs(float(confirmed_a)) <= 1e-9
+        )
         receipt = AZeroReceipt(
             command_id=wrapped.command.command_id,
             identity=SafeStopIdentity(
@@ -2130,10 +2167,14 @@ class ActuationWorker(QThread):
                 int(wrapped.command.generation or 0),
                 wrapped.command.execution_epoch,
             ),
-            success=bool(wrapped.result.success),
-            confirmed_a=float(wrapped.result.a),
+            success=bool(wrapped.result.success and zero_confirmed),
+            confirmed_a=(float("nan") if confirmed_a is None else float(confirmed_a)),
             stale=bool(wrapped.stale),
-            message=str(wrapped.result.message or ""),
+            message=(
+                str(wrapped.result.message or "")
+                if zero_confirmed
+                else "A=0 receipt 缺少或超出零 tolerance 的实际 setpoint readback。"
+            ),
             source=wrapped.command.source,
             mode=wrapped.command.mode,
             lease_token=wrapped.command.lease_token,
@@ -3191,6 +3232,9 @@ class ActuationWorker(QThread):
                 self._handle_manual_deadline(**payload)
             else:
                 self._handle_manual_receipt_timeout(**payload)
+            return
+        if kind == "manual_commissioning_result":
+            self._consume_manual_commissioning_result(payload["result"])
             return
         if kind == "flow_result":
             wrapped = payload["flow_result"]
@@ -5920,6 +5964,8 @@ class ActuationWorker(QThread):
         self._manual_flow_result = None
         self._manual_waiting_for_safe_flow = False
         self._manual_waiting_for_safe_flow_role = ""
+        self._manual_waiting_for_commissioning = False
+        self._manual_commissioning_stable = False
         self._manual_snapshot = ManualExperimentSnapshot(
             status=ManualExperimentStatus.FLOW_PENDING,
             identity=plan.identity,
@@ -6026,6 +6072,37 @@ class ActuationWorker(QThread):
                 or "手动实验流量 receipt 身份、数值或成功证据无效。"
             )
             return
+        if role == "post_close_zero" and plan.requires_commissioning_settling:
+            expected_readbacks = (
+                0.0,
+                plan.flow_setpoints.main_b_sccm,
+                plan.flow_setpoints.vacuum_c_sccm,
+            )
+            actual_readbacks = (
+                wrapped.result.a_setpoint_readback_sccm,
+                wrapped.result.b_setpoint_readback_sccm,
+                wrapped.result.c_setpoint_readback_sccm,
+            )
+            tolerance = self._commissioning_accepted_readback_tolerance_sccm
+            if not all(
+                actual is not None
+                and math.isfinite(float(actual))
+                and math.isclose(
+                    float(actual),
+                    float(expected),
+                    rel_tol=0.0,
+                    abs_tol=tolerance,
+                )
+                for expected, actual in zip(
+                    expected_readbacks,
+                    actual_readbacks,
+                    strict=True,
+                )
+            ):
+                self._fail_manual(
+                    "selector compensation 前 A/B/C accepted/readback 证据缺失或越界。"
+                )
+                return
         self._manual_flow_result = wrapped
         if role == "post_close_zero":
             self.interlock.disarm_airflow_monitor()
@@ -6045,6 +6122,11 @@ class ActuationWorker(QThread):
                 supply_enabled=True,
                 supply_transitioning=True,
             )
+            if plan.requires_commissioning_settling:
+                self._manual_waiting_for_commissioning = True
+                if self._manual_commissioning_stable:
+                    self._confirm_manual_commissioning_stable()
+                return
             self._manual_waiting_for_safe_flow = True
             self._manual_waiting_for_safe_flow_role = "restore_supply"
             self._schedule_manual_receipt_timeout("flow_safe", ("airflow-safe",))
@@ -6580,6 +6662,31 @@ class ActuationWorker(QThread):
         if pending:
             self._fail_manual(f"manual {phase} receipt 超时或 cohort 不完整。")
 
+    def _consume_manual_commissioning_result(
+        self,
+        result: CommissioningMonitorResult,
+    ) -> None:
+        plan = self._manual_plan
+        if (
+            plan is None
+            or not plan.requires_commissioning_settling
+            or result.operation_id != plan.identity.operation_id
+        ):
+            return
+        if result.status is CommissioningMonitorStatus.FAILED:
+            self._fail_manual(result.reason)
+            return
+        self._manual_commissioning_stable = True
+        if self._manual_waiting_for_commissioning:
+            self._confirm_manual_commissioning_stable()
+
+    def _confirm_manual_commissioning_stable(self) -> None:
+        self._manual_waiting_for_commissioning = False
+        self._publish_manual(
+            supply_enabled=True,
+            supply_transitioning=False,
+        )
+
     def _manual_runtime_rejection_reason(self) -> str:
         plan = self._manual_plan
         if plan is None:
@@ -6650,6 +6757,8 @@ class ActuationWorker(QThread):
         self._manual_flow_deadline_ns = None
         self._manual_waiting_for_safe_flow = False
         self._manual_waiting_for_safe_flow_role = ""
+        self._manual_waiting_for_commissioning = False
+        self._manual_commissioning_stable = False
         self._deadline_heap = [
             item
             for item in self._deadline_heap

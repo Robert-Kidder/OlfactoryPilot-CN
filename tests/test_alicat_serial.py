@@ -570,6 +570,28 @@ def test_real_hal_read_flow_timeout_is_not_published_as_zero(monkeypatch) -> Non
     assert port.writes == [b"a\r"]
 
 
+def test_real_hal_reads_three_channel_snapshot_serially_on_one_session(monkeypatch) -> None:
+    port = StatefulFakeSerial(
+        [
+            b"A 14.7 25.0 0.500 0.500 0.500 Air\r",
+            b"B 14.7 25.0 0.000 0.000 0.000 Air\r",
+            b"C 14.7 25.0 0.000 0.000 0.000 Air\r",
+        ]
+    )
+    hal = make_real_hal(monkeypatch, [port])
+
+    snapshot = hal.read_flow_snapshot()
+
+    assert tuple(reading.channel for reading in snapshot.readings) == ("A", "B", "C")
+    assert tuple(reading.unit_id for reading in snapshot.readings) == ("a", "b", "c")
+    assert snapshot.by_channel["A"].setpoint_sccm == 500.0
+    assert snapshot.by_channel["A"].mass_flow_sccm == 500.0
+    assert snapshot.by_channel["A"].gas == "Air"
+    assert snapshot.fresh
+    assert snapshot.monotonic_ns == snapshot.readings[-1].monotonic_ns
+    assert port.writes == [b"a\r", b"b\r", b"c\r"]
+
+
 def test_real_hal_set_flow_consumes_command_response_before_poll(monkeypatch) -> None:
     frame = b"A 14.7 25.0 0.0 0.0 0.123 Air\r"
     port = StatefulFakeSerial([frame, frame])
@@ -672,7 +694,9 @@ def test_flow_service_global_stop_zero_paths_use_same_transactions(monkeypatch) 
     hal = make_real_hal(monkeypatch, [port])
     service = FlowService(hal)
 
-    assert service.apply_a_zero().success is True
+    a_zero = service.apply_a_zero()
+    assert a_zero.success is True
+    assert a_zero.a_setpoint_readback_sccm == 0.0
     assert service.apply_zero().success is True
 
     assert port.writes == [
@@ -701,6 +725,13 @@ def test_flow_worker_safe_stop_does_not_reopen_or_transmit_after_desync(
     assert a_receipt is not None
     assert a_receipt.success is False
     assert all_zero is False
+    assert port.writes == [b"as0.000\r"]
+
+    result = FlowService(hal).apply_zero()
+    assert result.success is False
+    assert result.zero_confirmed is False
+    assert result.recovery_required is True
+    assert result.error == "serial_desync"
     assert port.writes == [b"as0.000\r"]
 
 
@@ -804,3 +835,24 @@ def test_current_provisional_frame_deadline_fits_existing_safety_budgets(
 
     assert hal.serial_timeout_s == 0.2
     assert hal.serial_resources_in_use is False
+
+
+def test_commissioning_readback_tolerance_does_not_replace_global_alicat_tolerance(
+    monkeypatch,
+) -> None:
+    from app.services import real_hal as real_hal_module
+
+    monkeypatch.setattr(real_hal_module, "_NIDAQMX_IMPORT_ERROR", None)
+    monkeypatch.setattr(real_hal_module, "_SERIAL_IMPORT_ERROR", None)
+    hal = real_hal_module.RealHAL.from_config(
+        {
+            "serial_port": "COM-FAKE",
+            "alicat_setpoint_tolerance": 0.05,
+            "real_supply_policy": {
+                "enabled": False,
+                "accepted_readback_tolerance_sccm": 1.0,
+            },
+        }
+    )
+
+    assert hal._setpoint_verify_tolerance == 0.05

@@ -55,6 +55,7 @@ from app.models import (
     ProtocolExecutionReadiness,
     ProtocolExecutionSnapshot,
     ProtocolExecutionStatus,
+    RealSupplyPolicy,
     SafeStopIdentity,
     SafetyState,
     VerificationStatus,
@@ -171,6 +172,7 @@ class MainController(QObject):
     ) -> None:
         super().__init__()
         self.config = dict(config or {})
+        self.real_supply_policy = RealSupplyPolicy.from_config(self.config)
         self._allow_test_actuation_bridge = bool(allow_test_actuation_bridge)
         self.state = state
         self.simulation_mode = state.simulation_mode
@@ -266,6 +268,9 @@ class MainController(QObject):
             ),
             verification_flow_ready_timeout_ms=int(
                 (config or {}).get("verification_flow_ready_timeout_ms", 5000)
+            ),
+            commissioning_accepted_readback_tolerance_sccm=(
+                self.real_supply_policy.accepted_readback_tolerance_sccm
             ),
             parent=self,
         )
@@ -395,6 +400,10 @@ class MainController(QObject):
         self.actuation_worker.plan_result_ready.connect(self._handle_actuation_plan_result)
         self.flow_worker.result_ready.connect(
             self.actuation_worker.enqueue_flow_result_from_producer,
+            Qt.ConnectionType.DirectConnection,
+        )
+        self.flow_worker.commissioning_result_ready.connect(
+            self.actuation_worker.post_commissioning_result,
             Qt.ConnectionType.DirectConnection,
         )
         self.actuation_worker.flow_result_ready.connect(self._handle_flow_command_result)
@@ -3676,7 +3685,7 @@ class MainController(QObject):
         if not intent.enabled:
             self.stop_hardware()
             return True
-        if not self.simulation_mode:
+        if not self.simulation_mode and not self.real_supply_policy.enabled:
             self._set_manual_status("供气失败：真实硬件尚未授权；安全动作：未操作 NI/Alicat；下一步：使用 Mock。")
             return False
         if self._manual_lease_token is not None or self._manual_snapshot.status not in {
@@ -3702,6 +3711,13 @@ class MainController(QObject):
                 main_b_sccm=intent.main_b_sccm,
                 vacuum_c_sccm=intent.vacuum_c_sccm,
             )
+            real_targets = None
+            if not self.simulation_mode:
+                real_targets = self.real_supply_policy.controller_targets(
+                    sample_a_sccm=setpoints.sample_a_sccm,
+                    main_b_sccm=setpoints.main_b_sccm,
+                    vacuum_c_sccm=setpoints.vacuum_c_sccm,
+                )
             self._manual_generation += 1
             operation_id = f"manual-supply-{uuid.uuid4().hex}"
             identity = ManualExperimentIdentity(
@@ -3713,6 +3729,7 @@ class MainController(QObject):
                 identity=identity,
                 flow_setpoints=setpoints,
                 selector=self.state.selector,
+                requires_commissioning_settling=not self.simulation_mode,
             )
         except Exception as exc:
             self._set_manual_status(f"供气失败：{exc}；安全动作：未改变流量；下一步：修正 A/B/C。")
@@ -3724,7 +3741,23 @@ class MainController(QObject):
         self._manual_lease_token = token
         self._manual_supply_identity = identity
         self.actuation_interlock.update(device_lease=DeviceLeaseKind.MANUAL.value)
+        if not self.simulation_mode and (
+            real_targets is None
+            or not self.flow_worker.authorize_real_supply(
+                operation_id=identity.operation_id,
+                generation=identity.generation,
+                targets_sccm=real_targets,
+                policy=self.real_supply_policy,
+            )
+        ):
+            self.flow_worker.release_lease(token)
+            self._manual_lease_token = None
+            self._manual_supply_identity = None
+            self.actuation_interlock.update(device_lease=DeviceLeaseKind.IDLE.value)
+            self._set_manual_status("供气失败：Real supply 冻结授权未能绑定唯一 owner；安全动作：未改变流量。")
+            return False
         if not self.actuation_worker.post_manual_start(plan, lease_token=token):
+            self.flow_worker.cancel_real_supply_authorization(identity.operation_id)
             self.flow_worker.release_lease(token)
             self._manual_lease_token = None
             self._manual_supply_identity = None
@@ -3818,7 +3851,7 @@ class MainController(QObject):
         configuration_block = self._configuration_runtime_block_reason()
         if configuration_block:
             readiness_reason = configuration_block
-        elif not self.simulation_mode:
+        elif not self.simulation_mode and not self.real_supply_policy.enabled:
             readiness_reason = "真实硬件尚未授权"
         elif not self.state.telemetry.connected:
             readiness_reason = "设备尚未连接"
@@ -3864,6 +3897,7 @@ class MainController(QObject):
             can_apply_flow=ready and idle and holder is DeviceLeaseKind.IDLE,
             can_release=(
                 ready
+                and self.simulation_mode
                 and idle
                 and holder is DeviceLeaseKind.IDLE
                 and bool(selected)

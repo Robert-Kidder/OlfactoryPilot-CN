@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import abc
+import math
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
@@ -16,6 +17,64 @@ class AnalogInputFrame:
     ai_epoch: int = 0
     sample_sequence: int = 0
     origin_uncertainty_ns: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class FlowChannelReadback:
+    channel: str
+    unit_id: str
+    setpoint_sccm: float
+    mass_flow_sccm: float
+    gas: str
+    wall_timestamp: float
+    monotonic_ns: int
+    raw_frame: str
+    fresh: bool = True
+
+    def __post_init__(self) -> None:
+        channel = str(self.channel).upper()
+        if channel not in {"A", "B", "C"}:
+            raise ValueError("flow readback channel 必须为 A/B/C。")
+        if not str(self.unit_id).strip() or not str(self.gas).strip():
+            raise ValueError("flow readback 必须包含 unit ID 与 gas。")
+        for value, label in (
+            (self.setpoint_sccm, "setpoint"),
+            (self.mass_flow_sccm, "mass flow"),
+            (self.wall_timestamp, "wall timestamp"),
+        ):
+            if isinstance(value, bool) or not math.isfinite(float(value)):
+                raise ValueError(f"flow readback {label} 必须是有限数值。")
+        if type(self.monotonic_ns) is not int or self.monotonic_ns <= 0:
+            raise ValueError("flow readback monotonic timestamp 必须是正整数。")
+        if type(self.fresh) is not bool:
+            raise ValueError("flow readback fresh 必须是 boolean。")
+        object.__setattr__(self, "channel", channel)
+
+
+@dataclass(frozen=True, slots=True)
+class FlowReadbackSnapshot:
+    readings: tuple[FlowChannelReadback, ...]
+    wall_timestamp: float
+    monotonic_ns: int
+    fresh: bool = True
+
+    def __post_init__(self) -> None:
+        readings = tuple(self.readings)
+        if tuple(item.channel for item in readings) != ("A", "B", "C"):
+            raise ValueError("flow snapshot 必须按 A→B→C 包含三路 readback。")
+        if type(self.monotonic_ns) is not int or self.monotonic_ns <= 0:
+            raise ValueError("flow snapshot monotonic timestamp 必须是正整数。")
+        if isinstance(self.wall_timestamp, bool) or not math.isfinite(
+            float(self.wall_timestamp)
+        ):
+            raise ValueError("flow snapshot wall timestamp 必须是有限数值。")
+        if type(self.fresh) is not bool:
+            raise ValueError("flow snapshot fresh 必须是 boolean。")
+        object.__setattr__(self, "readings", readings)
+
+    @property
+    def by_channel(self) -> dict[str, FlowChannelReadback]:
+        return {reading.channel: reading for reading in self.readings}
 
 
 @dataclass(frozen=True)
@@ -94,6 +153,16 @@ class HalInterface(Protocol):
 
     def read_flow(self) -> float:
         """读取气流传感器值（sccm 单位）。"""
+
+    def read_flow_snapshot(self) -> FlowReadbackSnapshot:
+        """由当前 serial owner 串行读取 A/B/C 完整 Poll snapshot。"""
+
+    @property
+    def serial_desynchronized(self) -> bool:
+        """当前 serial session 是否已失去响应归属。"""
+
+    def last_setpoint_tx_monotonic_ns(self, channel: str) -> int | None:
+        """返回当前 session 内该通道最近一次 setpoint TX 的单调时戳。"""
 
     def set_flow(self, channel: str, value: float, *, comp: bool = False) -> bool:
         """设置指定通道的目标流量。

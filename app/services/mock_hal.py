@@ -6,7 +6,13 @@ import time
 from collections.abc import Callable
 
 from app.models import SelfCheckResult
-from app.services.hal import AnalogInputFrame, DigitalWriteAck, HalBase
+from app.services.hal import (
+    AnalogInputFrame,
+    DigitalWriteAck,
+    FlowChannelReadback,
+    FlowReadbackSnapshot,
+    HalBase,
+)
 
 
 class MockHAL(HalBase):
@@ -29,6 +35,12 @@ class MockHAL(HalBase):
         self._flow = float(base_flow_sccm)
         self.flow_commands: list[tuple[str, float, bool]] = []
         self._setpoint_readbacks_sccm: dict[str, float] = {}
+        self._mass_flows_sccm: dict[str, float] = {
+            "A": float(base_flow_sccm),
+            "B": 0.0,
+            "C": 0.0,
+        }
+        self._setpoint_tx_monotonic_ns: dict[str, int] = {}
         self.fail_on: set[str] = set()
         self.master_events: list[tuple[str, bool]] = []
         self._ttl_level = 0.0
@@ -75,6 +87,35 @@ class MockHAL(HalBase):
     def read_flow(self) -> float:
         return float(self._flow)
 
+    def read_flow_snapshot(self) -> FlowReadbackSnapshot:
+        wall_timestamp = time.time()
+        readings = []
+        for channel, unit_id in (("A", "a"), ("B", "b"), ("C", "c")):
+            monotonic_ns = int(self._monotonic_ns_clock())
+            readings.append(
+                FlowChannelReadback(
+                    channel=channel,
+                    unit_id=unit_id,
+                    setpoint_sccm=self._setpoint_readbacks_sccm.get(channel, 0.0),
+                    mass_flow_sccm=self._mass_flows_sccm.get(channel, 0.0),
+                    gas="Air",
+                    wall_timestamp=wall_timestamp,
+                    monotonic_ns=monotonic_ns,
+                    raw_frame=f"{unit_id} mock",
+                    fresh=True,
+                )
+            )
+        return FlowReadbackSnapshot(
+            readings=tuple(readings),
+            wall_timestamp=wall_timestamp,
+            monotonic_ns=readings[-1].monotonic_ns,
+            fresh=True,
+        )
+
+    @property
+    def serial_desynchronized(self) -> bool:
+        return False
+
     def set_flow(self, channel: str | float, value: float | None = None, *, comp: bool = False) -> bool:
         # Backward compatibility: allow set_flow(value) signature.
         if value is None:
@@ -88,10 +129,18 @@ class MockHAL(HalBase):
             return False
         self._flow = float(value)
         self._setpoint_readbacks_sccm[channel] = float(value)
+        self._mass_flows_sccm[channel] = float(value)
+        self._setpoint_tx_monotonic_ns[channel] = int(self._monotonic_ns_clock())
         return True
 
     def last_setpoint_readback_sccm(self, channel: str) -> float | None:
         return self._setpoint_readbacks_sccm.get(str(channel).upper())
+
+    def last_setpoint_tx_monotonic_ns(self, channel: str) -> int | None:
+        return self._setpoint_tx_monotonic_ns.get(str(channel).upper())
+
+    def set_mass_flow_readback(self, channel: str, value_sccm: float) -> None:
+        self._mass_flows_sccm[str(channel).upper()] = float(value_sccm)
 
     def write_digital(self, *, device: str | None, line: str, state: bool) -> bool:
         key = f"{device}/{line}" if device else line

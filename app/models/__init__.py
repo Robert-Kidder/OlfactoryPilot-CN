@@ -23,6 +23,14 @@ from .cleaning import (
     CleaningViewSnapshot,
     normalize_cleaning_target,
 )
+from .flow_commissioning import (
+    CommissioningApprovedMaxima,
+    CommissioningMonitorResult,
+    CommissioningMonitorStatus,
+    FlowDeviceCapacities,
+    FlowSettlingMonitor,
+    RealSupplyPolicy,
+)
 from .hardware_profile import (
     HARDWARE_PROFILE_SCHEMA_VERSION,
     ChannelDescriptor,
@@ -124,6 +132,8 @@ __all__ = [
     "DeviceLeaseToken",
     "ExclusiveDeviceLease",
     "FlowSetpoints",
+    "FlowDeviceCapacities",
+    "FlowSettlingMonitor",
     "HARDWARE_PROFILE_SCHEMA_VERSION",
     "HardwareConnectionConfig",
     "HardwareProfile",
@@ -140,6 +150,9 @@ __all__ = [
     "ManualExperimentStatus",
     "ManualSupplyIntent",
     "ManualValveTarget",
+    "CommissioningMonitorResult",
+    "CommissioningMonitorStatus",
+    "CommissioningApprovedMaxima",
     "MaintenanceDescriptor",
     "MaintenancePaths",
     "MaintenanceProducerFence",
@@ -157,6 +170,7 @@ __all__ = [
     "SafeStopPlan",
     "SafeStopStatus",
     "ProducerFence",
+    "RealSupplyPolicy",
     "PhysicalVerificationContract",
     "PhysicalVerificationOutcome",
     "PhysicalVerificationPlan",

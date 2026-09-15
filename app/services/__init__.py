@@ -10,6 +10,8 @@ from .hal import (  # noqa: F401
     BreathSample,
     BreathSampleBatch,
     DigitalWriteAck,
+    FlowChannelReadback,
+    FlowReadbackSnapshot,
     HalBase,
     HalInterface,
 )
@@ -64,6 +66,8 @@ __all__ = [
     "BreathSample",
     "BreathSampleBatch",
     "DigitalWriteAck",
+    "FlowChannelReadback",
+    "FlowReadbackSnapshot",
     "HardwareCheckService",
     "HardwareProfileStore",
     "MockHAL",

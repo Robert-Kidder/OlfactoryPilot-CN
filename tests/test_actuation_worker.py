@@ -18,6 +18,11 @@ from app.models import (
     AppState,
     AZeroReceipt,
     DeviceLeaseKind,
+    FlowSetpoints,
+    ManualExperimentIdentity,
+    ManualExperimentPlan,
+    ManualExperimentSnapshot,
+    ManualExperimentStatus,
     ProtocolDocument,
     ProtocolExecutionReadiness,
     ProtocolExecutionState,
@@ -1840,7 +1845,15 @@ def test_abnormal_stop_uses_a_zero_receipt_before_selector_and_odor_closes() -> 
     worker.post_flow_result(
         FlowCommandResult(
             command=flows.pop(),
-            result=FlowApplyResult(True, "A=0", 0, 0, 0, 0),
+            result=FlowApplyResult(
+                True,
+                "A=0",
+                0,
+                0,
+                0,
+                0,
+                a_setpoint_readback_sccm=0.0,
+            ),
         )
     )
     worker.process_ready()
@@ -1854,7 +1867,18 @@ def test_abnormal_stop_uses_a_zero_receipt_before_selector_and_odor_closes() -> 
     worker.post_flow_result(
         FlowCommandResult(
             command=flows.pop(),
-            result=FlowApplyResult(True, "A/B/C=0", 0, 0, 0, 0),
+            result=FlowApplyResult(
+                True,
+                "A/B/C=0",
+                0,
+                0,
+                0,
+                0,
+                a_setpoint_readback_sccm=0.0,
+                b_setpoint_readback_sccm=0.0,
+                c_setpoint_readback_sccm=0.0,
+                zero_confirmed=True,
+            ),
         )
     )
     worker.process_ready()
@@ -1914,6 +1938,109 @@ def test_abnormal_stop_stale_a_zero_requires_recovery_without_selector() -> None
     assert "RECOVERY_REQUIRED" in state.quality_block_reason
 
 
+@pytest.mark.parametrize("readback", [None, 0.001])
+def test_abnormal_stop_rejects_unconfirmed_a_zero_before_selector(readback) -> None:
+    clock = FakeClock()
+    calls = []
+    flows = []
+
+    def writer(command):
+        calls.append(command)
+        return ActuationReceipt.from_write(
+            command=command,
+            started_ns=clock.value,
+            actual_ns=clock.value,
+            wall_timestamp=10.0,
+            result=ActuationResult.SUCCESS,
+        )
+
+    worker, state, _ = _worker(clock, writer)
+    worker.valve_service = _configured_valve_service()
+    worker._flow_submitter = lambda command: flows.append(command) or True
+    worker.invalidate_execution(reason="unconfirmed A zero", close_all_configured=True)
+
+    worker.post_flow_result(
+        FlowCommandResult(
+            command=flows.pop(),
+            result=FlowApplyResult(
+                True,
+                "A=0 command accepted",
+                0,
+                0,
+                0,
+                0,
+                a_setpoint_readback_sccm=readback,
+            ),
+        )
+    )
+    worker.process_ready()
+
+    assert all(command.valve != 0 for command in calls)
+    assert worker._background_safe_stop_plan.status.value == "recovery_required"
+    assert "readback" in worker._background_safe_stop_plan.recovery_reason
+    assert "RECOVERY_REQUIRED" in state.quality_block_reason
+
+
+def test_commissioning_preclose_requires_all_authorized_readbacks_before_selector() -> None:
+    clock = FakeClock()
+    writes = []
+    flows = []
+    worker, _state, _ingress = _worker(clock, writes.append)
+    worker.valve_service = _configured_valve_service()
+    worker._flow_submitter = lambda command: flows.append(command) or True
+    identity = ManualExperimentIdentity("commissioning-preclose", 1, 1)
+    plan = ManualExperimentPlan.for_supply(
+        identity=identity,
+        flow_setpoints=FlowSetpoints(500.0, 0.0, 0.0),
+        selector=SelectorConfig("Dev2/P1.0"),
+        requires_commissioning_settling=True,
+    )
+    command = FlowCommand(
+        "manual-zero-a-commissioning",
+        1,
+        1,
+        "manual_post_close_a_zero",
+        0.0,
+        0.0,
+        0.0,
+        "manual:experiment",
+        operation_id=identity.operation_id,
+        generation=identity.generation,
+        lease_token="manual-token",
+    )
+    worker._manual_plan = plan
+    worker._manual_snapshot = ManualExperimentSnapshot(
+        status=ManualExperimentStatus.ZEROING_A,
+        identity=identity,
+    )
+    worker._manual_pending_flow_id = command.command_id
+    worker._manual_pending_flow_command = command
+    worker._manual_pending_flow_role = "post_close_zero"
+    worker._manual_flow_deadline_ns = clock.value + 1_000_000
+
+    worker._consume_manual_flow_result(
+        FlowCommandResult(
+            command=command,
+            result=FlowApplyResult(
+                True,
+                "requested values only",
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                a_setpoint_readback_sccm=0.0,
+                b_setpoint_readback_sccm=1.001,
+                c_setpoint_readback_sccm=0.0,
+            ),
+        ),
+        received_ns=clock.value,
+    )
+
+    assert worker.manual_snapshot.status is ManualExperimentStatus.RECOVERY_REQUIRED
+    assert "readback" in worker.manual_snapshot.recovery_reason
+    assert writes == []
+
+
 def test_abnormal_stop_rejects_flow_receipt_with_mutated_full_identity() -> None:
     clock = FakeClock()
     valve_service = _configured_valve_service()
@@ -1939,7 +2066,15 @@ def test_abnormal_stop_rejects_flow_receipt_with_mutated_full_identity() -> None
     worker.post_flow_result(
         FlowCommandResult(
             command=replace(expected, source="manual"),
-            result=FlowApplyResult(True, "A=0", 0, 0, 0, 0),
+            result=FlowApplyResult(
+                True,
+                "A=0",
+                0,
+                0,
+                0,
+                0,
+                a_setpoint_readback_sccm=0.0,
+            ),
         )
     )
     worker.process_ready()
@@ -1987,7 +2122,15 @@ def test_abnormal_stop_missing_selector_still_confirms_a_zero_before_odors() -> 
     worker.post_flow_result(
         FlowCommandResult(
             command=flows.pop(),
-            result=FlowApplyResult(True, "A=0", 0, 0, 0, 0),
+            result=FlowApplyResult(
+                True,
+                "A=0",
+                0,
+                0,
+                0,
+                0,
+                a_setpoint_readback_sccm=0.0,
+            ),
         )
     )
     worker.process_ready()
@@ -2932,7 +3075,15 @@ def test_protocol_stop_uses_a_zero_before_selector_then_odors_and_final_zero() -
     worker.post_flow_result(
         FlowCommandResult(
             command=flows.pop(),
-            result=FlowApplyResult(True, "A=0", 0, 0, 0, 0),
+            result=FlowApplyResult(
+                True,
+                "A=0",
+                0,
+                0,
+                0,
+                0,
+                a_setpoint_readback_sccm=0.0,
+            ),
         )
     )
     worker.process_ready()
@@ -2946,7 +3097,18 @@ def test_protocol_stop_uses_a_zero_before_selector_then_odors_and_final_zero() -
     worker.post_flow_result(
         FlowCommandResult(
             command=flows.pop(),
-            result=FlowApplyResult(True, "A/B/C=0", 0, 0, 0, 0),
+            result=FlowApplyResult(
+                True,
+                "A/B/C=0",
+                0,
+                0,
+                0,
+                0,
+                a_setpoint_readback_sccm=0.0,
+                b_setpoint_readback_sccm=0.0,
+                c_setpoint_readback_sccm=0.0,
+                zero_confirmed=True,
+            ),
         )
     )
     worker.process_ready()

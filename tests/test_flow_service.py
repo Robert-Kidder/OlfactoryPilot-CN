@@ -66,10 +66,11 @@ def test_partial_failure_rolls_back_previous_channels():
     result = service.apply_rest(a_target=1.0, b_target=2.0, c_target=3.0)
 
     assert result.success is False
-    # Calls: B success, C fails, rollback B -> 0.0
+    # C may have changed before returning false, so rollback includes C and B.
     assert hal.calls == [
         ("B", 2.0, False),
         ("C", 3.0, False),
+        ("C", 0.0, False),
         ("B", 0.0, False),
     ]
 
@@ -101,3 +102,31 @@ def test_apply_zero_sets_all_channels_to_zero_without_comp():
         ("C", 0.0, False),
         ("A", 0.0, False),
     ]
+    assert result.zero_confirmed is False
+
+
+def test_apply_zero_requires_all_three_actual_setpoint_readbacks() -> None:
+    hal = MockHAL()
+    confirmed = FlowService(hal).apply_zero()
+    assert confirmed.success
+    assert confirmed.zero_confirmed
+
+    class MissingReadbackHAL(MockHAL):
+        def last_setpoint_readback_sccm(self, channel: str) -> float | None:
+            if channel == "C":
+                return None
+            return super().last_setpoint_readback_sccm(channel)
+
+    missing = FlowService(MissingReadbackHAL()).apply_zero()
+    assert missing.success
+    assert missing.zero_confirmed is False
+
+    class OutOfToleranceHAL(MockHAL):
+        def last_setpoint_readback_sccm(self, channel: str) -> float | None:
+            if channel == "B":
+                return 0.001
+            return super().last_setpoint_readback_sccm(channel)
+
+    out_of_tolerance = FlowService(OutOfToleranceHAL()).apply_zero()
+    assert out_of_tolerance.success
+    assert out_of_tolerance.zero_confirmed is False

@@ -2,16 +2,17 @@
 title: C.3b-4 非零气流与补偿气路 commissioning
 type: commissioning-spec
 created: 2026-09-15
-status: ready-for-dev
-route: investigate-and-spec-only
-context: C.3b-3 严格真实验收已通过；本规格尚未授权任何新实机动作
+status: done
+route: offline-implementation
+context: []
+baseline_commit: 5ef6500e942ef6e310d5f2ddc392cf2d270b7806
 ---
 
 # C.3b-4 非零气流与补偿气路 commissioning
 
 ## 意图与边界
 
-本阶段逐级确认洁净 Air 的非零 Alicat 设定、独立回读、实际流量稳定，以及开放的补偿出口。一次只增加一个物理变量；每个实机子阶段都以全部清零、selector 回 COMPENSATION、20 个气味阀关闭、Global Stop 安全收口和资源释放为退出门。当前仅调查和规划；本规格批准前及后续单独实机授权前，**不启动 Real App、不写非零 setpoint、不切 selector、不操作气味阀**。非零流量不与 odor selector HIGH 或气味阀操作组合。
+本阶段逐级确认洁净 Air 的非零 Alicat 设定、独立回读、实际流量稳定，以及开放的补偿出口。一次只增加一个物理变量；每个实机子阶段都以全部清零、selector 回 COMPENSATION、20 个气味阀关闭、Global Stop 安全收口和资源释放为退出门。当前批准范围仅为第 0 阶段离线代码整改、Fake/Mock、review 和验证；后续单独实机授权前，**不启动 Real App 实机、不写非零 setpoint、不切真实 selector、不操作真实气味阀**。非零流量不与 odor selector HIGH 或气味阀操作组合。
 
 **分级审批门禁**：本轮只能审批规格方向，**尚不能批准任何非零实机 HIL**。首个 **A-only、B=C=0** 子阶段受真实“开始供气”代码拒绝、A 当前身份/500 sccm 可控范围、A 入口压力及调压状态、洁净 Air 与 LOW 补偿出口实物通路、测试上限/最长时长及 settling 验收值阻断。B/C 量程未知，因此不授权其非零设定；若 B/C 的设定值和实际流量均独立回读为零，这一缺口不单独阻断 A-only 阶段。后续 **完整 baseline** 额外受 B/C 量程、B 主气流通路、C 吸气路径及 C>0/A=0 瞬态门禁阻断。详细待确认项见末节。
 
@@ -21,7 +22,7 @@ context: C.3b-3 严格真实验收已通过；本规格尚未授权任何新实�
 
 用户独立输入 A=sample flow、B=main flow、C=vacuum flow；total delivery=A+B。baseline/restore 的 controller targets 为 **A-controller=A+C，B-controller=B，C-controller=C**；stimulus 为 **A-controller=A，B-controller=B，C-controller=0**。B 全程保持用户设定，不恢复旧的 editable total / B=T−A 模型。[长期规则](../project-context.md)、[气路历史证据](evidence/gas-path-requirements-2026-08-01.md)。当前 `ActuationWorker` 的 baseline/stimulus/restore 按此生成目标；`FlowService` 保持 B→C→A 写入顺序。
 
-真实 UI 的“开始供气”目前被 `MainController.handle_manual_supply_requested()` 的 `not simulation_mode` 门禁明确拒绝。不能用旧的 `handle_apply_request`、脚本或直接 HAL 调用绕过。后续需要先做独立的离线产品授权整改、量程校验与 fake/Mock regression，再申请具体实机动作；**本轮不改产品代码**。
+真实 UI 的“开始供气”目前被 `MainController.handle_manual_supply_requested()` 的 `not simulation_mode` 门禁明确拒绝。不能用旧的 `handle_apply_request`、脚本或直接 HAL 调用绕过。本轮获准只通过该权威入口完成离线门禁整改、量程/settling/hold 校验和 Fake/Mock regression；不得借整改执行或授权任何真实命令。
 
 ## 设备量程与上限事实
 
@@ -66,7 +67,22 @@ PASS 只可基于：目标及回读一致、连续新鲜实际流量在批准容
 
 新 evidence 必须留存每个 command target/response、独立 Poll raw frame 与解析值、mass-flow 样本和 settling 时戳、Controller phase、现场观察、每次 zero/Global Stop 的 exact receipts、DO/serial release、最终 Poll/LSS、异常与操作者停机记录；历史 C.3b-3 PASS 与早期 FAIL 不改写。Mock/Fake 和 simulation 只作离线保障，不作非零实机证据。
 
-审批 A-only 前需确认：① 通过可查看的铭牌/面板或可信现场记录确认当前 A 型号/序列号/量程及 500 sccm 可控性；不强制新增多帧 manufacturer-info；② 本机允许入口压力、当前现场压力/调压器状态、预期洁净 Air、实物 LOW 入口 2→出口 3 及出口畅通，**压力任何一项无法确认即 BLOCKED**；③ 首轮 requested、accepted/readback、measured mass-flow 三类容差、连续样本数、settling 窗口/期限与最长非零持续时间，全部实机前离线定稿；④ 真实“开始供气”门禁、唯一 owner 采样、desync fail-closed 与容量门禁离线整改通过复审。B/C 零设定和零实际流量要独立回读。审批完整 baseline 额外需要 B/C 型号/满量程/允许值、B 主气流出口/压力边界、C 吸气路径及 C>0/A=0 瞬态安全证明。**相应门禁未解决时，该子阶段非零实机 HIL BLOCKED。** 本轮到 spec approval 即停止，等待 `Approve / Edit`；批准规格本身仍不等于批准任一真实硬件命令。
+审批 A-only 前需确认：① 通过可查看的铭牌/面板或可信现场记录确认当前 A 型号/序列号/量程及 500 sccm 可控性；不强制新增多帧 manufacturer-info；② 本机允许入口压力、当前现场压力/调压器状态、预期洁净 Air、实物 LOW 入口 2→出口 3 及出口畅通，**压力任何一项无法确认即 BLOCKED**；③ 首轮 requested、accepted/readback、measured mass-flow 三类容差、连续样本数、settling 窗口/期限与最长非零持续时间，全部实机前离线定稿；④ 真实“开始供气”门禁、唯一 owner 采样、desync fail-closed 与容量门禁离线整改通过复审。B/C 零设定和零实际流量要独立回读。审批完整 baseline 额外需要 B/C 型号/满量程/允许值、B 主气流出口/压力边界、C 吸气路径及 C>0/A=0 瞬态安全证明。**相应门禁未解决时，该子阶段非零实机 HIL BLOCKED。** 当前离线实现完成后立即停止；规格批准与代码就绪均不等于批准任一真实硬件命令。
+
+## Tasks & Acceptance
+
+第 0 阶段离线默认值冻结为：requested setpoint tolerance=`1e-9 sccm`（软件 intent 数值一致性）；accepted/readback tolerance=`1.0 sccm`（不沿用约 50 sccm 的旧默认）；active measured mass-flow stability tolerance=`±25 sccm`，zero-channel tolerance=`≤5 sccm`；连续有效样本数=`6` 且首末样本覆盖至少 `1.0 s`；maximum settling deadline=`5.0 s`；maximum non-zero hold duration=`15.0 s`，从首个非零 TX 单调时戳起算。500 sccm 下 family-level 标准精度量级约为 ±5 sccm（±0.6% reading 与 ±0.1% FS 取较大），±25 sccm 是只用于首轮 commissioning 的保守稳定带，不冒充本机校准精度。所有值必须进入结构化、默认禁用的 Real supply policy；现场资料或人工批准改变数值时，须在实机前离线改配置并重跑边界测试，运行中不可修改。当前 policy 必须保持 `enabled=false`，所以本轮代码不会授权 500 sccm。
+
+- [x] **真实供气权威入口与容量门禁**（`app/controllers/main_controller.py`、配置/模型及对应测试）：移除 Real 模式 blanket rejection，但只允许唯一 Controller→Worker→HAL transaction。A/B/C 设备容量以明确配置表达，未知容量的通道只允许 0；A target 必须校验 baseline 的 A+C，B/C 非零分别要求已知容量；A=500/B=C=0 不硬编码为自动动作。
+  - Given Real 已连接且容量配置 A=5000、B/C 未知，When 请求 500/0/0，Then 仅提交一次现有 supply-only plan；When B或C>0，Then 零硬件提交并返回明确门禁失败；When A+C>5000，Then 零硬件提交。
+- [x] **三路可信实际流量采样**（`app/workers/flow_worker.py`、`app/services/real_hal.py`/协议接口及测试）：连接状态下仅 FlowWorker 串行采集 A/B/C 的完整 Poll readback，发布带 unit、setpoint、mass flow、freshness/monotonic timestamp 的快照；不得创建第二个 serial session。
+  - Given 一个已连接 serial owner，When 采集三路，Then A→B→C transaction 严格串行且只使用同一 owner；任一 timeout/partial/mismatch/desync 时不发布伪造的 0 或 fresh-ready。
+- [x] **三类 tolerance 与 settling/hold 门禁**（配置、worker/controller 状态机及测试）：分别定义 requested setpoint、accepted/readback、measured mass-flow stability tolerance；定义连续有效样本数、settling observation window、maximum settling deadline、maximum non-zero hold duration。值必须可审计且在首个非零 TX 前冻结；最大持流从首个非零 TX 单调时戳起算并触发既有 Global Stop/SafeStop，不恢复旧动作。
+  - Given 边界内/外样本、过时样本、deadline 与 hold timeout，When 状态机评估，Then 仅连续新鲜三路证据满足全部门槛时确认稳定；超限只触发一次 fail-closed，不能升流量、retry 或延长时限。
+- [x] **serial desync fail-closed**（`app/services/flow_service.py`、FlowWorker/Controller 及测试）：transport desync latch 后，rollback、zero、Global Stop 不得在同一 session 新 TX 或宣称归零成功；上报零流量无法确认并进入需要现场停止/断电的安全状态。
+  - Given 任一通道 transaction desync，When rollback 或安全停止开始，Then serial TX count 不增加、zero receipt 为 uncertain/failed、`recovery_required=True`，并保留既有 digital safe-stop 偏序。
+- [x] **范围保护与离线验证**：不改 B→C→A、Global Stop 偏序、NI lifecycle、HardwareProfile mapping/polarity、普通 UI 文案；补齐 Fake/Mock regression，运行 Ruff、定向测试、完整 pytest、PyInstaller 和 simulation smoke，且不访问真实硬件。
+  - Given Fake/Mock 与 simulation，When 验证完成，Then 覆盖上述成功/边界/失败路径且 0 failure；repository 搜索不存在 Real supply 旁路或第二 serial owner。
 
 ## 依据
 
@@ -74,3 +90,40 @@ PASS 只可基于：目标及回读一致、连续新鲜实际流量在批准容
 - [C.3b-3 最终严格真实零流量验收](evidence/c-3b-final-real-connect-global-stop-2026-09-15.md)
 - [Story 4.5 A 设备身份历史只读回报](evidence/story-4-5-hil-normal-20260818/preflight.json)
 - [待办：Alicat readback 容差/zero receipt](deferred-work.md)
+
+## Review Triage Log
+
+| Finding | Verdict | Route | Evidence |
+| --- | --- | --- | --- |
+| VG-1 B/C 零目标越界实际流量缺少测试 | medium | patch | `FlowSettlingMonitor` 有门禁但原测试只覆盖边界值；已补 B、C 各自越界至 settling deadline 的回归。 |
+| VG-2 accepted/readback mismatch 缺少拒绝路径测试 | high | patch | `_apply_real_supply_receipt_gate()` 是非零命令后的关键门禁；已补超出 1.0 sccm 时不创建 monitor 且 `recovery_required=True` 的回归。 |
+| VG-3 ActuationWorker 缺少未确认 A=0 的负向测试 | high | patch | 背景 SafeStop 必须拒绝缺失/非零实际读回；已补 selector 不得前进并进入 recovery 的回归。 |
+| EC-1 容量边缘使用 requested tolerance 放宽 | medium | patch | “未知容量只允许 0、不得越过真实容量/批准上限”是严格门禁；边界比较不应借 intent identity tolerance 放宽。 |
+| EC-2 stale/out-of-order snapshot 不清空连续样本 | medium | patch | 当前 early return 保留旧有效样本，违反“连续新鲜样本”要求。 |
+| EC-3 相同 restore 可在授权消费前重复入队 | high | patch | submit 与执行前均检查但首个执行后 authorization 变为 `None`，第二条会落入普通 manual 放行路径。 |
+| EC-4 authorization cancel 与 receipt gate 存在竞态 | high | patch | receipt gate 未持 `_condition`；cancel 可在读取 authorization 后清除，随后 monitor 被重新建立。 |
+| EC-5 无 airflow sink 时 monitor 不轮询 | high | patch | run loop 和 `_poll_airflow()` 都以 sink 为前提，可能使 maximum hold 无法执行。 |
+| BH-1 enabled 配置省略容量/批准上限时使用默认值 | false | reject | 正式应用先合并版本化 default config；A=5000 与 A-only 上限 500 是本阶段冻结配置，`enabled=false` 才是实机授权门。仍补 parser 负向校验，避免原始畸形输入被吞掉。 |
+| BH-2 falsey 非 Mapping 被 `or {}` 吞掉 | medium | patch | `[]`、空字符串、0 会被当成缺省对象，削弱配置验证。 |
+| BH-3 缺少身份/压力/Air/通路逐项布尔 attestation | false | reject | 这些是下一轮明确的现场人工门禁；唯一 `enabled` 是本地、默认关闭且需单独改动的总体授权门，不是普通 UI 设置。本轮不把现场清单扩成产品配置框架。 |
+| BH-4 `manual_post_close_a_zero` 未采用 commissioning 严格读回 | high | patch | 当前仅 restore 使用 1.0 sccm 门禁，pre-close 可能依据较宽 legacy setpoint tolerance 前进 selector。 |
+| BH-5 未来 B/C 非零会在 monitor 前运行 | false | reject | 当前批准上限固定 B=0、C=0，任何 B/C 非零在 Controller 提交前被拒；未来改变上限必须另行规格与验证。 |
+| BH-6 polling 可因 sink/队列而错过 deadline | high | patch | monitor 目前依赖 sink且普通队列优先于 poll；active monitor 应独立驱动并优先检查 deadline。 |
+| BH-7 evaluator 用 snapshot 时刻且先 emit snapshot | medium | patch | DirectConnection subscriber 可延迟评估；生产路径应先按当前单调时钟评估，再发布快照。 |
+| BH-8 commissioning failure signal 被拒时 FlowWorker 不直接停机 | false | reject | 已连接生命周期保证 ActuationWorker 为接受状态且 DirectConnection 只做 owner mailbox ingress；若唯一动作 owner 已停止，FlowWorker 不得越权直接执行 SafeStop。 |
+| BH-9 ActuationWorker 无第二套 hold timer | false | reject | hold 的唯一权威时基属于首个 serial TX，FlowWorker 在 bounded poll transaction 上执行；复制一套 ActuationWorker timer 会制造两个互相漂移的安全时钟。 |
+| BH-10 stale/duplicate/out-of-order 不打断连续样本 | medium | patch | 与 EC-2 同位置但独立审查结论；必须清空累计样本。 |
+| BH-11 settling 未检查 gas=Air | high | patch | 本阶段只批准洁净 Air；非空但错误 gas 不能通过稳定门禁。 |
+| BH-12 final A/B/C zero 使用请求值而非三路读回 | high | patch | `zero_all_for_safe_stop()` 目前检查 `result.a/b/c`，`zero_confirmed` 也由请求值计算，不能证明设备设定已归零。 |
+| BH-13 AuthorizedHAL 未转发 snapshot/desync/TX timestamp | medium | patch | 该受权代理包装 HAL 后会退回单通道或丢失 desync/TX 时基，违反新增协议接口。 |
+| BH-14 commissioning evidence 没有持久可捕获的三路样本细节 | medium | patch | 当前 signal 无 production consumer，状态日志也不含 raw frame、setpoint、mass flow 与 sample timestamp；下一轮 HIL 缺直接证据。 |
+| Root-1 setpoint command 失败时 rollback 漏掉当前通道 | high | patch | A 非零命令若合法响应但读回不匹配，旧代码只清零先前成功通道，未尝试清零当前可能已受影响通道；健康同步 session 下必须把当前通道纳入有回执的 rollback。 |
+
+## 离线实现与验证结果
+
+- 实现保持 `Controller → ActuationWorker/FlowWorker → HAL`、MANUAL lease、exact receipt 与既有 SafeStop；Real “开始供气”只有默认关闭的 `real_supply_policy.enabled` 明确启用且冻结目标通过容量/批准上限校验后，才会把一次性授权绑定到同一 operation/generation。
+- `FlowWorker` 是连接会话内唯一 Alicat owner；三路 A→B→C Poll 使用同一 `RealHAL` / `AlicatSerialSession`，快照包含 unit、setpoint、mass flow、gas、freshness 与单调时戳。commissioning monitor 不依赖 UI sink，且优先于普通命令队列检查 settling/hold deadline。
+- serial timeout、partial、mismatch 或 desync 不发布伪造零流量；desync latch 后 rollback/zero 零新增 TX，并将零流量标记为无法确认、要求现有 fail-closed / 现场停止或断电路径。
+- 独立 review 共登记 23 项 finding：17 项修补，6 项因超范围、破坏唯一硬件 owner 或重复安全时基而有证据拒绝；详见上表。补强包括严格容量边界、连续样本失效重置、授权消费/取消竞态、三路实际读回安全收口、Air 校验及低频结构化样本审计。
+- 2026-09-15 离线验证：定向回归 `246 passed`；完整 `pytest` 为 `1427 passed, 1 skipped`；`python -m ruff check .`、`git diff --check`、PyInstaller 构建和 offscreen Mock simulation 均通过。既有 Python GC `ResourceWarning` 已记录在 deferred work；Mock/Fake PASS 不构成真实非零硬件证据。
+- 全程未打开 COM6、未创建真实 NI task、未启动 Real App 实机、未向 Alicat 写入 setpoint，也未切换真实 selector 或气味阀。`A=500, B=C=0` 仍只是下一轮候选，必须通过本文现场门禁并获得单独人工授权。

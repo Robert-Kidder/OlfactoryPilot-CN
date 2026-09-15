@@ -112,6 +112,7 @@ class ManualExperimentPlan:
     targets: tuple[ManualValveTarget, ...]
     duration_ns: int
     supply_only: bool = False
+    requires_commissioning_settling: bool = False
 
     def __post_init__(self) -> None:
         if not isinstance(self.identity, ManualExperimentIdentity):
@@ -122,6 +123,10 @@ class ManualExperimentPlan:
             raise ValueError("manual selector 类型无效。")
         if type(self.supply_only) is not bool:
             raise ValueError("manual supply_only 必须是 boolean。")
+        if type(self.requires_commissioning_settling) is not bool:
+            raise ValueError("manual requires_commissioning_settling 必须是 boolean。")
+        if self.requires_commissioning_settling and not self.supply_only:
+            raise ValueError("commissioning settling 只允许用于 supply-only 计划。")
         if not self.targets and not self.supply_only:
             raise ValueError("manual 刺激至少选择一个可用机外气口。")
         if self.targets and self.supply_only:
@@ -187,6 +192,7 @@ class ManualExperimentPlan:
         identity: ManualExperimentIdentity,
         flow_setpoints: FlowSetpoints,
         selector: SelectorConfig,
+        requires_commissioning_settling: bool = False,
     ) -> ManualExperimentPlan:
         return cls(
             identity=identity,
@@ -195,6 +201,7 @@ class ManualExperimentPlan:
             targets=(),
             duration_ns=1,
             supply_only=True,
+            requires_commissioning_settling=requires_commissioning_settling,
         )
 
 

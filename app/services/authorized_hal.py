@@ -9,7 +9,7 @@ from dataclasses import asdict, dataclass
 from typing import Any
 
 from app.models import normalize_digital_target
-from app.services.hal import DigitalWriteAck
+from app.services.hal import DigitalWriteAck, FlowReadbackSnapshot
 
 
 class AuthorizationViolation(RuntimeError):
@@ -204,6 +204,32 @@ class AuthorizedHAL:
 
     def read_flow(self) -> float:
         return float(self._delegate.read_flow())
+
+    def read_flow_snapshot(self) -> FlowReadbackSnapshot:
+        """Forward read-only three-channel evidence without consuming a write."""
+        snapshot = self._delegate.read_flow_snapshot()
+        if not isinstance(snapshot, FlowReadbackSnapshot):
+            raise TypeError("delegate returned an invalid flow snapshot")
+        return snapshot
+
+    @property
+    def serial_desynchronized(self) -> bool:
+        return bool(getattr(self._delegate, "serial_desynchronized", False))
+
+    def last_setpoint_tx_monotonic_ns(self, channel: str) -> int | None:
+        reader = getattr(self._delegate, "last_setpoint_tx_monotonic_ns", None)
+        if not callable(reader):
+            return None
+        value = reader(channel)
+        return None if value is None else int(value)
+
+    def last_setpoint_readback_sccm(self, channel: str) -> float | None:
+        """Expose the delegate's verified Poll readback without authorizing a new write."""
+        reader = getattr(self._delegate, "last_setpoint_readback_sccm", None)
+        if not callable(reader):
+            return None
+        value = reader(channel)
+        return None if value is None else float(value)
 
     def stop_heaters(self) -> bool:
         return bool(self._delegate.stop_heaters())
