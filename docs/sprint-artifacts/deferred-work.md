@@ -19,3 +19,7 @@
 - source_spec: `docs/archive/spec-c3b-serial-transaction-framing.md`
   summary: 用当前三台 Alicat 的只读 Poll/VE/LSS latency evidence 收敛 frame deadline 与 initial resynchronization quiet 边界。
   evidence: Alicat ASCII 无 request sequence ID；若同 ID/同类型 stale frame 晚于 provisional bounded quiet 才到达，内容校验无法证明归属。需要下一轮只读 HIL 记录 latency 后才能验证或调整当前 `0.2 s` frame deadline及派生 quiet window。
+
+- source_spec: `docs/sprint-artifacts/evidence/c-3b-final-real-connect-global-stop-2026-09-15.md`
+  summary: 低优先级调查正常 GUI 退出时 Python GC 报告的 uncollectable objects ResourceWarning。
+  evidence: C.3b-3 最终严格实机复测由用户正常关闭窗口、worker teardown 完成、4/4 DO task 与 COM6 释放、进程自然 exit code=0；仅在退出时出现 `gc: 27 uncollectable objects` 警告。当前没有长时间运行或硬件资源未释放的证据，不作为 C.3b-4 HIL blocker。
