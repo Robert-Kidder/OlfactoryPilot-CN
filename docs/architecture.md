@@ -152,7 +152,7 @@ Auto external-trigger ingress 与 canonical execution core 必须解耦。USB-65
 ### 手动实验执行纵切片
 
 - 使用 Intent → Command → Receipt → immutable Snapshot。View 只保留未提交 draft 和即时视觉反馈，不直接访问 HAL、不持有硬件状态。
-- `FlowSetpoints` 以独立 A/B/C 为 authority，派生 `A+B` 只用于展示和已确认的 total-delivery ceiling；旧配置 `flow_limits_sccm.total` 保留原义，不重解释为 B MFC 上限。sample A 用户上限与未来 compensation A-controller `A+C` 上限是不同语义，后者没有证据时不得猜测。
+- `FlowSetpoints` 以独立 A/B/C 为 authority，派生 `A+B` 只用于展示和已确认的 total-delivery ceiling；旧配置 `flow_limits_sccm.total` 保留原义，不重解释为 B MFC 上限。2026-09-15 现场人工确认 A/B/C 为相同型号、满量程均为 5000 sccm，因此三路 device capacity 为 5000/5000/5000；历史 A 型号记录为 `MC-5NLPM-D`，当前逐台身份仍应在实机前核对。sample A 用户上限与 compensation A-controller `A+C` 上限仍是不同语义，`A+C` 必须受 A 的 5000 sccm capacity 约束。device capacity 不构成动作授权，当前 commissioning approved maxima 仍为 500/0/0 sccm。
 - 手动供气和刺激阶段由 ActuationWorker/协调器持有。baseline/restore 使用直接目标 `A+C/B/C`，stimulus 使用 `A/B/0`，避免 `FlowService` 的 `rest` mode 二次补偿。刺激持续时间从全部目标成功 open receipt 的共同就绪时刻起算，由 monotonic deadline 自动关闭；UI `QTimer` 只刷新倒计时。
 - 未来自动实验只能生成相同的 typed phase plan，复用 ActuationWorker、FlowWorker、HAL、lease、epoch 和 receipt，不能模拟 UI 点击。
 - QFluentWidgets 手动实验 UI 复用该执行纵切片；正式 runtime 不构造 legacy View。

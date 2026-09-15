@@ -2,7 +2,7 @@
 title: C.3b-4 非零气流与补偿气路 commissioning
 type: commissioning-spec
 created: 2026-09-15
-status: done
+status: in-progress
 route: offline-implementation
 context: []
 baseline_commit: 5ef6500e942ef6e310d5f2ddc392cf2d270b7806
@@ -12,9 +12,9 @@ baseline_commit: 5ef6500e942ef6e310d5f2ddc392cf2d270b7806
 
 ## 意图与边界
 
-本阶段逐级确认洁净 Air 的非零 Alicat 设定、独立回读、实际流量稳定，以及开放的补偿出口。一次只增加一个物理变量；每个实机子阶段都以全部清零、selector 回 COMPENSATION、20 个气味阀关闭、Global Stop 安全收口和资源释放为退出门。当前批准范围仅为第 0 阶段离线代码整改、Fake/Mock、review 和验证；后续单独实机授权前，**不启动 Real App 实机、不写非零 setpoint、不切真实 selector、不操作真实气味阀**。非零流量不与 odor selector HIGH 或气味阀操作组合。
+本阶段逐级确认洁净 Air 的非零 Alicat 设定、独立回读、实际流量稳定，以及开放的补偿出口。一次只增加一个物理变量；每个实机子阶段都以全部清零、selector 回 COMPENSATION、20 个气味阀关闭、Global Stop 安全收口和资源释放为退出门。第 0 阶段离线代码整改、Fake/Mock、review 和验证已经完成；后续单独实机授权前，**不启动 Real App 实机、不写非零 setpoint、不切真实 selector、不操作真实气味阀**。非零流量不与 odor selector HIGH 或气味阀操作组合。
 
-**分级审批门禁**：本轮只能审批规格方向，**尚不能批准任何非零实机 HIL**。首个 **A-only、B=C=0** 子阶段受真实“开始供气”代码拒绝、A 当前身份/500 sccm 可控范围、A 入口压力及调压状态、洁净 Air 与 LOW 补偿出口实物通路、测试上限/最长时长及 settling 验收值阻断。B/C 量程未知，因此不授权其非零设定；若 B/C 的设定值和实际流量均独立回读为零，这一缺口不单独阻断 A-only 阶段。后续 **完整 baseline** 额外受 B/C 量程、B 主气流通路、C 吸气路径及 C>0/A=0 瞬态门禁阻断。详细待确认项见末节。
+**分级审批门禁**：本轮只能审批规格方向，**尚不能批准任何非零实机 HIL**。首个 **A-only、B=C=0** 子阶段仍受 A 当前身份/500 sccm 可控范围、A 入口压力及调压状态、洁净 Air 与 LOW 补偿出口实物通路、测试上限/最长时长及现场明确授权阻断。2026-09-15 操作者补充现场人工事实：A/B/C 为相同型号，满量程均为 5000 ml/min（5000 sccm）；历史 A 型号记录为 `MC-5NLPM-D`，但本次信息未提供三台当前逐台型号铭牌/序列号。这只解除 device capacity 未知项，**不改变 commissioning approved maxima=500/0/0 sccm**。后续 **完整 baseline** 仍受 B/C 非零 commissioning limit、B 主气流通路、C 吸气路径及 C>0/A=0 瞬态门禁阻断。详细待确认项见末节。
 
 不属于本轮：气味口开启、Manual release、8 路验证、Auto/Protocol、清洗维护、timing benchmark。普通 UI 继续只显示产品流量和连接状态；技术回执与时序只进入日志/evidence。
 
@@ -22,25 +22,25 @@ baseline_commit: 5ef6500e942ef6e310d5f2ddc392cf2d270b7806
 
 用户独立输入 A=sample flow、B=main flow、C=vacuum flow；total delivery=A+B。baseline/restore 的 controller targets 为 **A-controller=A+C，B-controller=B，C-controller=C**；stimulus 为 **A-controller=A，B-controller=B，C-controller=0**。B 全程保持用户设定，不恢复旧的 editable total / B=T−A 模型。[长期规则](../project-context.md)、[气路历史证据](evidence/gas-path-requirements-2026-08-01.md)。当前 `ActuationWorker` 的 baseline/stimulus/restore 按此生成目标；`FlowService` 保持 B→C→A 写入顺序。
 
-真实 UI 的“开始供气”目前被 `MainController.handle_manual_supply_requested()` 的 `not simulation_mode` 门禁明确拒绝。不能用旧的 `handle_apply_request`、脚本或直接 HAL 调用绕过。本轮获准只通过该权威入口完成离线门禁整改、量程/settling/hold 校验和 Fake/Mock regression；不得借整改执行或授权任何真实命令。
+真实 UI 的“开始供气”曾被 `MainController.handle_manual_supply_requested()` 的 `not simulation_mode` blanket 门禁拒绝；第 0 阶段已离线整改为默认关闭的 `real_supply_policy` 门禁，仍只能由该权威入口按 Controller→Worker→HAL 请求。不能用旧的 `handle_apply_request`、脚本或直接 HAL 调用绕过；容量事实更新也不授权任何真实命令。
 
 ## 设备量程与上限事实
 
 | 控制器 | 真实设备证据 | 当前软件限制 | 实机前缺口 |
 | --- | --- | --- | --- |
-| A | 历史只读设备回报 `MC-5NLPM-D`、SN `486285`、满量程 `5.0000 NLPM = 5000 sccm` | sample A 输入 ≤5000 sccm | 当前项目批准的非零 HIL 上限、当前本机允许入口压力与现场实际压力、500 sccm 控制/验收依据；baseline 的 A+C 还须 ≤A 真实允许范围 |
-| B | 通信/ID/零流量已真实确认；型号、满量程未见可信证据 | `max_total_sccm=5000` 仅限制 A+B，**不是 B 单机上限** | 人工或可信设备资料确认型号、满量程、允许 setpoint、项目批准上限 |
-| C | 通信/ID/零流量已真实确认；型号、满量程未见可信证据 | vacuum C 输入 ≤5000 sccm，仅为软件上限 | 人工或可信设备资料确认型号、满量程、允许 setpoint、项目批准上限与真实吸气路径 |
+| A | 历史只读记录型号 `MC-5NLPM-D`、SN `486285`；2026-09-15 现场人工确认当前满量程 `5.0000 NLPM = 5000 sccm`，但本次未重报序列号 | device capacity=5000；commissioning approved max=500 | 当前身份/允许入口压力与现场实际压力、500 sccm 控制/验收及单独实机授权；baseline 的 A+C 还须 ≤5000 |
+| B | 2026-09-15 现场人工确认与 A/C 同型号、满量程 `5000 ml/min = 5000 sccm`；未提供当前逐台型号/序列号记录；通信/ID/零流量已真实确认 | device capacity=5000；commissioning approved max=0 | 容量已知不等于非零授权；完整 baseline 仍须另批 B test point、主气流通路与压力边界 |
+| C | 2026-09-15 现场人工确认与 A/B 同型号、满量程 `5000 ml/min = 5000 sccm`；未提供当前逐台型号/序列号记录；通信/ID/零流量已真实确认 | device capacity=5000；commissioning approved max=0 | 容量已知不等于非零授权；完整 baseline 仍须另批 C test point、真实吸气路径与过渡安全 |
 
 `config/local_config.json` 当前为 Real、COM6@19200、a/b/c、Dev1/Dev2，启用气口 2/4/6/8/12/14/16/18；selector 为 Dev2/P1.0，LOW=COMPENSATION、HIGH=ODOR。C.3b-3 的 21 路安全 LOW 证据只证明零流量连接/停止，不证明新非零气流安全。任何配置、设备身份、出口或气路变化都要求 HALT 和重审，不能套用旧证据。
 
-首轮前须确认当前现场 A **仍是**上述型号、序列号和量程，优先直接核对可查看的设备铭牌/面板，或使用已有可信、可追溯的现场设备记录；历史 Story 4.5 回报不能独自证明当前未换机。Alicat 官方只读 manufacturer-info 语法为 `[unit ID]??M*<CR>`，历史本机回报呈多行，而当前 `AlicatSerialSession` 严格按单个 CR frame 完成一问一答。**不在本轮把多行命令塞入现有单帧 transaction，也不要求为 A-only 新增该功能**；人工/现有可信记录足以确认 A 时即可满足身份门禁。B/C 因面板难查看，后续可另立只读 multi-frame manufacturer-info 规格，不能与本轮 A-only 混做。[Alicat 官方串口命令说明](https://www.alicat.com/support/serial-communication-tutorial/)。
+首轮前须确认当前现场 A **仍是**上述型号、序列号和量程，优先直接核对可查看的设备铭牌/面板，或使用已有可信、可追溯的现场设备记录；历史 Story 4.5 回报不能独自证明当前未换机。Alicat 官方只读 manufacturer-info 语法为 `[unit ID]??M*<CR>`，历史本机回报呈多行，而当前 `AlicatSerialSession` 严格按单个 CR frame 完成一问一答。**不在本轮把多行命令塞入现有单帧 transaction，也不要求为 A-only 新增该功能**；本次人工确认已经成为 A/B/C 同型号、三路容量均为 5000 sccm 的当前 authority。若以后需要补充逐台序列号追溯，可另立只读 multi-frame manufacturer-info 规格，不能与本轮 A-only 混做。[Alicat 官方串口命令说明](https://www.alicat.com/support/serial-communication-tutorial/)。
 
 ## 首轮候选值与待批准条件
 
-**仅提出候选：用户 A=500、B=0、C=0 sccm；baseline 实际 targets=500/0/0 sccm。不是本规格自动授权的实机命令。** 500 为已知 A 满量程 5000 sccm 的 10%，是历史开放补偿出口 A=2500 sccm 稳定实测点的 1/5；B/C 保持 0，避免用未知 B/C 量程和未追踪 C 真空路径试探。Alicat 公开的 **MC 10 SCCM–20 SLPM 系列**标准稳态控制范围为 0.01%–100% FS；因此 10% FS 是设备家族控制范围内的合理候选，不是贴近家族下限的试探值。这只是 **family-level supporting evidence**，不能替代当前 SN `486285` 的实际校准/配置、现场压力和本次稳定验收标准。[官方 MC 系列技术资料](https://documents.alicat.com/specifications/DOC-SPECS-MC-MID.pdf)。人工仍须先确认本机在 500 sccm 可控、洁净 Air 与补偿出口畅通、批准该值和最大持续时间；若证据不足，不定测试点、不写硬件。不能在不稳定时自行升至 1000/1500/2500 或改 B/C。
+**仅提出候选：用户 A=500、B=0、C=0 sccm；baseline 实际 targets=500/0/0 sccm。不是本规格自动授权的实机命令。** 500 为 A 满量程 5000 sccm 的 10%，是历史开放补偿出口 A=2500 sccm 稳定实测点的 1/5；B/C 虽也确认具有 5000 sccm device capacity，仍因 commissioning approved max=0 必须保持 0，并继续避开未追踪的 B 主气流和 C 真空路径。Alicat 公开的 **MC 10 SCCM–20 SLPM 系列**标准稳态控制范围为 0.01%–100% FS；因此 10% FS 是设备家族控制范围内的合理候选，不是贴近家族下限的试探值。这只是 **family-level supporting evidence**，不能替代当前 SN `486285` 的实际校准/配置、现场压力和本次稳定验收标准。[官方 MC 系列技术资料](https://documents.alicat.com/specifications/DOC-SPECS-MC-MID.pdf)。人工仍须先确认本机在 500 sccm 可控、洁净 Air 与补偿出口畅通、批准该值和最大持续时间；若证据不足，不定测试点、不写硬件。不能在不稳定时自行升至 1000/1500/2500 或改 B/C。
 
-完整 baseline 的 B/C 非零组合**暂不设数值**。B/C 真实范围、C 吸气路径和 A+C 容量门禁确认后，另行明确低风险 A/B/C 组合、批准上限与单独动作授权；不可仅因软件 `max_total_sccm` 或历史示例选择值，也不可孤立给 C 非零。
+完整 baseline 的 B/C 非零组合**暂不设数值**。三台 5000 sccm device capacity 已确认，但 B/C commissioning approved max 仍为 0；只有 C 吸气路径、B 主气流通路、A+C 容量门禁和新的人工批准均完成后，才能另行明确低风险 A/B/C 组合与非零批准上限。不可仅因设备容量、软件 `max_total_sccm` 或历史示例选择值，也不可孤立给 C 非零。
 
 现有 B→C→A 安全顺序及 supply-only 前置 `manual_post_close_a_zero` 在未来 C 非零时，都可能形成 **C>0、A=0** 的瞬态；“成套 baseline 目标”并不能消除这个过渡。必须先用真实气路证据证明该瞬态与吸气路径安全，或在另行授权的离线设计中提出兼容现有安全偏序的方案；还须确认 B 主气流的实际出口、开放通路与压力边界。未证明前 B/C 保持 0，不进入完整 baseline 实机阶段。C 不得孤立非零。
 
@@ -67,14 +67,14 @@ PASS 只可基于：目标及回读一致、连续新鲜实际流量在批准容
 
 新 evidence 必须留存每个 command target/response、独立 Poll raw frame 与解析值、mass-flow 样本和 settling 时戳、Controller phase、现场观察、每次 zero/Global Stop 的 exact receipts、DO/serial release、最终 Poll/LSS、异常与操作者停机记录；历史 C.3b-3 PASS 与早期 FAIL 不改写。Mock/Fake 和 simulation 只作离线保障，不作非零实机证据。
 
-审批 A-only 前需确认：① 通过可查看的铭牌/面板或可信现场记录确认当前 A 型号/序列号/量程及 500 sccm 可控性；不强制新增多帧 manufacturer-info；② 本机允许入口压力、当前现场压力/调压器状态、预期洁净 Air、实物 LOW 入口 2→出口 3 及出口畅通，**压力任何一项无法确认即 BLOCKED**；③ 首轮 requested、accepted/readback、measured mass-flow 三类容差、连续样本数、settling 窗口/期限与最长非零持续时间，全部实机前离线定稿；④ 真实“开始供气”门禁、唯一 owner 采样、desync fail-closed 与容量门禁离线整改通过复审。B/C 零设定和零实际流量要独立回读。审批完整 baseline 额外需要 B/C 型号/满量程/允许值、B 主气流出口/压力边界、C 吸气路径及 C>0/A=0 瞬态安全证明。**相应门禁未解决时，该子阶段非零实机 HIL BLOCKED。** 当前离线实现完成后立即停止；规格批准与代码就绪均不等于批准任一真实硬件命令。
+审批 A-only 前需确认：① 通过可查看的铭牌/面板或可信现场记录确认当前 A 型号/序列号/量程及 500 sccm 可控性；不强制新增多帧 manufacturer-info；② 本机允许入口压力、当前现场压力/调压器状态、预期洁净 Air、实物 LOW 入口 2→出口 3 及出口畅通，**压力任何一项无法确认即 BLOCKED**；③ 首轮 requested、accepted/readback、measured mass-flow 三类容差、连续样本数、settling 窗口/期限与最长非零持续时间，全部实机前离线定稿；④ 真实“开始供气”门禁、唯一 owner 采样、desync fail-closed 与容量门禁离线整改通过复审。B/C 零设定和零实际流量要独立回读。审批完整 baseline 不再缺 B/C 满量程事实，但仍额外需要 B/C 非零 commissioning test point/approved limit、B 主气流出口/压力边界、C 吸气路径及 C>0/A=0 瞬态安全证明。**相应门禁未解决时，该子阶段非零实机 HIL BLOCKED。** 当前离线实现完成后立即停止；规格批准与代码就绪均不等于批准任一真实硬件命令。
 
 ## Tasks & Acceptance
 
 第 0 阶段离线默认值冻结为：requested setpoint tolerance=`1e-9 sccm`（软件 intent 数值一致性）；accepted/readback tolerance=`1.0 sccm`（不沿用约 50 sccm 的旧默认）；active measured mass-flow stability tolerance=`±25 sccm`，zero-channel tolerance=`≤5 sccm`；连续有效样本数=`6` 且首末样本覆盖至少 `1.0 s`；maximum settling deadline=`5.0 s`；maximum non-zero hold duration=`15.0 s`，从首个非零 TX 单调时戳起算。500 sccm 下 family-level 标准精度量级约为 ±5 sccm（±0.6% reading 与 ±0.1% FS 取较大），±25 sccm 是只用于首轮 commissioning 的保守稳定带，不冒充本机校准精度。所有值必须进入结构化、默认禁用的 Real supply policy；现场资料或人工批准改变数值时，须在实机前离线改配置并重跑边界测试，运行中不可修改。当前 policy 必须保持 `enabled=false`，所以本轮代码不会授权 500 sccm。
 
-- [x] **真实供气权威入口与容量门禁**（`app/controllers/main_controller.py`、配置/模型及对应测试）：移除 Real 模式 blanket rejection，但只允许唯一 Controller→Worker→HAL transaction。A/B/C 设备容量以明确配置表达，未知容量的通道只允许 0；A target 必须校验 baseline 的 A+C，B/C 非零分别要求已知容量；A=500/B=C=0 不硬编码为自动动作。
-  - Given Real 已连接且容量配置 A=5000、B/C 未知，When 请求 500/0/0，Then 仅提交一次现有 supply-only plan；When B或C>0，Then 零硬件提交并返回明确门禁失败；When A+C>5000，Then 零硬件提交。
+- [x] **真实供气权威入口与容量门禁**（`app/controllers/main_controller.py`、配置/模型及对应测试）：移除 Real 模式 blanket rejection，但只允许唯一 Controller→Worker→HAL transaction。A/B/C device capacity 均明确为 5000；A target 必须校验 baseline 的 A+C；B/C 当前 approved limit=0，容量已知不得绕过 commissioning limit；A=500/B=C=0 不硬编码为自动动作。
+  - Given Real 已连接且 device capacity=5000/5000/5000、commissioning approved maxima=500/0/0，When 请求 500/0/0，Then 仅提交一次现有 supply-only plan；When B或C>0，Then 因 approved limit=0 而零硬件提交；When A+C>5000，Then 因 A capacity 而零硬件提交。
 - [x] **三路可信实际流量采样**（`app/workers/flow_worker.py`、`app/services/real_hal.py`/协议接口及测试）：连接状态下仅 FlowWorker 串行采集 A/B/C 的完整 Poll readback，发布带 unit、setpoint、mass flow、freshness/monotonic timestamp 的快照；不得创建第二个 serial session。
   - Given 一个已连接 serial owner，When 采集三路，Then A→B→C transaction 严格串行且只使用同一 owner；任一 timeout/partial/mismatch/desync 时不发布伪造的 0 或 fresh-ready。
 - [x] **三类 tolerance 与 settling/hold 门禁**（配置、worker/controller 状态机及测试）：分别定义 requested setpoint、accepted/readback、measured mass-flow stability tolerance；定义连续有效样本数、settling observation window、maximum settling deadline、maximum non-zero hold duration。值必须可审计且在首个非零 TX 前冻结；最大持流从首个非零 TX 单调时戳起算并触发既有 Global Stop/SafeStop，不恢复旧动作。
@@ -103,7 +103,7 @@ PASS 只可基于：目标及回读一致、连续新鲜实际流量在批准容
 | EC-3 相同 restore 可在授权消费前重复入队 | high | patch | submit 与执行前均检查但首个执行后 authorization 变为 `None`，第二条会落入普通 manual 放行路径。 |
 | EC-4 authorization cancel 与 receipt gate 存在竞态 | high | patch | receipt gate 未持 `_condition`；cancel 可在读取 authorization 后清除，随后 monitor 被重新建立。 |
 | EC-5 无 airflow sink 时 monitor 不轮询 | high | patch | run loop 和 `_poll_airflow()` 都以 sink 为前提，可能使 maximum hold 无法执行。 |
-| BH-1 enabled 配置省略容量/批准上限时使用默认值 | false | reject | 正式应用先合并版本化 default config；A=5000 与 A-only 上限 500 是本阶段冻结配置，`enabled=false` 才是实机授权门。仍补 parser 负向校验，避免原始畸形输入被吞掉。 |
+| BH-1 enabled 配置省略容量/批准上限时使用默认值 | false | reject | 正式应用先合并版本化 default config；当前 A/B/C device capacity=5000/5000/5000 与 commissioning approved maxima=500/0/0 是冻结配置，`enabled=false` 才是实机授权门。仍补 parser 负向校验，避免原始畸形输入被吞掉。 |
 | BH-2 falsey 非 Mapping 被 `or {}` 吞掉 | medium | patch | `[]`、空字符串、0 会被当成缺省对象，削弱配置验证。 |
 | BH-3 缺少身份/压力/Air/通路逐项布尔 attestation | false | reject | 这些是下一轮明确的现场人工门禁；唯一 `enabled` 是本地、默认关闭且需单独改动的总体授权门，不是普通 UI 设置。本轮不把现场清单扩成产品配置框架。 |
 | BH-4 `manual_post_close_a_zero` 未采用 commissioning 严格读回 | high | patch | 当前仅 restore 使用 1.0 sccm 门禁，pre-close 可能依据较宽 legacy setpoint tolerance 前进 selector。 |
@@ -127,3 +127,5 @@ PASS 只可基于：目标及回读一致、连续新鲜实际流量在批准容
 - 独立 review 共登记 23 项 finding：17 项修补，6 项因超范围、破坏唯一硬件 owner 或重复安全时基而有证据拒绝；详见上表。补强包括严格容量边界、连续样本失效重置、授权消费/取消竞态、三路实际读回安全收口、Air 校验及低频结构化样本审计。
 - 2026-09-15 离线验证：定向回归 `246 passed`；完整 `pytest` 为 `1427 passed, 1 skipped`；`python -m ruff check .`、`git diff --check`、PyInstaller 构建和 offscreen Mock simulation 均通过。既有 Python GC `ResourceWarning` 已记录在 deferred work；Mock/Fake PASS 不构成真实非零硬件证据。
 - 全程未打开 COM6、未创建真实 NI task、未启动 Real App 实机、未向 Alicat 写入 setpoint，也未切换真实 selector 或气味阀。`A=500, B=C=0` 仍只是下一轮候选，必须通过本文现场门禁并获得单独人工授权。
+
+2026-09-16 authority 修订：2026-09-15 操作者补充 A/B/C 同型号、各 5000 sccm 满量程事实，版本化 device capacity 已统一为 5000/5000/5000；commissioning approved maxima 保持 500/0/0，默认 `enabled=false`。B/C 非零继续由批准上限 0 在硬件提交前拒绝，而非由“容量未知”拒绝。第 0 阶段离线实现已完成，但 C.3b-4 真实非零 HIL 尚未获授权或执行，因此本总规格保留活动状态 `in-progress`。

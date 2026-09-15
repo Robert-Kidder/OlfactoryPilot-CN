@@ -31,7 +31,7 @@ def _policy(**changes) -> RealSupplyPolicy:
     raw = {
         "real_supply_policy": {
             "enabled": True,
-            "device_capacities_sccm": {"A": 5000, "B": None, "C": None},
+            "device_capacities_sccm": {"A": 5000, "B": 5000, "C": 5000},
             "requested_setpoint_tolerance_sccm": 1e-9,
             "accepted_readback_tolerance_sccm": 1.0,
             "active_mass_flow_tolerance_sccm": 25.0,
@@ -95,11 +95,43 @@ def test_real_supply_policy_defaults_are_disabled_and_frozen() -> None:
     assert policy.observation_window_s == 1.0
     assert policy.maximum_settling_deadline_s == 5.0
     assert policy.maximum_nonzero_hold_duration_s == 15.0
+    assert (
+        policy.capacities.a_sccm,
+        policy.capacities.b_sccm,
+        policy.capacities.c_sccm,
+    ) == (5000.0, 5000.0, 5000.0)
+    assert (
+        policy.approved_maxima.a_sccm,
+        policy.approved_maxima.b_sccm,
+        policy.approved_maxima.c_sccm,
+    ) == (500.0, 0.0, 0.0)
     with pytest.raises(FrozenInstanceError):
         policy.enabled = True  # type: ignore[misc]
 
 
-def test_capacity_gate_uses_a_plus_c_and_unknown_channels_only_allow_zero() -> None:
+@pytest.mark.parametrize(
+    "path",
+    (Path("config/default_config.json"), Path("config/local_config.example.json")),
+)
+def test_versioned_configs_separate_device_capacity_from_approved_limits(
+    path: Path,
+) -> None:
+    raw = json.loads(path.read_text(encoding="utf-8"))["real_supply_policy"]
+
+    assert raw["enabled"] is False
+    assert raw["device_capacities_sccm"] == {
+        "A": 5000.0,
+        "B": 5000.0,
+        "C": 5000.0,
+    }
+    assert raw["commissioning_approved_maxima_sccm"] == {
+        "A": 500.0,
+        "B": 0.0,
+        "C": 0.0,
+    }
+
+
+def test_capacity_gate_uses_a_plus_c_and_approved_limits_keep_b_c_zero() -> None:
     policy = _policy()
 
     assert policy.controller_targets(
@@ -119,19 +151,19 @@ def test_capacity_gate_uses_a_plus_c_and_unknown_channels_only_allow_zero() -> N
             main_b_sccm=0,
             vacuum_c_sccm=0,
         )
-    with pytest.raises(ValueError, match="B 设备容量未知"):
+    with pytest.raises(ValueError, match="B controller target.*commissioning 批准上限"):
         policy.controller_targets(
             sample_a_sccm=500,
             main_b_sccm=1,
             vacuum_c_sccm=0,
         )
-    with pytest.raises(ValueError, match="C 设备容量未知"):
+    with pytest.raises(ValueError, match="C controller target.*commissioning 批准上限"):
         policy.controller_targets(
             sample_a_sccm=500,
             main_b_sccm=0,
             vacuum_c_sccm=1,
         )
-    with pytest.raises(ValueError, match="B 设备容量未知"):
+    with pytest.raises(ValueError, match="B controller target.*commissioning 批准上限"):
         policy.controller_targets(
             sample_a_sccm=1,
             main_b_sccm=5e-10,
@@ -154,12 +186,45 @@ def test_capacity_gate_uses_a_plus_c_and_unknown_channels_only_allow_zero() -> N
             main_b_sccm=0,
             vacuum_c_sccm=0,
         )
-    known_b = replace(policy, capacities=replace(policy.capacities, b_sccm=1000))
-    with pytest.raises(ValueError, match="B controller target.*commissioning 批准上限"):
-        known_b.controller_targets(
-            sample_a_sccm=500,
-            main_b_sccm=1,
+    with pytest.raises(ValueError, match="B 设备容量未知时.*批准上限必须为 0"):
+        replace(
+            policy,
+            capacities=replace(policy.capacities, b_sccm=None),
+            approved_maxima=replace(policy.approved_maxima, b_sccm=1.0),
+        )
+    b_capacity_policy = replace(
+        policy,
+        approved_maxima=replace(policy.approved_maxima, b_sccm=5000.0),
+    )
+    assert b_capacity_policy.controller_targets(
+        sample_a_sccm=0,
+        main_b_sccm=5000,
+        vacuum_c_sccm=0,
+    ) == (0.0, 5000.0, 0.0)
+    with pytest.raises(ValueError, match="B controller target.*设备容量"):
+        b_capacity_policy.controller_targets(
+            sample_a_sccm=0,
+            main_b_sccm=5000.001,
             vacuum_c_sccm=0,
+        )
+    c_capacity_policy = replace(
+        policy,
+        approved_maxima=replace(
+            policy.approved_maxima,
+            a_sccm=5000.0,
+            c_sccm=5000.0,
+        ),
+    )
+    assert c_capacity_policy.controller_targets(
+        sample_a_sccm=0,
+        main_b_sccm=0,
+        vacuum_c_sccm=5000,
+    ) == (5000.0, 0.0, 5000.0)
+    with pytest.raises(ValueError, match="C controller target.*设备容量"):
+        c_capacity_policy.controller_targets(
+            sample_a_sccm=0,
+            main_b_sccm=0,
+            vacuum_c_sccm=5000.001,
         )
     known_c = replace(
         policy,

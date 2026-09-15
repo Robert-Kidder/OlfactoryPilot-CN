@@ -94,6 +94,8 @@ OlfactoryPilot-CN 是用于嗅觉刺激实验的 Windows 桌面控制软件，�
 
 Manual 长期领域规则：可编辑 setpoint 只有独立 A/B/C；`total_delivery=A+B` 仅为派生值，B 在正常供气、selector 切换、刺激和恢复期间保持用户设定不变。baseline/restore controller targets=`A+C/B/C`，stimulus=`A/B/0`。
 
+2026-09-15 现场人工确认 A/B/C 为相同型号、各满量程 5000 sccm；当前 device capacity=`5000/5000/5000`，baseline 的 A-controller `A+C` 必须受 A 容量约束。容量不是动作授权：C.3b-4 当前 commissioning approved maxima 仍为 `500/0/0`，B/C 非零、完整 baseline 与真实 A-only HIL 均须另行明确授权和现场安全门禁。
+
 - NI USB-6001 `Dev1`
   - `AI0`：呼吸传感器模拟输入。
   - `AI6`：外部 TTL 触发输入。

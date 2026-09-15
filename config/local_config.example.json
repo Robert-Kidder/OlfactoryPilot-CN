@@ -19,8 +19,8 @@
     "enabled": false,
     "device_capacities_sccm": {
       "A": 5000.0,
-      "B": null,
-      "C": null
+      "B": 5000.0,
+      "C": 5000.0
     },
     "commissioning_approved_maxima_sccm": {
       "A": 500.0,

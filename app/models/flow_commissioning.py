@@ -37,8 +37,8 @@ class FlowDeviceCapacities:
     """真实 MFC 容量；未知容量必须显式保留为 ``None``。"""
 
     a_sccm: float | None = 5000.0
-    b_sccm: float | None = None
-    c_sccm: float | None = None
+    b_sccm: float | None = 5000.0
+    c_sccm: float | None = 5000.0
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "a_sccm", _capacity(self.a_sccm, "A 设备容量"))
@@ -146,8 +146,8 @@ class RealSupplyPolicy:
             enabled=raw.get("enabled", False),
             capacities=FlowDeviceCapacities(
                 a_sccm=capacities_raw.get("A", 5000.0),
-                b_sccm=capacities_raw.get("B"),
-                c_sccm=capacities_raw.get("C"),
+                b_sccm=capacities_raw.get("B", 5000.0),
+                c_sccm=capacities_raw.get("C", 5000.0),
             ),
             approved_maxima=CommissioningApprovedMaxima(
                 a_sccm=approved_raw.get("A", 500.0),
