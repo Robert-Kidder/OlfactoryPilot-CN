@@ -1,6 +1,6 @@
 # C.3b HIL Commissioning Checklist（进行中）
 
-> **状态：C.3b-1、C.3b-2A、VE/LSS 只读查询和 C.3b-2C 已完成；C.3b-3 首次真实自动连接通过，但第一次真实 Global Stop 因 NI-DAQmx `-200846` 无法确认阀门/selector 安全收口，当前阻断。Global Stop 离线修复后的复测 preflight 又发现 Alicat CR framing/迟到响应归属问题，因此 Real App 仍未重新启动。** 证据见 [live-data poll](c-3b-2a-alicat-read-only-poll-2026-09-10.md)、[VE/LSS 查询](c-3b-alicat-ve-lss-read-only-2026-09-10.md)、[2C 规范化](c-3b-alicat-safe-state-normalization-2026-09-10.md)、[首次真实连接/停止](c-3b-first-real-app-connect-2026-09-14.md) 和 [LSS 只读响应错位诊断](c-3b-lss-readonly-diagnostic-2026-09-14.md)。本文件不代表真实气口验证完成。
+> **状态：C.3b-1、C.3b-2A、VE/LSS 只读查询、C.3b-2C 与新的 Alicat CR-framed transaction 实机只读验证已完成。第一次真实 Global Stop 因 NI-DAQmx `-200846` 失败；2026-09-15 人工“重新连接”后的 Global Stop 核心复测已成功，未再出现 `-200846`，selector 与气味阀关闭回执均成功。但本次不是 startup auto-connect acquisition，且两个 10 秒观察窗不足，因此完整 C.3b-3 仍阻断，等待一次严格同规格重跑。** 证据见 [首次真实连接/停止失败](c-3b-first-real-app-connect-2026-09-14.md)、[LSS 响应错位诊断](c-3b-lss-readonly-diagnostic-2026-09-14.md)、[Alicat transaction/latency](c-3b-alicat-transaction-latency-2026-09-15.md) 和 [真实连接/Global Stop 复测](c-3b-first-real-app-connect-retest-2026-09-15.md)。本文件不代表真实气口验证完成。
 
 ## 现场门禁
 
@@ -26,10 +26,10 @@
 | Alicat B | 规范化通过 | firmware `10v14.0-R24`；LSS `S → U`，最终 setpoint=`0` |
 | Alicat C | 规范化通过 | firmware `10v14.0-R24`；LSS `S → U`，最终 setpoint=`0` |
 | 现场安全准备 | 通过 | 无受试者/气味样品，出口畅通，操作者可立即停止/断电 |
-| 真实 App Connect | **连接通过，停止阻断** | 2026-09-14 startup auto-connect exactly once；self-check 与 B/C/A zero 通过；Global Stop 进入 `RECOVERY_REQUIRED` |
+| 真实 App Connect | **连接 transaction 通过；完整 startup 复测未完成** | 2026-09-15 startup 被历史 unsafe-shutdown latch 阻断；人工“重新连接”后 self-check、B/C/A zero 与 connected 通过 |
 | A/B/C 安全初值 | **通过** | 2C 最终 setpoint=`0/0/0 sccm`、mass flow=`0/0/0 sccm` |
-| Setpoint Source | **复测阻断** | 2C 最终 LSS=`U/U/U`；power-cycle 后 poll 为零，但本次 LSS direct query 因 timeout/响应错位未能可靠确认 |
-| 第一次真实 Global Stop | **失败/阻断** | A/B/C zero 成功；NI-DAQmx `-200846`；selector 与气味阀关闭回执不确定；操作者已断电 |
+| Setpoint Source | **实机复测通过** | 2026-09-15 新 production transaction 共 57 条只读采样及本轮前后检查均确认 LSS=`U/U/U`、setpoint/flow=`0/0/0` |
+| 真实 Global Stop | **首次失败；核心复测通过** | 2026-09-14 因 `-200846` 失败；2026-09-15 人工重新连接后 selector safe、20/20 valve close、A/B/C zero 和 shutdown success，未复现 `-200846`；完整 C.3b-3 仍待严格重跑 |
 
 ## 本轮记录
 
@@ -42,11 +42,13 @@
 - Alicat 安全初始状态规范化：`c-3b-alicat-safe-state-normalization-2026-09-10.md`
 - 首次真实 App 自动连接与安全停止：`c-3b-first-real-app-connect-2026-09-14.md`（Global Stop 失败，C.3b-3 阻断）
 - Power-cycle 后 LSS 只读诊断：`c-3b-lss-readonly-diagnostic-2026-09-14.md`（A/B/C LSS timeout；随后 `aVE` 收到 `A U`，响应归属不可信，Real App 未启动）
+- Alicat CR-framed transaction/latency：`c-3b-alicat-transaction-latency-2026-09-15.md`（57/57 transaction 成功，LSS=`U/U/U`，无 timeout/mismatch/desync）
+- 真实连接与 Global Stop 复测：`c-3b-first-real-app-connect-retest-2026-09-15.md`（人工重新连接后的 Global Stop 核心 PASS；完整 C.3b-3 因 startup 路径及观察时长不足仍阻断）
 - verification run identity：
 - 验证气口 / NI target / polarity：
 - flow setpoint / readback：
 - command 与 exact receipt 记录位置：
 - open / close / safe-close 时间：
-- 用户现场观察：首次自动连接和 zero-flow idle 期间 UI 显示“设备已连接”；没有气口出气，没有异常阀门/selector 动作或设备声响。Global Stop 失败后操作者已断电，仍未观察到上述异常。
-- 异常与 global stop/recovery 记录：2A 发现 A/B/C setpoint=`1500/1500/500 sccm`、LSS=`S/S/S`；2C 在明确授权下逐台规范化为 setpoint=`0/0/0`、LSS=`U/U/U`。2026-09-14 首次真实 Global Stop 的 A/B/C zero 成功，但 NI-DAQmx `-200846` 导致 selector/阀门关闭回执不确定并进入 `RECOVERY_REQUIRED`；本轮立即停止并人工断电。离线修复后重新 preflight 时，A/B/C poll 仍为零，但三台 LSS 均 timeout，且后续 `aVE` 收到 `A U`，因此按 response attribution blocker 停止，没有启动 Real App。
+- 用户现场观察：首次自动连接和 zero-flow idle 期间 UI 显示“设备已连接”；没有气口出气，没有异常阀门/selector 动作或设备声响。2026-09-15 人工重新连接及 Global Stop 核心复测期间同样未观察到气流、阀门/selector 动作或异常声响。
+- 异常与 global stop/recovery 记录：2A 发现 A/B/C setpoint=`1500/1500/500 sccm`、LSS=`S/S/S`；2C 规范化为 setpoint=`0/0/0`、LSS=`U/U/U`。2026-09-14 首次真实 Global Stop 因 NI-DAQmx `-200846` 进入 `RECOVERY_REQUIRED` 并人工断电。串口 framing 修复后，2026-09-15 read-only latency HIL 解除 response-attribution blocker；同日人工重新连接后的 Global Stop 未再出现 `-200846`，selector/20 路 valve/A-B-C zero 回执及 shutdown record 均成功，但完整 C.3b-3 因 startup 路径和观察时长不足仍待重跑。
 - 结论与审批签名：
